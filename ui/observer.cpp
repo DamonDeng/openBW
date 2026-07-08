@@ -123,6 +123,29 @@ int main(int argc, char** argv) {
 
 	ui.init();
 
+	// 2. Set up sync state and start the TCP connect BEFORE creating the
+	//    SDL2 window. Window creation on macOS can serialize through
+	//    WindowServer and stall for a while when multiple observers boot
+	//    at once. If we open the socket first, the TCP handshake runs in
+	//    parallel and is usually done by the time we enter the main loop.
+	action_state action_st;
+	sync_state sync_st;
+	sync_functions funcs(ui.st, action_st, sync_st);
+	game_load_functions::setup_info_t setup_info;
+	sync_st.setup_info = &setup_info;
+	sync_st.latency = 2;
+	sync_st.local_client->name = "openbw_observer";
+	if (!args.api_key.empty()) {
+		sync_st.outgoing_api_key = a_string(args.api_key.c_str());
+	}
+
+	sync_server_asio_tcp server;
+	server.connect(a_string(args.server_host.c_str()), args.server_port);
+	ui::log("[obs] connecting to %s:%d ...\n", args.server_host.c_str(), args.server_port);
+
+	// 3. Now create the window. Pump the io_service a few times while we
+	//    wait for the window to open, so the async_connect callback fires
+	//    promptly.
 	auto& wnd = ui.wnd;
 	wnd.create("openbw_observer", 0, 0, args.screen_width, args.screen_height);
 	ui.resize(args.screen_width, args.screen_height);
@@ -132,29 +155,21 @@ int main(int argc, char** argv) {
 	};
 	ui.set_image_data();
 
-	// 2. Set up sync state. This client stays at player_slot = -1 (observer).
-	//    The server's start_game broadcast will drive our sim forward.
-	action_state action_st;
-	sync_state sync_st;
-	sync_functions funcs(ui.st, action_st, sync_st);
-	game_load_functions::setup_info_t setup_info;
-	sync_st.setup_info = &setup_info;
-	sync_st.latency = 2;
-	sync_st.local_client->name = "openbw_observer";
-
-	// Stash our API key so on_new_client can send id_auth automatically
-	// once the async connect completes. Leave empty if the server has
-	// --no-auth; the id_auth handler on the server tolerates that.
-	if (!args.api_key.empty()) {
-		sync_st.outgoing_api_key = a_string(args.api_key.c_str());
+	// 4. Wait (briefly) for the sync connection to be established so we
+	//    don't enter the sim loop with a half-formed handshake. sync()
+	//    pumps the io_service.
+	auto connect_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while (sync_st.clients.size() < 2 && std::chrono::steady_clock::now() < connect_deadline) {
+		funcs.sync(server);
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	}
+	if (sync_st.clients.size() < 2) {
+		ui::log("[obs] WARNING: never connected to server; will keep retrying in main loop\n");
+	} else {
+		ui::log("[obs] connected to server (clients=%d)\n", (int)sync_st.clients.size());
 	}
 
-	// 3. Connect to server.
-	sync_server_asio_tcp server;
-	server.connect(a_string(args.server_host.c_str()), args.server_port);
-	ui::log("[obs] connecting to %s:%d ...\n", args.server_host.c_str(), args.server_port);
-
-	// 4. Main loop. next_frame drives sync + sim; ui.update handles render.
+	// 5. Main loop. next_frame drives sync + sim; ui.update handles render.
 	int last_logged_slot = -2;
 	while (true) {
 		funcs.next_frame(server);
