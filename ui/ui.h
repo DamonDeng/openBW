@@ -1277,17 +1277,19 @@ struct ui_functions: ui_util_functions {
 	// and paints:
 	//   - unexplored tiles (never seen by viewing_slot): solid black.
 	//   - fogged tiles (explored but not currently visible): darkened via
-	//     the tileset's dark palette LUT (light_pcx[6]).
+	//     the tileset's dark palette LUT.
 	// No-op when viewing_slot == -1 or out of range.
 	void draw_fog(uint8_t* data, size_t data_pitch) {
 		if (viewing_slot < 0 || viewing_slot >= 8) return;
 		const uint8_t bit = (uint8_t)(1u << viewing_slot);
-		// Dark palette LUT: light_pcx entries are 256-byte remap tables.
-		// Index 6 is the darkest. Fall back to a plain black fill if the
-		// LUT isn't available.
+		// BW's fog-of-war remap. dark_pcx is a 256x32 bank of 256-byte
+		// palette LUTs; row 7 is the canonical "fog" row (rows 0-6 are
+		// progressively dimmer daylight tints; light_pcx entries produced
+		// a green cast on jungle tilesets). Rows beyond 7 are for other
+		// effects (shadow=18, identity=31).
 		const uint8_t* dark_lut = nullptr;
-		if (tileset_img.light_pcx[6].data.size() >= 256) {
-			dark_lut = tileset_img.light_pcx[6].data.data();
+		if (tileset_img.dark_pcx.data.size() >= 256 * 8) {
+			dark_lut = &tileset_img.dark_pcx.data[256 * 7];
 		}
 
 		auto screen_tile = screen_tile_bounds();
@@ -1421,12 +1423,14 @@ struct ui_functions: ui_util_functions {
 
 		uint8_t* p = data + data_pitch * (size_t)area.from.y + (size_t)area.from.x;
 
-		// Fog for minimap: same polarity as tile grid.
+		// Fog for minimap: same polarity as tile grid. Use dark_pcx row 7
+		// (matches draw_fog) instead of light_pcx which produced a
+		// greenish tint on jungle tilesets.
 		const bool fog_active = viewing_slot >= 0 && viewing_slot < 8;
 		const uint8_t vbit = fog_active ? (uint8_t)(1u << viewing_slot) : 0;
 		const uint8_t* dark_lut = nullptr;
-		if (fog_active && tileset_img.light_pcx[6].data.size() >= 256) {
-			dark_lut = tileset_img.light_pcx[6].data.data();
+		if (fog_active && tileset_img.dark_pcx.data.size() >= 256 * 8) {
+			dark_lut = &tileset_img.dark_pcx.data[256 * 7];
 		}
 
 		size_t pitch = data_pitch - game_st.map_tile_width;
