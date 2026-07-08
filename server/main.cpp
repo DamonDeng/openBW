@@ -272,11 +272,35 @@ int main(int argc, char** argv) {
 		c.has_uid = true;
 		c.has_auth = true;
 		c.has_greeted = true;
+		// game_started is normally flipped when a client receives the
+		// id_game_started network message. Virtual clients have no
+		// socket and never receive that message, but the sim IS started
+		// on the server, so we set it directly. Without this,
+		// execute_scheduled_actions skips their queued actions.
+		c.game_started = true;
 		c.player_slot = slot;
 		c.frame = (uint8_t)sync_st.sync_frame;
 		c.name = bwgame::a_string("agent_") + bwgame::a_string(std::to_string(slot).c_str());
 		virtual_clients[slot] = &c;
 		fprintf(stderr, "[srv] registered virtual client for slot %d\n", slot);
+	}
+
+	// Debug: dump initial units per player so agents can see real unit
+	// ids until the observation serializer (task #11) lands. Note that
+	// unit_id embeds a 5-bit generation counter in the top bits, so raw
+	// unit_id.raw_value != unit index -- use the raw value in agent
+	// commands.
+	for (int slot = 0; slot < 8; ++slot) {
+		if (st.players[slot].controller != bwgame::player_t::controller_occupied &&
+		    st.players[slot].controller != bwgame::player_t::controller_computer_game) continue;
+		int count = 0;
+		for (auto* u : bwgame::ptr(st.player_units[slot])) {
+			auto uid = funcs.get_unit_id(u);
+			fprintf(stderr, "[srv] slot %d unit_id=%u type=%d pos=(%d,%d)\n",
+				slot, (unsigned)uid.raw_value, (int)u->unit_type->id,
+				u->position.x, u->position.y);
+			if (++count >= 4) { fprintf(stderr, "[srv]  ... (more units suppressed)\n"); break; }
+		}
 	}
 
 	// Command queue: producers push here from WebSocket handler threads;
