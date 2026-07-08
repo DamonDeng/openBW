@@ -16,7 +16,10 @@
 #include "replay_saver.h"
 
 #include "auth.h"
+#include "command_queue.h"
+#include "ws_server.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -48,6 +51,7 @@ struct args_t {
 	std::string data_path = ".";
 	std::string map_path;
 	int port = 6112;
+	int ws_port = 6113;
 	uint32_t seed = 42;
 	// Default 0: server starts the sim immediately and late-joining
 	// observers catch up via id_catchup_data. Set >0 if you want the
@@ -57,6 +61,7 @@ struct args_t {
 	int wait_observers = 0;
 	std::string users_path;
 	bool no_auth = false;
+	bool no_agents = false;
 };
 
 args_t parse_args(int argc, char** argv) {
@@ -70,6 +75,8 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--wait-observers") && i + 1 < argc) a.wait_observers = std::atoi(argv[++i]);
 		else if (eq("--users") && i + 1 < argc) a.users_path = argv[++i];
 		else if (eq("--no-auth")) a.no_auth = true;
+		else if (eq("--ws-port") && i + 1 < argc) a.ws_port = std::atoi(argv[++i]);
+		else if (eq("--no-agents")) a.no_agents = true;
 		else if (eq("--help") || eq("-h")) {
 			fprintf(stderr,
 				"usage: %s --map <path> (--users <path> | --no-auth) [options]\n"
@@ -82,7 +89,9 @@ args_t parse_args(int argc, char** argv) {
 				"                     the game starts immediately and late\n"
 				"                     joiners catch up via replay fast-forward.\n"
 				"  --users <path>     users.json for API-key auth\n"
-				"  --no-auth          disable auth entirely (dev-only)\n",
+				"  --no-auth          disable auth entirely (dev-only)\n"
+				"  --ws-port          TCP port for agent WebSocket (default: 6113)\n"
+				"  --no-agents        disable the agent WebSocket server\n",
 				argv[0]);
 			std::exit(0);
 		} else {
@@ -244,6 +253,47 @@ int main(int argc, char** argv) {
 	fprintf(stderr, "[srv] game started, initial_rand=%08x (%d observers)\n",
 		sync_st.initial_rand_state, count_ready_observers());
 
+	// Register 8 virtual sync clients -- one per player slot -- so agent
+	// actions can be dispatched via sync.h's execute_scheduled_actions
+	// path. These have has_auth=true, has_uid=true, socket handle nullptr,
+	// and their assigned player_slot. sync.h::execute_scheduled_actions
+	// gates on client->player_slot != -1, so these virtual clients are
+	// the only way to inject agent-owned actions.
+	sync_state::client_t* virtual_clients[8] = {nullptr};
+	for (int slot = 0; slot < 8; ++slot) {
+		if (st.players[slot].controller != bwgame::player_t::controller_occupied &&
+		    st.players[slot].controller != bwgame::player_t::controller_computer_game) {
+			continue; // inactive slot; no unit to command
+		}
+		sync_st.clients.emplace_back();
+		auto& c = sync_st.clients.back();
+		c.local_id = sync_st.next_client_id++;
+		c.uid = sync_state::uid_t::generate();
+		c.has_uid = true;
+		c.has_auth = true;
+		c.has_greeted = true;
+		c.player_slot = slot;
+		c.frame = (uint8_t)sync_st.sync_frame;
+		c.name = bwgame::a_string("agent_") + bwgame::a_string(std::to_string(slot).c_str());
+		virtual_clients[slot] = &c;
+		fprintf(stderr, "[srv] registered virtual client for slot %d\n", slot);
+	}
+
+	// Command queue: producers push here from WebSocket handler threads;
+	// the sim thread drains once per tick.
+	openbw_agents::command_queue cmd_queue;
+	std::atomic<int> current_frame_atomic{0};
+
+	// Start the agent WS server unless disabled.
+	std::unique_ptr<openbw_agents::ws_server> ws;
+	if (!args.no_agents && !args.users_path.empty()) {
+		ws = std::make_unique<openbw_agents::ws_server>(
+			registry, cmd_queue, current_frame_atomic);
+		ws->start((uint16_t)args.ws_port);
+	} else if (!args.no_agents) {
+		fprintf(stderr, "[srv] agent WS requires --users; skipping (or pass --no-agents).\n");
+	}
+
 	// 4. Fixed-rate tick loop.
 	using clock_t = std::chrono::steady_clock;
 	const auto tick_interval = std::chrono::milliseconds(42); // ~24 FPS
@@ -251,18 +301,44 @@ int main(int argc, char** argv) {
 	auto last_heartbeat = clock_t::now();
 
 	while (true) {
+		// Drain pending agent commands in slot order (0 -> 7, FIFO within
+		// each slot). Each command was pre-encoded by ws_server into one
+		// or more BW action blobs (select + verb, typically). Route each
+		// blob through sync.h::schedule_action so it lands in the virtual
+		// client's queue and executes at current_frame + latency.
+		cmd_queue.drain([&](int slot, const uint8_t* data, size_t size) {
+			auto* vc = virtual_clients[slot];
+			if (!vc) return;
+			// Keep virtual client's frame counter aligned so sync's lag
+			// check doesn't stall on this "client".
+			vc->frame = (uint8_t)sync_st.sync_frame;
+			funcs.schedule_action(vc, data, size);
+		});
+
+		// Keep every virtual client's frame counter up to date, even if
+		// no commands arrived, or all_clients_in_sync could stall.
+		for (auto& c : sync_st.clients) {
+			if (&c != sync_st.local_client && c.player_slot >= 0) {
+				c.frame = (uint8_t)sync_st.sync_frame;
+			}
+		}
+
 		funcs.next_frame(server); // advances sim + syncs to observers
+		current_frame_atomic.store(st.current_frame);
 
 		auto now = clock_t::now();
 		if (now - last_heartbeat >= std::chrono::seconds(1)) {
 			int n_clients = 0;
 			int n_observers = 0;
+			int n_agents = 0;
 			for (auto& c : sync_st.clients) {
 				++n_clients;
-				if (c.player_slot == -1 && &c != sync_st.local_client) ++n_observers;
+				if (&c == sync_st.local_client) continue;
+				if (c.player_slot == -1) ++n_observers;
+				else if (c.h == nullptr) ++n_agents;
 			}
-			fprintf(stderr, "[srv] frame=%d clients=%d observers=%d\n",
-				st.current_frame, n_clients, n_observers);
+			fprintf(stderr, "[srv] frame=%d observers=%d virtual-agents=%d pending-cmds=%zu\n",
+				st.current_frame, n_observers, n_agents, cmd_queue.total_pending());
 			last_heartbeat = now;
 		}
 
