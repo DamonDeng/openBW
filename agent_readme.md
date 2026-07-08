@@ -158,15 +158,56 @@ Tasks are tracked in the harness task system (see current tasks with
    CMakeLists.txt. Verified end-to-end: server binds TCP, waits for first
    observer to connect, starts the game, ticks at 24 FPS; observer opens
    an SDL2 window and syncs.
-3. **#8 Command queue** + **#10 WebSocket agents** — first agent plug-in
-   point. Hardcoded fake agent sends "build SCV"; observer sees the SCV.
-4. **#11 Observation serializer** — closes the LLM loop. Agent calls
-   `observe()`, gets JSON, sends `act(train_scv)`, sees updated resources.
-5. **#9 HTTP control API** — makes it operable. Create/start/reset via curl.
-6. **#13 Late-join for observers** — v1.1 polish; not needed for MVP.
-   Currently the server *requires* an observer to connect before start_game,
-   because sync.h refuses new peers once game_started == true.
-7. **#14 Multi-game support** — when you want to run tournaments.
+3. ✅ **#15 Multi-observer support** — done. sync.h had a pre-game peer
+   cap of 2 (BW 1v1 lobby assumption); relaxed to count only player-slot
+   peers, so observers are unlimited. Server has --wait-observers N.
+4. **#17 Auth: user registry** — foundational. Load users.json at
+   startup; hash API keys; provide server::verify(key) → user*. Reused
+   by HTTP, WebSocket, and sync.h.
+5. **#18 Auth: sync.h id_auth handshake** — observer sends its API key
+   right after connect. Server binds sync client to a user.
+6. **#19 Server-assigned perspective + fog of war** — server sends
+   id_assign_perspective(slot) based on the authenticated user's
+   assigned_slot. Observer renders with per-player visibility filter.
+7. **#8 Command queue** + **#10 WebSocket agents** — first agent
+   plug-in. Agent WS handshake reuses the same auth check.
+8. **#11 Observation serializer** — closes the LLM loop.
+9. **#9 HTTP control API** — operator plane. Reuses auth via Bearer.
+10. **#13 Late-join for observers** — v1.1 polish. Currently the server
+    *requires* observers to connect before start_game because sync.h
+    refuses new peers once game_started == true.
+11. **#14 Multi-game support** — when you want to run tournaments.
+
+## Identity model
+
+Every actor (agent, observer, operator) has an API key. On startup, the
+server loads a users.json file:
+
+```json
+{
+  "users": [
+    {"alias": "alice", "api_key": "sk-...", "slot": 0},
+    {"alias": "bob",   "api_key": "sk-...", "slot": 1},
+    {"alias": "spectator", "api_key": "sk-...", "role": "observer"},
+    {"alias": "admin", "api_key": "sk-...", "role": "admin"}
+  ]
+}
+```
+
+Server hashes each api_key at load time and discards the plaintext.
+Actors present their key over their transport:
+
+- **HTTP**: `Authorization: Bearer <key>`
+- **WebSocket**: upgrade query string or subprotocol
+- **sync.h**: new `id_auth` message sent before `id_client_uid`
+
+One `server::verify(key) → user*` function backs all three. A user's
+`assigned_slot` drives:
+- WebSocket agent connections → what slot they can control
+- Observer connections → what perspective they see (fog of war)
+
+Keys are demo-cleartext for now; TLS/wss is a deployment concern for a
+future task.
 
 ## How to run the observation-mode demo
 
