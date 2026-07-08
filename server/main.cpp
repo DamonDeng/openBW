@@ -84,14 +84,22 @@ int main(int argc, char** argv) {
 	fprintf(stderr, "[srv] starting: map=%s data=%s port=%d seed=%u\n",
 		args.map_path.c_str(), args.data_path.c_str(), args.port, args.seed);
 
-	// 1. Load game data + map.
+	// 1. Load game data + map. We can't use game_player::load_map_file
+	//    directly because it constructs its own game_load_functions with
+	//    default setup_info (no starting units in melee mode). Drive it
+	//    ourselves so we can set create_melee_units_for_player[] = true.
 	game_player player{a_string(args.data_path.c_str())};
-	player.load_map_file(a_string(args.map_path.c_str()));
 	state& st = player.st();
+	{
+		game_load_functions loader(st);
+		for (size_t i = 0; i < 8; ++i) loader.setup_info.create_melee_units_for_player[i] = true;
+		loader.load_map_file(a_string(args.map_path.c_str()));
+	}
 	action_state action_st;
 	sync_state sync_st;
 	sync_functions funcs(st, action_st, sync_st);
 	game_load_functions::setup_info_t setup_info;
+	for (size_t i = 0; i < 8; ++i) setup_info.create_melee_units_for_player[i] = true;
 	sync_st.setup_info = &setup_info;
 	sync_st.latency = 2;
 

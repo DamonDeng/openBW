@@ -100,10 +100,17 @@ int main(int argc, char** argv) {
 	ui::log("[obs] starting: map=%s server=%s:%d\n",
 		args.map_path.c_str(), args.server_host.c_str(), args.server_port);
 
-	// 1. Load MPQs + map.
+	// 1. Load MPQs + map. Same trick as the server -- drive game_load_functions
+	//    ourselves to set create_melee_units_for_player so units spawn at
+	//    frame 0. Both server and observer must load with matching setup or
+	//    they'll desync immediately.
 	auto load_data_file = data_loading::data_files_directory(a_string(args.data_path.c_str()));
 	game_player player(load_data_file);
-	player.load_map_file(a_string(args.map_path.c_str()));
+	{
+		game_load_functions loader(player.st());
+		for (size_t i = 0; i < 8; ++i) loader.setup_info.create_melee_units_for_player[i] = true;
+		loader.load_map_file(a_string(args.map_path.c_str()));
+	}
 
 	ui_functions ui(std::move(player));
 	ui.load_all_image_data(load_data_file);
