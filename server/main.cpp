@@ -14,11 +14,14 @@
 #include "sync.h"
 #include "sync_server_asio_tcp.h"
 
+#include "auth.h"
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <thread>
 
 using namespace bwgame;
@@ -46,6 +49,8 @@ struct args_t {
 	int port = 6112;
 	uint32_t seed = 42;
 	int wait_observers = 1;
+	std::string users_path;
+	bool no_auth = false;
 };
 
 args_t parse_args(int argc, char** argv) {
@@ -57,16 +62,20 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--port") && i + 1 < argc) a.port = std::atoi(argv[++i]);
 		else if (eq("--seed") && i + 1 < argc) a.seed = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
 		else if (eq("--wait-observers") && i + 1 < argc) a.wait_observers = std::atoi(argv[++i]);
+		else if (eq("--users") && i + 1 < argc) a.users_path = argv[++i];
+		else if (eq("--no-auth")) a.no_auth = true;
 		else if (eq("--help") || eq("-h")) {
 			fprintf(stderr,
-				"usage: %s --map <path> [options]\n"
+				"usage: %s --map <path> (--users <path> | --no-auth) [options]\n"
 				"  --map              path to .scm/.scx map file\n"
 				"  --data-path        dir containing StarDat.mpq et al (default: .)\n"
 				"  --port             TCP port to bind (default: 6112)\n"
 				"  --seed             RNG seed (default: 42)\n"
 				"  --wait-observers N wait for N observers to connect before\n"
 				"                     starting the game (default: 1). Late\n"
-				"                     joiners are rejected until task #13 lands.\n",
+				"                     joiners are rejected until task #13 lands.\n"
+				"  --users <path>     users.json for API-key auth\n"
+				"  --no-auth          disable auth entirely (dev-only)\n",
 				argv[0]);
 			std::exit(0);
 		} else {
@@ -76,6 +85,14 @@ args_t parse_args(int argc, char** argv) {
 	}
 	if (a.map_path.empty()) {
 		fprintf(stderr, "error: --map is required (try --help)\n");
+		std::exit(1);
+	}
+	if (a.users_path.empty() && !a.no_auth) {
+		fprintf(stderr, "error: --users <path> is required (or pass --no-auth for dev)\n");
+		std::exit(1);
+	}
+	if (!a.users_path.empty() && a.no_auth) {
+		fprintf(stderr, "error: --users and --no-auth are mutually exclusive\n");
 		std::exit(1);
 	}
 	if (a.wait_observers < 1) a.wait_observers = 1;
@@ -111,6 +128,30 @@ int main(int argc, char** argv) {
 
 	// Give the local (server) client a name so the sync handshake is happy.
 	sync_st.local_client->name = "openbw_server";
+
+	// Wire auth if requested.
+	openbw_auth::user_registry registry;
+	if (!args.users_path.empty()) {
+		try {
+			size_t n = registry.load_file(args.users_path);
+			fprintf(stderr, "[srv] loaded %zu users from %s\n", n, args.users_path.c_str());
+		} catch (const std::exception& e) {
+			fprintf(stderr, "[srv] auth load failed: %s\n", e.what());
+			return 1;
+		}
+		sync_st.auth_check = [&registry](const uint8_t* key, size_t key_len) -> const void* {
+			std::string_view sv((const char*)key, key_len);
+			const auto* u = registry.verify(sv);
+			if (u) {
+				fprintf(stderr, "[srv] auth OK: alias=%s slot=%d\n", u->alias.c_str(), u->assigned_slot);
+			} else {
+				fprintf(stderr, "[srv] auth FAIL (unknown key)\n");
+			}
+			return u;
+		};
+	} else {
+		fprintf(stderr, "[srv] WARNING: running with --no-auth\n");
+	}
 
 	// 2. Bind TCP acceptor.
 	sync_server_asio_tcp server;

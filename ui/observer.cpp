@@ -51,6 +51,7 @@ struct args_t {
 	int server_port = 6112;
 	int screen_width = 1280;
 	int screen_height = 800;
+	std::string api_key;
 };
 
 args_t parse_args(int argc, char** argv) {
@@ -70,6 +71,7 @@ args_t parse_args(int argc, char** argv) {
 			a.server_port = std::atoi(s.substr(colon + 1).c_str());
 		} else if (eq("--width") && i + 1 < argc) a.screen_width = std::atoi(argv[++i]);
 		else if (eq("--height") && i + 1 < argc) a.screen_height = std::atoi(argv[++i]);
+		else if (eq("--api-key") && i + 1 < argc) a.api_key = argv[++i];
 		else if (eq("--help") || eq("-h")) {
 			fprintf(stderr,
 				"usage: %s --map <path> [--server 127.0.0.1:6112] [--data-path .]\n"
@@ -77,7 +79,8 @@ args_t parse_args(int argc, char** argv) {
 				"  --server     host:port to connect to (default 127.0.0.1:6112)\n"
 				"  --data-path  MPQ dir (default: .)\n"
 				"  --width      window width (default: 1280)\n"
-				"  --height     window height (default: 800)\n",
+				"  --height     window height (default: 800)\n"
+				"  --api-key    API key for auth (omit if server has --no-auth)\n",
 				argv[0]);
 			std::exit(0);
 		} else {
@@ -138,6 +141,13 @@ int main(int argc, char** argv) {
 	sync_st.setup_info = &setup_info;
 	sync_st.latency = 2;
 	sync_st.local_client->name = "openbw_observer";
+
+	// Stash our API key so on_new_client can send id_auth automatically
+	// once the async connect completes. Leave empty if the server has
+	// --no-auth; the id_auth handler on the server tolerates that.
+	if (!args.api_key.empty()) {
+		sync_st.outgoing_api_key = a_string(args.api_key.c_str());
+	}
 
 	// 3. Connect to server.
 	sync_server_asio_tcp server;

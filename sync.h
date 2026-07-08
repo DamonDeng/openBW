@@ -85,6 +85,12 @@ struct sync_state {
 		bool game_started = false;
 		bool has_greeted = false;
 		std::chrono::steady_clock::time_point last_synced;
+
+		// Auth state (used when sync_state::auth_check is installed).
+		// The embedding server drives verification via the callback and
+		// stashes an opaque per-user pointer here (e.g. openbw_auth::user_t*).
+		bool has_auth = false;
+		const void* auth_user = nullptr;
 	};
 
 	a_list<client_t> clients = {{uid_t::generate(), true}};
@@ -109,6 +115,19 @@ struct sync_state {
 	int failed_action_count = 0;
 	std::array<uint32_t, 4> insync_hash{};
 	uint8_t insync_hash_index = 0;
+
+	// Optional per-connection authentication hook. If set, every incoming
+	// remote client must send id_auth as its first sync message; the check
+	// is called with the raw key bytes. Return non-null (an opaque user
+	// pointer to be stashed on client_t::auth_user) to accept, or nullptr
+	// to reject and disconnect. When null (default), no auth is required
+	// -- preserving existing BW-peer flows.
+	std::function<const void*(const uint8_t* key, size_t key_len)> auth_check;
+
+	// Client-side: if non-empty, on_new_client will send id_auth with this
+	// key immediately after the greeting. Set on the observer side; leave
+	// empty on the server side.
+	a_string outgoing_api_key;
 
 };
 
@@ -174,7 +193,15 @@ namespace sync_messages {
 		id_create_unit,
 		id_kill_unit,
 		id_remove_unit,
-		id_custom_action
+		id_custom_action,
+		// The auth message is sent by an incoming client immediately after
+		// the greeting, BEFORE any other sync message. Payload: [uint16_t
+		// key_length][key bytes]. The server calls sync_state::auth_check
+		// (installed by the embedding server) to verify. On success the
+		// server may also stash a per-user pointer on client_t::auth_user.
+		// Without this message (and with auth_check installed), the client
+		// is killed when the next message arrives.
+		id_auth
 	};
 	enum {
 		id_game_started_escape = 0xdc
@@ -375,7 +402,40 @@ struct sync_functions: action_functions {
 		void recv(sync_state::client_t* client, reader_T&& r) {
 			auto t = r.tell();
 			int id = r.template get<uint8_t>();
+
+			// If auth is required and this client hasn't yet passed it,
+			// only id_auth is allowed. Anything else -> disconnect.
+			// local_client is always trusted (it's ourselves, receiving
+			// our own broadcast echoes).
+			if (sync_st.auth_check && !client->has_auth && client != sync_st.local_client
+				&& id != sync_messages::id_auth) {
+				kill_client(client);
+				return;
+			}
+
 			switch (id) {
+			case sync_messages::id_auth: {
+				uint16_t key_len = r.template get<uint16_t>();
+				if (key_len > r.left() || key_len == 0 || key_len > 4096) {
+					kill_client(client);
+					return;
+				}
+				const uint8_t* key_bytes = r.get_n(key_len);
+				if (sync_st.auth_check) {
+					const void* user = sync_st.auth_check(key_bytes, key_len);
+					if (!user) {
+						kill_client(client);
+						return;
+					}
+					client->has_auth = true;
+					client->auth_user = user;
+				} else {
+					// No auth configured; still accept the message but
+					// mark the client as authed so subsequent flows work.
+					client->has_auth = true;
+				}
+				break;
+			}
 			case sync_messages::id_client_frame:
 				client->frame = r.template get<uint8_t>();
 				break;
@@ -593,6 +653,18 @@ struct sync_functions: action_functions {
 			}
 			auto* c = new_client(h);
 			send_greeting(h);
+			// If we have an API key to present (client-side observer), send
+			// id_auth before id_client_uid. The server, if it has auth
+			// enabled, requires this before accepting any other message.
+			if (!sync_st.outgoing_api_key.empty()) {
+				dynamic_writer<> w;
+				w.put<uint8_t>(sync_messages::id_auth);
+				w.put<uint16_t>((uint16_t)sync_st.outgoing_api_key.size());
+				w.put_bytes(
+					(const uint8_t*)sync_st.outgoing_api_key.data(),
+					sync_st.outgoing_api_key.size());
+				send(w, h);
+			}
 			send_uid(h);
 			auto frame = sync_st.sync_frame;
 			sync_st.sync_frame = 0;
