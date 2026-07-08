@@ -17,6 +17,8 @@
 
 #include "auth.h"
 #include "command_queue.h"
+#include "observe_request.h"
+#include "observation.h"
 #include "ws_server.h"
 
 #include <atomic>
@@ -290,29 +292,31 @@ int main(int argc, char** argv) {
 	// unit_id embeds a 5-bit generation counter in the top bits, so raw
 	// unit_id.raw_value != unit index -- use the raw value in agent
 	// commands.
+	// Dump one line per active slot so agents can see their race/units at
+	// startup without an observe() call. observe() is the intended way to
+	// discover unit ids at runtime.
 	for (int slot = 0; slot < 8; ++slot) {
 		if (st.players[slot].controller != bwgame::player_t::controller_occupied &&
 		    st.players[slot].controller != bwgame::player_t::controller_computer_game) continue;
-		int count = 0;
-		for (auto* u : bwgame::ptr(st.player_units[slot])) {
-			auto uid = funcs.get_unit_id(u);
-			fprintf(stderr, "[srv] slot %d unit_id=%u type=%d pos=(%d,%d)\n",
-				slot, (unsigned)uid.raw_value, (int)u->unit_type->id,
-				u->position.x, u->position.y);
-			if (++count >= 4) { fprintf(stderr, "[srv]  ... (more units suppressed)\n"); break; }
-		}
+		int nunits = 0;
+		for (auto* u : bwgame::ptr(st.player_units[slot])) { (void)u; ++nunits; }
+		fprintf(stderr, "[srv] slot %d race=%d units=%d\n",
+			slot, (int)st.players[slot].race, nunits);
 	}
 
 	// Command queue: producers push here from WebSocket handler threads;
 	// the sim thread drains once per tick.
 	openbw_agents::command_queue cmd_queue;
+	// Observation request queue: WS handler pushes when an agent calls
+	// observe(); sim thread drains + serializes on tick.
+	openbw_agents::observe_queue obs_queue;
 	std::atomic<int> current_frame_atomic{0};
 
 	// Start the agent WS server unless disabled.
 	std::unique_ptr<openbw_agents::ws_server> ws;
 	if (!args.no_agents && !args.users_path.empty()) {
 		ws = std::make_unique<openbw_agents::ws_server>(
-			registry, cmd_queue, current_frame_atomic);
+			registry, cmd_queue, obs_queue, current_frame_atomic);
 		ws->start((uint16_t)args.ws_port);
 	} else if (!args.no_agents) {
 		fprintf(stderr, "[srv] agent WS requires --users; skipping (or pass --no-agents).\n");
@@ -337,6 +341,17 @@ int main(int argc, char** argv) {
 			// check doesn't stall on this "client".
 			vc->frame = (uint8_t)sync_st.sync_frame;
 			funcs.schedule_action(vc, data, size);
+		});
+
+		// Drain pending observe requests: build the observation JSON on
+		// the sim thread (safe -- we own state here), then hand it back
+		// via the request's respond callback which posts to the WS thread.
+		obs_queue.drain([&](int slot, openbw_agents::observe_request& req) {
+			auto opts = openbw_agents::parse_targets(req.targets);
+			std::string body = openbw_agents::build_observation(
+				funcs, slot, (uint32_t)st.current_frame,
+				req.request_id, opts);
+			if (req.respond) req.respond(std::move(body));
 		});
 
 		// Keep every virtual client's frame counter up to date, even if

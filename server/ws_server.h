@@ -24,6 +24,7 @@
 
 #include "auth.h"
 #include "command_queue.h"
+#include "observe_request.h"
 #include "agent_protocol.h"
 
 #include "../deps/nlohmann/json.hpp"
@@ -140,7 +141,11 @@ struct ws_connection : std::enable_shared_from_this<ws_connection> {
 	// Injected by the server on accept.
 	openbw_auth::user_registry* registry = nullptr;
 	command_queue* queue = nullptr;
+	observe_queue* obs_queue = nullptr;
 	std::atomic<int>* server_current_frame = nullptr;
+	// So the sim thread can post its serialized observation back to our
+	// io_service for delivery over the wire. Owned by ws_server.
+	asio::io_service* our_io = nullptr;
 
 	explicit ws_connection(asio::ip::tcp::socket sock) : socket(std::move(sock)) {
 		recv_buf.reserve(4096);
@@ -377,7 +382,17 @@ struct ws_connection : std::enable_shared_from_this<ws_connection> {
 		if (!j.is_object()) { send_error("", "expected json object"); return; }
 		std::string type = j.value("type", "");
 		std::string id   = j.value("id", "");
-		if (type != "cmd") { send_error(id, "unknown message type"); return; }
+
+		if (type == "cmd") {
+			handle_cmd(j, id);
+		} else if (type == "observe") {
+			handle_observe(j, id);
+		} else {
+			send_error(id, "unknown message type: " + type);
+		}
+	}
+
+	void handle_cmd(const nlohmann::json& j, const std::string& id) {
 		auto it = j.find("cmd");
 		if (it == j.end() || !it->is_object()) {
 			send_error(id, "cmd payload missing");
@@ -403,6 +418,32 @@ struct ws_connection : std::enable_shared_from_this<ws_connection> {
 		ack["id"] = id;
 		ack["queued_at_frame"] = server_current_frame ? server_current_frame->load() + 1 : 0;
 		send_text(ack.dump());
+	}
+
+	void handle_observe(const nlohmann::json& j, const std::string& id) {
+		if (!obs_queue) {
+			send_error(id, "observation service not available");
+			return;
+		}
+		observe_request req;
+		req.request_id = id;
+		auto tit = j.find("targets");
+		if (tit != j.end() && tit->is_array()) {
+			for (const auto& t : *tit) {
+				if (t.is_string()) req.targets.push_back(t.get<std::string>());
+			}
+		}
+		// Callback runs on the sim thread. Post the response to our
+		// io_service so the send happens on the WS worker thread.
+		auto self = shared_from_this();
+		req.respond = [self](std::string body) {
+			if (!self->our_io) return;
+			// asio::post isn't in 1.10; use dispatch/io_service::post.
+			self->our_io->post([self, body = std::move(body)]() {
+				self->send_text(body);
+			});
+		};
+		obs_queue->push(slot, std::move(req));
 	}
 
 	void send_error(const std::string& id, const std::string& message) {
@@ -442,9 +483,9 @@ struct ws_connection : std::enable_shared_from_this<ws_connection> {
 class ws_server {
 public:
 	ws_server(openbw_auth::user_registry& reg, command_queue& q,
-		std::atomic<int>& current_frame)
-		: registry(reg), queue(q), current_frame(current_frame),
-		  acceptor(io) {}
+		observe_queue& oq, std::atomic<int>& current_frame)
+		: registry(reg), queue(q), obs_queue(oq),
+		  current_frame(current_frame), acceptor(io) {}
 
 	void start(uint16_t port) {
 		asio::ip::tcp::endpoint ep(asio::ip::tcp::v4(), port);
@@ -477,6 +518,8 @@ private:
 					auto conn = std::make_shared<ws_connection>(std::move(*sock));
 					conn->registry = &registry;
 					conn->queue = &queue;
+					conn->obs_queue = &obs_queue;
+					conn->our_io = &io;
 					conn->server_current_frame = &current_frame;
 					conn->start();
 				}
@@ -486,6 +529,7 @@ private:
 
 	openbw_auth::user_registry& registry;
 	command_queue& queue;
+	observe_queue& obs_queue;
 	std::atomic<int>& current_frame;
 	asio::io_service io;
 	asio::io_service::work work{io};
