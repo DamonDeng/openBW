@@ -152,18 +152,47 @@ Two small patches to `sync.h` unlock the whole thing:
 Tasks are tracked in the harness task system (see current tasks with
 `TaskList`). Build order — each is a natural demo milestone:
 
-1. **#6 Patch sync.h** — 30 min. Verify existing `gfxtest.cpp` still works.
-2. **#7 Server skeleton** + **#12 Observer client** — biggest single
-   milestone. Run server + SDL2 with `--observer` on two terminals; watch a
-   hardcoded map with no agents. First proof of the observation-mode
-   pipeline end-to-end.
+1. ✅ **#6 Patch sync.h** — done. `all_clients_in_sync` skips observer peers.
+2. ✅ **#7 Server skeleton** + ✅ **#12 Observer client** — done. Two
+   binaries `openbw_server` and `openbw_observer` build via a top-level
+   CMakeLists.txt. Verified end-to-end: server binds TCP, waits for first
+   observer to connect, starts the game, ticks at 24 FPS; observer opens
+   an SDL2 window and syncs.
 3. **#8 Command queue** + **#10 WebSocket agents** — first agent plug-in
    point. Hardcoded fake agent sends "build SCV"; observer sees the SCV.
 4. **#11 Observation serializer** — closes the LLM loop. Agent calls
    `observe()`, gets JSON, sends `act(train_scv)`, sees updated resources.
 5. **#9 HTTP control API** — makes it operable. Create/start/reset via curl.
 6. **#13 Late-join for observers** — v1.1 polish; not needed for MVP.
+   Currently the server *requires* an observer to connect before start_game,
+   because sync.h refuses new peers once game_started == true.
 7. **#14 Multi-game support** — when you want to run tournaments.
+
+## How to run the observation-mode demo
+
+Prereqs: `original_resources/` contains `StarDat.mpq`, `BrooDat.mpq`,
+`Patch_rt.mpq` (SC1 assets, gitignored), and a map file (e.g. copy any
+`*.scm` from your SC install into `original_resources/`).
+
+```bash
+# Configure & build (once)
+cmake -S . -B build_srv
+cmake --build build_srv -j
+
+# Terminal 1: server
+./build_srv/server/openbw_server \
+  --map "original_resources/(2)Bottleneck.scm" \
+  --data-path original_resources
+
+# Terminal 2: observer (once server is listening)
+./build_srv/ui/openbw_observer \
+  --map "original_resources/(2)Bottleneck.scm" \
+  --data-path original_resources \
+  --server 127.0.0.1:6112
+```
+
+Server logs frame count + connected observer count once per second.
+Observer opens an SDL2 window showing the map.
 
 ## Open questions to revisit later
 
