@@ -149,6 +149,15 @@ int main(int argc, char** argv) {
 			}
 			return u;
 		};
+		// After auth: tell each client which slot's perspective to render.
+		// Player role -> their own slot. Observer role -> the slot they're
+		// assigned to (or -1 = full vision). Admin -> full vision.
+		sync_st.perspective_for = [](const void* auth_user) -> int8_t {
+			if (!auth_user) return -1;
+			auto* u = (const openbw_auth::user_t*)auth_user;
+			if (u->role == openbw_auth::role_t::admin) return -1;
+			return (int8_t)u->assigned_slot;
+		};
 	} else {
 		fprintf(stderr, "[srv] WARNING: running with --no-auth\n");
 	}

@@ -155,8 +155,18 @@ int main(int argc, char** argv) {
 	ui::log("[obs] connecting to %s:%d ...\n", args.server_host.c_str(), args.server_port);
 
 	// 4. Main loop. next_frame drives sync + sim; ui.update handles render.
+	int last_logged_slot = -2;
 	while (true) {
 		funcs.next_frame(server);
+		// Server sent id_assign_perspective after our auth -- pick it up
+		// and route it into the UI so fog rendering activates.
+		if (ui.viewing_slot != sync_st.viewing_slot) {
+			ui.viewing_slot = sync_st.viewing_slot;
+		}
+		if (sync_st.viewing_slot != last_logged_slot) {
+			ui::log("[obs] viewing perspective: slot=%d\n", (int)sync_st.viewing_slot);
+			last_logged_slot = sync_st.viewing_slot;
+		}
 		ui.update();
 		// Small yield so we don't 100% spin the CPU when server is idle.
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));

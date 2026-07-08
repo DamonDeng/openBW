@@ -129,6 +129,19 @@ struct sync_state {
 	// empty on the server side.
 	a_string outgoing_api_key;
 
+	// Server-side: when a client successfully authenticates, this callback
+	// (if set) is asked what perspective (player slot 0..7, or -1 for full
+	// vision) that client should observe from. The server then sends
+	// id_assign_perspective. The callback receives the opaque auth_user
+	// pointer stashed on client_t. Default: nullptr = don't send perspective
+	// assignment (client renders with full vision).
+	std::function<int8_t(const void* auth_user)> perspective_for;
+
+	// Client-side: perspective slot assigned by the server. -1 means full
+	// vision. Updated when id_assign_perspective arrives. The UI polls
+	// this each frame to filter rendering.
+	int8_t viewing_slot = -1;
+
 };
 
 struct sync_server_noop {
@@ -201,7 +214,13 @@ namespace sync_messages {
 		// server may also stash a per-user pointer on client_t::auth_user.
 		// Without this message (and with auth_check installed), the client
 		// is killed when the next message arrives.
-		id_auth
+		id_auth,
+		// Server -> client: which player slot's perspective the observer
+		// should render from. Payload: [int8_t slot]. slot == -1 means
+		// "full vision" (spectator). Sent once after auth succeeds; the
+		// receiver stashes it on sync_state::viewing_slot for the UI to
+		// pick up.
+		id_assign_perspective
 	};
 	enum {
 		id_game_started_escape = 0xdc
@@ -434,6 +453,15 @@ struct sync_functions: action_functions {
 					// mark the client as authed so subsequent flows work.
 					client->has_auth = true;
 				}
+				// Note: the id_assign_perspective response is sent AFTER
+				// id_client_uid completes, because allow_send stays false
+				// on the client's socket until that point. Handled below.
+				break;
+			}
+			case sync_messages::id_assign_perspective: {
+				int8_t slot = (int8_t)r.template get<uint8_t>();
+				if (slot < -1 || slot > 7) slot = -1;
+				sync_st.viewing_slot = slot;
 				break;
 			}
 			case sync_messages::id_client_frame:
@@ -486,6 +514,19 @@ struct sync_functions: action_functions {
 						sync_st.sync_frame = 0;
 						if (client->h) {
 							server.allow_send(client->h, true);
+							// Now that this client's socket is enabled for
+							// sending, deliver the perspective assignment
+							// (server-installed callback drives it). Only
+							// fires for authenticated remote clients.
+							if (client != sync_st.local_client
+								&& client->has_auth
+								&& sync_st.perspective_for) {
+								int8_t slot = sync_st.perspective_for(client->auth_user);
+								writer<2> pw;
+								pw.put<uint8_t>(sync_messages::id_assign_perspective);
+								pw.put<int8_t>(slot);
+								send(pw, client->h);
+							}
 						}
 
 						sync_st.clients.sort([&](auto& a, auto& b) {

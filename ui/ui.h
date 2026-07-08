@@ -560,6 +560,11 @@ struct ui_functions: ui_util_functions {
 	bool exit_on_close = true;
 	bool window_closed = false;
 
+	// -1 = full vision (spectator / admin). 0..7 = render from that
+	// player's perspective (fog-of-war applied). The observer client
+	// syncs this from sync_state::viewing_slot each frame.
+	int viewing_slot = -1;
+
 	xy screen_pos;
 
 	size_t screen_width;
@@ -1235,9 +1240,16 @@ struct ui_functions: ui_util_functions {
 		size_t to_y = screen_tile.to.y;
 		if (to_y >= game_st.map_tile_height - 4) to_y = game_st.map_tile_height - 1;
 		else to_y += 4;
+		// If viewing from a specific player's perspective, skip sprites
+		// they can't currently see. sprite->visibility_flags bit N set
+		// means "player N can see this sprite" (opposite polarity from
+		// tile.visible).
+		uint8_t vis_mask = (viewing_slot >= 0 && viewing_slot < 8)
+			? (uint8_t)(1u << viewing_slot) : 0;
 		for (size_t y = from_y; y != to_y; ++y) {
 			for (auto* sprite : ptr(st.sprites_on_tile_line.at(y))) {
 				if (s_hidden(sprite)) continue;
+				if (vis_mask && !(sprite->visibility_flags & vis_mask)) continue;
 				sorted_sprites.emplace_back(sprite_depth_order(sprite), sprite);
 			}
 		}
@@ -1259,6 +1271,64 @@ struct ui_functions: ui_util_functions {
 			current_selection_sprites_set.at(s->index) = nullptr;
 		}
 		current_selection_sprites.clear();
+	}
+
+	// Fog-of-war overlay for the viewing slot. Walks the on-screen tiles
+	// and paints:
+	//   - unexplored tiles (never seen by viewing_slot): solid black.
+	//   - fogged tiles (explored but not currently visible): darkened via
+	//     the tileset's dark palette LUT (light_pcx[6]).
+	// No-op when viewing_slot == -1 or out of range.
+	void draw_fog(uint8_t* data, size_t data_pitch) {
+		if (viewing_slot < 0 || viewing_slot >= 8) return;
+		const uint8_t bit = (uint8_t)(1u << viewing_slot);
+		// Dark palette LUT: light_pcx entries are 256-byte remap tables.
+		// Index 6 is the darkest. Fall back to a plain black fill if the
+		// LUT isn't available.
+		const uint8_t* dark_lut = nullptr;
+		if (tileset_img.light_pcx[6].data.size() >= 256) {
+			dark_lut = tileset_img.light_pcx[6].data.data();
+		}
+
+		auto screen_tile = screen_tile_bounds();
+		for (size_t ty = screen_tile.from.y; ty != screen_tile.to.y; ++ty) {
+			for (size_t tx = screen_tile.from.x; tx != screen_tile.to.x; ++tx) {
+				auto& tile = st.tiles[ty * game_st.map_tile_width + tx];
+				bool explored = (tile.explored & bit) == 0;
+				bool visible = (tile.visible & bit) == 0;
+				if (visible) continue;  // fully lit; no overlay
+
+				int screen_x = (int)(tx * 32) - screen_pos.x;
+				int screen_y = (int)(ty * 32) - screen_pos.y;
+				int w = 32, h = 32;
+				int ox = 0, oy = 0;
+				if (screen_x < 0) { ox = -screen_x; w += screen_x; screen_x = 0; }
+				if (screen_y < 0) { oy = -screen_y; h += screen_y; screen_y = 0; }
+				if (screen_x >= (int)screen_width || screen_y >= (int)screen_height) continue;
+				w = std::min(w, (int)screen_width - screen_x);
+				h = std::min(h, (int)screen_height - screen_y);
+				if (w <= 0 || h <= 0) continue;
+				(void)ox; (void)oy;
+
+				uint8_t* row = data + (size_t)screen_y * data_pitch + (size_t)screen_x;
+				if (!explored || !dark_lut) {
+					// Unexplored: solid black. Also used as fallback for
+					// fogged tiles when the dark LUT isn't loaded.
+					for (int y = 0; y < h; ++y) {
+						std::memset(row, 0, (size_t)w);
+						row += data_pitch;
+					}
+				} else {
+					// Fogged: remap each pixel through the dark LUT.
+					for (int y = 0; y < h; ++y) {
+						for (int x = 0; x < w; ++x) {
+							row[x] = dark_lut[row[x]];
+						}
+						row += data_pitch;
+					}
+				}
+			}
+		}
 	}
 
 	void fill_rectangle(uint8_t* data, size_t data_pitch, rect area, uint8_t index) {
@@ -1351,18 +1421,37 @@ struct ui_functions: ui_util_functions {
 
 		uint8_t* p = data + data_pitch * (size_t)area.from.y + (size_t)area.from.x;
 
+		// Fog for minimap: same polarity as tile grid.
+		const bool fog_active = viewing_slot >= 0 && viewing_slot < 8;
+		const uint8_t vbit = fog_active ? (uint8_t)(1u << viewing_slot) : 0;
+		const uint8_t* dark_lut = nullptr;
+		if (fog_active && tileset_img.light_pcx[6].data.size() >= 256) {
+			dark_lut = tileset_img.light_pcx[6].data.data();
+		}
+
 		size_t pitch = data_pitch - game_st.map_tile_width;
 		for (size_t y = 0; y != game_st.map_tile_height; ++y) {
 			for (size_t x = 0; x != game_st.map_tile_width; ++x) {
+				size_t idx = y * game_st.map_tile_width + x;
+				if (fog_active && (st.tiles[idx].explored & vbit)) {
+					// Unexplored -> black on minimap.
+					*p++ = 0;
+					continue;
+				}
 				size_t index;
-				if (~st.tiles[y * game_st.map_tile_width + x].flags & tile_t::flag_has_creep) index = st.tiles_mega_tile_index[y * game_st.map_tile_width + x];
-				else index = game_st.cv5.at(1).mega_tile_index[creep_random_tile_indices[y * game_st.map_tile_width + x]];
+				if (~st.tiles[idx].flags & tile_t::flag_has_creep) index = st.tiles_mega_tile_index[idx];
+				else index = game_st.cv5.at(1).mega_tile_index[creep_random_tile_indices[idx]];
 				auto* images = &tileset_img.vx4.at(index).images[0];
 				auto* bitmap = &tileset_img.vr4.at(*images / 2).bitmap[0];
 				auto val = bitmap[55 / sizeof(vr4_entry::bitmap_t)];
 				size_t shift = 8 * (55 % sizeof(vr4_entry::bitmap_t));
 				val >>= shift;
-				*p++ = (uint8_t)val;
+				uint8_t px = (uint8_t)val;
+				if (fog_active && (st.tiles[idx].visible & vbit) && dark_lut) {
+					// Fogged (explored, not currently visible) -> dim.
+					px = dark_lut[px];
+				}
+				*p++ = px;
 			}
 			p += pitch;
 		}
@@ -1371,6 +1460,8 @@ struct ui_functions: ui_util_functions {
 			--i;
 			for (unit_t* u : ptr(st.player_units[i])) {
 				if (!unit_visble_on_minimap(u)) continue;
+				// Fog: hide units the viewing slot can't see.
+				if (fog_active && !(u->sprite->visibility_flags & vbit)) continue;
 				int color = img.player_minimap_colors.at(st.players[u->owner].color);
 				size_t w = u->unit_type->placement_size.x / 32u;
 				size_t h = u->unit_type->placement_size.y / 32u;
@@ -1951,6 +2042,10 @@ struct ui_functions: ui_util_functions {
 		draw_sprites(data, indexed_surface->pitch);
 
 		draw_callback(data, indexed_surface->pitch);
+
+		// Fog-of-war overlay: darken tiles the viewing slot can't see.
+		// No-op when viewing_slot == -1 (full vision).
+		draw_fog(data, indexed_surface->pitch);
 
 		if (draw_ui_elements) {
 			draw_minimap(data, indexed_surface->pitch);
