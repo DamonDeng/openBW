@@ -640,7 +640,10 @@ struct ui_functions: ui_util_functions {
 			a_vector<uint8_t> data;
 			load_data_file(data, "sound/" + sound_filenames[id]);
 			loaded_sounds[id] = native_sound::load_wav(data.data(), data.size());
+			fprintf(stderr, "[snd] loaded id=%d name=%s size=%zu\n", id, sound_filenames[id].c_str(), data.size());
 		}
+		fprintf(stderr, "[snd] play id=%d name=%s pos=(%d,%d) global_vol=%d\n",
+			id, sound_filenames[id].c_str(), position.x, position.y, global_volume);
 		auto& s = loaded_sounds[id];
 		if (!s) return;
 

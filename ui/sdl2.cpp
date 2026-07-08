@@ -378,8 +378,11 @@ void init() {
 		freq = MIX_DEFAULT_FREQUENCY;
 #endif
 	}
-	Mix_OpenAudio(freq, MIX_DEFAULT_FORMAT, 2, 1024);
+	int oa = Mix_OpenAudio(freq, MIX_DEFAULT_FORMAT, 2, 1024);
+	fprintf(stderr, "[snd] Mix_OpenAudio(freq=%d) returned %d (%s)\n",
+		freq, oa, oa == 0 ? "OK" : Mix_GetError());
 	Mix_AllocateChannels(channels);
+	fprintf(stderr, "[snd] Mix_AllocateChannels(%d) done\n", channels);
 }
 
 struct sdl_sound: sound {
