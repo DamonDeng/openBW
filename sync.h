@@ -166,6 +166,14 @@ struct sync_state {
 	// once fast-forward completes.
 	bool catching_up = false;
 
+	// Both sides: pointers into `clients` for the per-slot virtual clients
+	// that carry agent-issued actions. NULL for slots without an agent
+	// (inactive slots, or the observer-side before catchup wires them up).
+	// The server owns the virtuals as first-class clients (has_uid/has_auth
+	// = true, no socket). The observer creates matching entries on demand
+	// when the first id_agent_action for a slot arrives.
+	std::array<client_t*, 8> virtual_clients_by_slot{};
+
 };
 
 struct sync_server_noop {
@@ -258,7 +266,15 @@ namespace sync_messages {
 		//   3. transitions into normal live-sync mode
 		// The action stream layout is [uint32_t frame][uint8_t chunk_size]
 		// [uint8_t owner][action bytes] repeated -- see replay_saver.h.
-		id_catchup_data
+		id_catchup_data,
+		// Server -> observer: a BW action byte sequence executed on behalf
+		// of a specific player slot. Payload: [uint8_t slot][action bytes].
+		// The observer looks up its virtual client for that slot and
+		// schedule_action's the payload there, so execute_scheduled_actions
+		// will apply it on the same frame the server does. This is how
+		// agent-issued commands reach observers who are already connected
+		// (late joiners get the equivalent via id_catchup_data).
+		id_agent_action
 	};
 	enum {
 		id_game_started_escape = 0xdc
@@ -619,6 +635,38 @@ struct sync_functions: action_functions {
 				handle_catchup(r);
 				break;
 			}
+			case sync_messages::id_agent_action: {
+				// Server -> observer live agent action. Payload:
+				//   [uint8_t slot][action bytes...]
+				// Route to our own virtual client for that slot so
+				// execute_scheduled_actions applies it on the same frame
+				// the server did. Create the virtual client lazily on
+				// first sighting; a fresh observer joining mid-game
+				// wouldn't have any yet.
+				int slot = (int)r.template get<uint8_t>();
+				if (slot < 0 || slot > 7) break;
+				size_t n = r.left();
+				if (n == 0) break;
+				sync_state::client_t* vc = sync_st.virtual_clients_by_slot[slot];
+				if (!vc) {
+					sync_st.clients.emplace_back();
+					vc = &sync_st.clients.back();
+					vc->local_id = sync_st.next_client_id++;
+					vc->uid = sync_state::uid_t::generate();
+					vc->has_uid = true;
+					vc->has_auth = true;
+					vc->has_greeted = true;
+					vc->game_started = true;
+					vc->player_slot = slot;
+					vc->frame = (uint8_t)sync_st.sync_frame;
+					sync_st.virtual_clients_by_slot[slot] = vc;
+				}
+				// Keep the virtual client's frame counter aligned so the
+				// sync lag check doesn't stall on it.
+				vc->frame = (uint8_t)sync_st.sync_frame;
+				funcs.schedule_action(vc, r.get_n(n), n);
+				break;
+			}
 			default:
 				if (!client->has_uid) kill_client(client);
 				else {
@@ -945,6 +993,30 @@ struct sync_functions: action_functions {
 			w.template put<uint8_t>(sync_messages::id_custom_action);
 			w.put_bytes(data, size);
 			send(w);
+		}
+
+		// Broadcast an agent-issued action to all connected socket peers
+		// (observers). The server has already scheduled this action on
+		// its own virtual client via schedule_action; observers need the
+		// same bytes so their local sim tracks the server frame-for-frame.
+		//
+		// We call the transport layer's send_message directly so we skip
+		// the sync-layer send()'s local_client loopback, and we broadcast
+		// (h == nullptr) so every socket peer receives it.
+		void broadcast_agent_action(int slot, const uint8_t* data, size_t size) {
+			if (size == 0) return;
+			if (slot < 0 || slot > 7) return;
+			auto d = server.new_message();
+			uint8_t header[2] = {
+				(uint8_t)sync_messages::id_agent_action,
+				(uint8_t)slot,
+			};
+			d.put(header, 2);
+			d.put(data, size);
+			// h == nullptr broadcasts to every socket peer. NOTE: send_message
+			// does NOT loopback to local_client (that happens in the sync-
+			// layer send() wrapper, which we deliberately bypass).
+			server.send_message(d, nullptr);
 		}
 
 		void start_game(uint32_t seed) {
@@ -1391,6 +1463,18 @@ struct sync_functions: action_functions {
 	template<typename server_T>
 	void input_action(server_T& server, const uint8_t* data, size_t size) {
 		get_syncer(server).send(data, size);
+	}
+
+	// Server-side helper: after schedule_action'ing an agent-issued
+	// action on a virtual client, mirror the bytes to every connected
+	// observer so their sim stays in sync. Wraps the bytes in an
+	// id_agent_action envelope; observers route via their own
+	// virtual_clients_by_slot on receipt. No local loopback.
+	template<typename server_T>
+	void broadcast_agent_action(server_T& server, int slot,
+		const uint8_t* data, size_t size)
+	{
+		get_syncer(server).broadcast_agent_action(slot, data, size);
 	}
 
 	template<typename server_T>

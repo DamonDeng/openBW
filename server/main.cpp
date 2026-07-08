@@ -284,6 +284,11 @@ int main(int argc, char** argv) {
 		c.frame = (uint8_t)sync_st.sync_frame;
 		c.name = bwgame::a_string("agent_") + bwgame::a_string(std::to_string(slot).c_str());
 		virtual_clients[slot] = &c;
+		// Publish into the sync_state array so recv-side code (on
+		// observers) can look them up by slot, and so future code paths
+		// don't need this local `virtual_clients` array to know per-slot
+		// identity.
+		sync_st.virtual_clients_by_slot[slot] = &c;
 		fprintf(stderr, "[srv] registered virtual client for slot %d\n", slot);
 	}
 
@@ -331,9 +336,15 @@ int main(int argc, char** argv) {
 	while (true) {
 		// Drain pending agent commands in slot order (0 -> 7, FIFO within
 		// each slot). Each command was pre-encoded by ws_server into one
-		// or more BW action blobs (select + verb, typically). Route each
-		// blob through sync.h::schedule_action so it lands in the virtual
-		// client's queue and executes at current_frame + latency.
+		// or more BW action blobs (select + verb, typically). We do two
+		// things per blob:
+		//   1) schedule_action on the local virtual client so the server's
+		//      own sim applies it via execute_scheduled_actions.
+		//   2) broadcast_agent_action to every connected observer so their
+		//      sim schedules the same bytes on their own virtual client
+		//      and stays frame-for-frame with the server. Without step 2,
+		//      live observers would silently drift out of sync as soon as
+		//      the first agent command fires.
 		cmd_queue.drain([&](int slot, const uint8_t* data, size_t size) {
 			auto* vc = virtual_clients[slot];
 			if (!vc) return;
@@ -341,6 +352,7 @@ int main(int argc, char** argv) {
 			// check doesn't stall on this "client".
 			vc->frame = (uint8_t)sync_st.sync_frame;
 			funcs.schedule_action(vc, data, size);
+			funcs.broadcast_agent_action(server, slot, data, size);
 		});
 
 		// Drain pending observe requests: build the observation JSON on
