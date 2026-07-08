@@ -161,21 +161,28 @@ Tasks are tracked in the harness task system (see current tasks with
 3. ✅ **#15 Multi-observer support** — done. sync.h had a pre-game peer
    cap of 2 (BW 1v1 lobby assumption); relaxed to count only player-slot
    peers, so observers are unlimited. Server has --wait-observers N.
-4. **#17 Auth: user registry** — foundational. Load users.json at
-   startup; hash API keys; provide server::verify(key) → user*. Reused
-   by HTTP, WebSocket, and sync.h.
-5. **#18 Auth: sync.h id_auth handshake** — observer sends its API key
-   right after connect. Server binds sync client to a user.
-6. **#19 Server-assigned perspective + fog of war** — server sends
-   id_assign_perspective(slot) based on the authenticated user's
-   assigned_slot. Observer renders with per-player visibility filter.
-7. **#8 Command queue** + **#10 WebSocket agents** — first agent
+4. ✅ **#17 Auth: user registry** — done. users.json loaded at startup;
+   SHA-256 hashes stored, plaintext discarded. server::verify(key) →
+   user_t*. Reused across HTTP / WebSocket / sync.h.
+5. ✅ **#18 Auth: sync.h id_auth handshake** — done. Observer sends its
+   API key right after greeting. Server verifies via callback and
+   stashes user pointer on client_t::auth_user.
+6. ✅ **#19 Server-assigned perspective + fog of war** — done. Server
+   sends id_assign_perspective(slot) based on the authenticated user's
+   assigned_slot. Observer renders with per-player visibility filter
+   (sprites gated by visibility_flags, tiles darkened via light_pcx[6]
+   for fog, black for unexplored). Fixed a startup race where observer
+   3+ could stall inside SDL2 window creation and miss its async_connect.
+7. ✅ **#13 Late-join for observers** — done. Server starts immediately
+   (--wait-observers default is 0); observers can connect any time,
+   quit and reconnect freely. New id_catchup_data message ships the
+   replay_saver history to any late joiner; observer runs
+   start_game_local + a fast-forward loop of execute_actions +
+   next_frame to align its sim with the server's current frame.
+8. **#8 Command queue** + **#10 WebSocket agents** — first agent
    plug-in. Agent WS handshake reuses the same auth check.
-8. **#11 Observation serializer** — closes the LLM loop.
-9. **#9 HTTP control API** — operator plane. Reuses auth via Bearer.
-10. **#13 Late-join for observers** — v1.1 polish. Currently the server
-    *requires* observers to connect before start_game because sync.h
-    refuses new peers once game_started == true.
+9. **#11 Observation serializer** — closes the LLM loop.
+10. **#9 HTTP control API** — operator plane. Reuses auth via Bearer.
 11. **#14 Multi-game support** — when you want to run tournaments.
 
 ## Identity model
