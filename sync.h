@@ -514,14 +514,23 @@ struct sync_functions: action_functions {
 					// The stock check is `clients_with_uid >= 2`, which caps
 					// pre-game peers at "local + one remote". That's fine for
 					// BW-style 1v1 lobbies, but rejects extra observers.
-					// A pre-game peer is either a player (will occupy a slot
-					// once id_occupy_slot arrives) or a pure observer
-					// (player_slot stays -1). Count only the ones that could
-					// take a player slot; observers are unlimited.
+					//
+					// For our observer+agent setup this check needs to skip:
+					//   - other observers (player_slot == -1, not local) --
+					//     N observers should all be accepted.
+					//   - server-owned virtual player clients (h == nullptr,
+					//     player_slot >= 0) -- these are placeholders the
+					//     agent WebSocket layer uses to inject actions; they
+					//     aren't real lobby peers competing for a slot.
+					//
+					// Only local_client and other REAL network peers with a
+					// player_slot claim a lobby slot.
 					size_t peers_with_slot = 0;
 					for (auto* c : ptr(sync_st.clients)) {
 						if (!c->has_uid) continue;
-						if (c == sync_st.local_client || c->player_slot != -1) {
+						if (c == sync_st.local_client) {
+							++peers_with_slot;
+						} else if (c->player_slot != -1 && c->h != nullptr) {
 							++peers_with_slot;
 						}
 					}
