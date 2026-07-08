@@ -126,12 +126,20 @@ there:
 - Camera state is UI-local, not sim state — spectator scroll is free.
 - `replay_saver.h` already serializes exactly the action log observers need.
 
-Two small patches to `sync.h` unlock the whole thing:
+Small patches to `sync.h` unlocked the whole thing (implemented across
+the tasks above):
 
-1. Skip `player_slot == -1` clients in `all_clients_in_sync()` so observers
-   can't stall the game.
-2. Bump the per-observer action buffer size a few multiples so brief network
-   hiccups don't overflow.
+1. Skip `player_slot == -1` (observers) and `h == nullptr` (virtual
+   clients) in `all_clients_in_sync()` so neither can stall the sim.
+2. Relax the pre-game peer cap to count only local + real network
+   peers with a socket, letting N observers + K virtual slot clients
+   coexist.
+3. Late-join gate removed from `on_new_client`; `id_client_uid`
+   handler distinguishes pre-game (reset the lobby) vs mid-game
+   (bootstrap the new peer without disturbing the running sim).
+4. New wire messages: `id_auth` (client key → server verify), `id_assign_perspective` (server → client slot), `id_catchup_data`
+   (server → late joiner action-log bundle), `id_agent_action`
+   (server → observers live agent commands).
 
 ## Reuse map
 
@@ -170,18 +178,35 @@ Tasks are tracked in the harness task system (see current tasks with
 6. ✅ **#19 Server-assigned perspective + fog of war** — done. Server
    sends id_assign_perspective(slot) based on the authenticated user's
    assigned_slot. Observer renders with per-player visibility filter
-   (sprites gated by visibility_flags, tiles darkened via light_pcx[6]
-   for fog, black for unexplored). Fixed a startup race where observer
-   3+ could stall inside SDL2 window creation and miss its async_connect.
+   (sprites gated by visibility_flags, tiles darkened via dark_pcx
+   row 7 for fog, black for unexplored). Fixed a startup race where
+   observer 3+ could stall inside SDL2 window creation and miss its
+   async_connect. Fixed the fog tint (was using light_pcx[6] which
+   produced a green cast on jungle tilesets).
 7. ✅ **#13 Late-join for observers** — done. Server starts immediately
    (--wait-observers default is 0); observers can connect any time,
    quit and reconnect freely. New id_catchup_data message ships the
    replay_saver history to any late joiner; observer runs
    start_game_local + a fast-forward loop of execute_actions +
    next_frame to align its sim with the server's current frame.
-8. **#8 Command queue** + **#10 WebSocket agents** — first agent
-   plug-in. Agent WS handshake reuses the same auth check.
-9. **#11 Observation serializer** — closes the LLM loop.
+8. ✅ **#8 Command queue** + ✅ **#10 WebSocket agents** — done. Agents
+   connect over WS on port 6113 (default), authenticate with the same
+   API key. Command JSON is encoded to BW action bytes and dropped
+   into a per-slot mutex-guarded queue; the sim thread drains slots
+   in order (0 → 7, FIFO within slot) each tick and both
+   schedule_actions locally AND broadcasts via id_agent_action so
+   already-connected observers stay in sync. Verbs supported: move,
+   attack, stop, train, build. Server registers 8 virtual sync
+   client_t entries (one per active slot, no socket, has_auth=true,
+   game_started=true) so execute_scheduled_actions actually applies
+   the queued bytes.
+9. ✅ **#11 Observation serializer** — done. observe() over WS returns
+   a JSON snapshot: resources, own units, visible enemies (fog
+   respected), neutrals (mineral fields / geysers), and optional
+   static map_info. Threaded correctly: WS handler queues a request,
+   sim thread serializes on its own thread, response is posted back
+   to the WS io_service for delivery. targets parameter filters the
+   payload (units / enemies / resources / map_info / all).
 10. **#9 HTTP control API** — operator plane. Reuses auth via Bearer.
 11. **#14 Multi-game support** — when you want to run tournaments.
 
@@ -216,53 +241,186 @@ One `server::verify(key) → user*` function backs all three. A user's
 Keys are demo-cleartext for now; TLS/wss is a deployment concern for a
 future task.
 
-## How to run the observation-mode demo
+## How to run the demo
 
 Prereqs: `original_resources/` contains `StarDat.mpq`, `BrooDat.mpq`,
 `Patch_rt.mpq` (SC1 assets, gitignored), and a map file (e.g. copy any
 `*.scm` from your SC install into `original_resources/`).
+`test_resources/users.json` has API keys for the built-in test users
+(see `test_resources/test_guidance.md` for copy-paste commands).
 
 ```bash
 # Configure & build (once)
 cmake -S . -B build_srv
 cmake --build build_srv -j
 
-# Terminal 1: server
+# Terminal 1: server (starts immediately, late joiners welcome)
 ./build_srv/server/openbw_server \
   --map "original_resources/(2)Bottleneck.scm" \
-  --data-path original_resources
+  --data-path original_resources \
+  --users test_resources/users.json
 
-# Terminal 2: observer (once server is listening)
+# Terminal 2: observer as alice (slot 0)
 ./build_srv/ui/openbw_observer \
   --map "original_resources/(2)Bottleneck.scm" \
   --data-path original_resources \
-  --server 127.0.0.1:6112
+  --server 127.0.0.1:6112 \
+  --api-key <alice's key from test_resources/users.json>
+
+# Terminal 3: agent as alice, sending a move command via WebSocket
+python3 <<'PY'
+import asyncio, json, websockets
+async def m():
+    key = "<alice's key>"
+    async with websockets.connect(f"ws://127.0.0.1:6113/agent?key={key}") as ws:
+        print(await ws.recv())                                    # welcome
+        await ws.send(json.dumps({"type":"observe","id":"o1"}))
+        obs = json.loads(await ws.recv())                         # observation
+        u = next(x for x in obs["units"] if not x.get("building"))
+        await ws.send(json.dumps({"type":"cmd","id":"m1",
+            "cmd":{"verb":"move","unit":u["unit_id"],"x":2000,"y":2000}}))
+        print(await ws.recv())                                    # ack
+asyncio.run(m())
+PY
 ```
 
-Server logs frame count + connected observer count once per second.
-Observer opens an SDL2 window showing the map.
+The observer window shows the SCV walking. The full copy-paste playbook
+for 2-player and 8-player maps lives in `test_resources/test_guidance.md`.
+
+## Agent WebSocket protocol
+
+Agents connect to `ws://<server>:6113/agent?key=<api_key>`. Auth is
+verified from the users.json registry; connection is refused if the key
+is unknown or the user's role isn't `player`. On accept, the server
+sends `{"type":"welcome","slot":N,"current_frame":F}`.
+
+### Client → server
+
+```jsonc
+// Ask for a snapshot of what the agent's slot can see.
+{"type":"observe", "id":"o1", "targets":["units","enemies","resources","map_info"]}
+// targets is optional. Default = ["units","enemies","resources"].
+// "all" is shorthand for everything.
+
+// Issue a unit command. Verbs: move, attack, stop, train, build.
+{"type":"cmd", "id":"m1", "cmd":{"verb":"move","unit":3684,"x":1024,"y":768}}
+{"type":"cmd", "id":"a1", "cmd":{"verb":"attack","unit":3684,"target_unit":3699,"x":0,"y":0}}
+{"type":"cmd", "id":"s1", "cmd":{"verb":"stop","unit":3684}}
+{"type":"cmd", "id":"t1", "cmd":{"verb":"train","unit":3720,"unit_type":7}}
+{"type":"cmd", "id":"b1", "cmd":{"verb":"build","unit":3684,"unit_type":106,"tile_x":24,"tile_y":30}}
+```
+
+`unit_id` is the raw 16-bit BW unit id (includes generation bits) — get
+it from an `observe()` response, not by counting.
+
+### Server → client
+
+```jsonc
+{"type":"welcome",     "slot":0, "current_frame":42}
+{"type":"ack",         "id":"m1", "queued_at_frame":43}
+{"type":"error",       "id":"m1", "message":"..."}
+{"type":"observation", "id":"o1", "slot":0, "current_frame":123,
+ "resources": {"minerals":50,"gas":0,"supply_used":8,"supply_max":20,...},
+ "units":     [{"unit_id":3684, "type":64, "x":3832, "y":2440,
+                "hp":20, "hp_max":20, "shields":20, "shields_max":20,
+                "order":3, "completed":true}, ...],
+ "enemies":   [...],
+ "neutrals":  [...],                                          // mineral fields, geysers
+ "map_info":  {"tile_width":128, "tile_height":128, ...}}     // only if requested
+```
+
+### Threading & determinism
+
+- Sim thread is single-threaded and owns `bwgame::state`. Never touched
+  by WS handlers.
+- Commands: WS handler encodes JSON → BW action bytes → pushes into a
+  per-slot mutex-guarded deque. Sim thread drains all 8 slots in order
+  each tick, `schedule_action`s on the slot's virtual sync client (so
+  `execute_scheduled_actions` dispatches them), and broadcasts each
+  action to every connected observer via `id_agent_action` so live
+  observers stay frame-for-frame with the server.
+- Observations: WS handler queues a request; sim thread serializes on
+  its own thread; response is posted back to the ws_server's io_service
+  for delivery.
+- Determinism: server assigns the frame each command applies on
+  (`current_frame + 1`). Every observer's local sim, whether live or
+  fast-forwarding via id_catchup_data, sees the same action stream in
+  the same order.
 
 ## Open questions to revisit later
 
 - **JSON vs protobuf for wire messages.** JSON is fine at LLM cadence
   (seconds). Switch if observations ever need to be many-per-second.
-- **Command validation error UX.** Invalid commands (unit dead, insufficient
-  resources) drop silently in openBW today. For LLM debugging we probably
-  want structured error replies. Decide when writing task #10.
-- **Fog of war for observers.** Full-vision by default (spectator mode), but
-  optionally per-player view for demo/streaming. `ui_functions` already has
-  the switch.
-- **Multi-game concurrency model.** Thread-per-room vs pool-of-workers.
-  Decide when task #14 lands.
+- **Structured command errors.** Invalid commands (unit dead,
+  insufficient resources) currently drop silently inside
+  `read_action_*`. LLMs would benefit from an error reply per rejected
+  command.
+- **Unit type names in observations.** Currently emit integer `type`
+  only. A small enum → string lookup table (228 entries) would help
+  LLMs but adds tokens; skip until an LLM struggles with it.
+- **Event push (unit under attack, unit lost).** Poll-based observe
+  works for planning but LLMs will miss reactive triggers. Add if
+  reactive behavior becomes important.
+- **Multi-game concurrency model.** Thread-per-room vs
+  pool-of-workers. Decide when task #14 lands.
+
+## Code layout
+
+Server-side (all under `server/`):
+
+- `main.cpp` — server binary. Loads map, binds sync + WS ports,
+  spawns virtual clients, drives the sim tick loop, drains command
+  and observe queues per tick.
+- `auth.h` — user_registry: loads users.json, hashes API keys with
+  SHA-256, `verify(key) → user_t*`.
+- `sha256.h` — public-domain SHA-256 used by auth.
+- `keygen.cpp` — `openbw_keygen` CLI, emits a users.json entry with a
+  fresh 32-byte random key.
+- `auth_test.cpp` — `openbw_auth_test` binary, sanity checks
+  (SHA-256 NIST vectors, registry lookup, dup rejection).
+- `command_queue.h` — per-slot mutex-guarded deque, drained in slot
+  order each tick.
+- `agent_protocol.h` — JSON → BW action bytes encoder. Verbs: move,
+  attack, stop, train, build.
+- `ws_server.h` — hand-rolled WebSocket server on asio 1.10.
+  Handles the HTTP upgrade, `?key=<api_key>` auth, masked text frame
+  parse/emit, dispatches `type:"cmd"` and `type:"observe"`.
+- `observe_request.h` — per-slot observation request queue.
+- `observation.h` — sim-thread snapshot serializer; respects fog of
+  war for enemies, breaks out neutrals.
+
+Sync layer (single header, shared with `ui/`):
+
+- `sync.h` — extended with:
+  - `id_auth`, `id_assign_perspective`, `id_catchup_data`,
+    `id_agent_action` message types.
+  - `sync_state::auth_check`, `perspective_for`, `catchup_provider`
+    callbacks, `outgoing_api_key`, `viewing_slot`,
+    `initial_rand_state`, `virtual_clients_by_slot`.
+  - `handle_catchup`, `start_game_local`, `broadcast_agent_action`.
+  - `all_clients_in_sync` excludes observers (player_slot == -1) and
+    virtual clients (h == nullptr) from the lag gate.
+
+Observer client:
+
+- `ui/observer.cpp` — SDL2 spectator. Connects before creating the
+  window (avoids macOS WindowServer stalls), waits briefly for the
+  handshake, then enters the sim loop.
+- `ui/ui.h` — added `viewing_slot` + fog rendering
+  (`draw_fog` and minimap fog use `dark_pcx` row 7).
+
+Test harness:
+
+- `test_resources/users.json` — 8 pre-generated player keys (alice
+  … henry, slots 0..7). Gitignored.
+- `test_resources/test_guidance.md` — copy-paste playbook.
 
 ## References
 
-- `sync.h` lines 191–205 (`execute_scheduled_actions`), 949–956
-  (`all_clients_in_sync`, the observer-stall bug), 279 (per-client latency
-  scheduling).
-- `ui/gfxtest.cpp::main_t` — reference for the sim step loop the server will
-  reuse.
-- `mini-openbwapi/` — reference for the command/observation surface the RPC
-  layer wraps.
-- `replay_saver.h` / `replay.h` — action-log serialization reused for
-  observer late-join.
+- `sync.h` lines around `execute_scheduled_actions`,
+  `all_clients_in_sync`, and `schedule_action` — the core sync
+  loop the whole observer + agent stack builds on.
+- `mini-openbwapi/` — original inspiration for the command /
+  observation surface, though our WS protocol is JSON-first.
+- `replay_saver.h` / `replay.h` — action-log serialization reused
+  for observer late-join.
