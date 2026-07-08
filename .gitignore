@@ -1,0 +1,12 @@
+# SC1 game assets (copyrighted; never commit)
+original_resources/
+
+# Build outputs
+build/
+cmake-build-*/
+
+# Editor / OS cruft
+.DS_Store
+.vscode/
+.idea/
+*.swp
