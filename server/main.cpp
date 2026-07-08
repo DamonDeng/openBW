@@ -45,6 +45,7 @@ struct args_t {
 	std::string map_path;
 	int port = 6112;
 	uint32_t seed = 42;
+	int wait_observers = 1;
 };
 
 args_t parse_args(int argc, char** argv) {
@@ -55,13 +56,17 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--map") && i + 1 < argc) a.map_path = argv[++i];
 		else if (eq("--port") && i + 1 < argc) a.port = std::atoi(argv[++i]);
 		else if (eq("--seed") && i + 1 < argc) a.seed = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
+		else if (eq("--wait-observers") && i + 1 < argc) a.wait_observers = std::atoi(argv[++i]);
 		else if (eq("--help") || eq("-h")) {
 			fprintf(stderr,
-				"usage: %s --map <path> [--port 6112] [--data-path .] [--seed 42]\n"
-				"  --map        path to .scm/.scx map file\n"
-				"  --data-path  dir containing StarDat.mpq et al (default: .)\n"
-				"  --port       TCP port to bind (default: 6112)\n"
-				"  --seed       RNG seed (default: 42)\n",
+				"usage: %s --map <path> [options]\n"
+				"  --map              path to .scm/.scx map file\n"
+				"  --data-path        dir containing StarDat.mpq et al (default: .)\n"
+				"  --port             TCP port to bind (default: 6112)\n"
+				"  --seed             RNG seed (default: 42)\n"
+				"  --wait-observers N wait for N observers to connect before\n"
+				"                     starting the game (default: 1). Late\n"
+				"                     joiners are rejected until task #13 lands.\n",
 				argv[0]);
 			std::exit(0);
 		} else {
@@ -73,6 +78,7 @@ args_t parse_args(int argc, char** argv) {
 		fprintf(stderr, "error: --map is required (try --help)\n");
 		std::exit(1);
 	}
+	if (a.wait_observers < 1) a.wait_observers = 1;
 	return a;
 }
 
@@ -113,31 +119,53 @@ int main(int argc, char** argv) {
 
 	// 3. sync.h refuses new connections once game_started is true (this is
 	//    the "no late-join" gap tracked in task #13). Until we implement
-	//    fast-forward replay for late joiners, wait for at least one
-	//    observer to connect before starting the game.
+	//    fast-forward replay for late joiners, wait for `wait_observers`
+	//    observers to connect and complete the handshake before starting.
 	//
 	//    Use funcs.sync(server) here rather than raw server.poll() -- sync()
 	//    binds the proper on_new_client handler in sync.h that actually
 	//    registers new peers in sync_st.clients.
-	fprintf(stderr, "[srv] waiting for first observer to connect...\n");
+	auto count_ready_observers = [&]() {
+		int n = 0;
+		for (auto& c : sync_st.clients) {
+			if (&c == sync_st.local_client) continue;
+			// has_uid == true means the client has completed the greeting +
+			// uid exchange (see sync.h::recv id_client_uid). Anything less
+			// and we can't safely start_game.
+			if (c.has_uid) ++n;
+		}
+		return n;
+	};
+
+	fprintf(stderr, "[srv] waiting for %d observer(s) to connect...\n", args.wait_observers);
+	int last_reported = -1;
+	auto start_wait = std::chrono::steady_clock::now();
 	while (true) {
 		funcs.sync(server);
-		bool has_observer = false;
-		for (auto& c : sync_st.clients) {
-			if (&c != sync_st.local_client) { has_observer = true; break; }
+		int n_ready = count_ready_observers();
+		if (n_ready != last_reported) {
+			fprintf(stderr, "[srv]  observers ready: %d/%d\n", n_ready, args.wait_observers);
+			last_reported = n_ready;
+			start_wait = std::chrono::steady_clock::now();
 		}
-		if (has_observer) break;
+		if (n_ready >= args.wait_observers) break;
 		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 	}
-	fprintf(stderr, "[srv] observer connected; giving handshake a moment...\n");
-	// Let the observer complete its greeting / uid exchange before we lock
-	// the game.
-	for (int i = 0; i < 30; ++i) {
+
+	// Extra grace period so any in-flight handshakes settle. Without this,
+	// a second observer that arrives right at the boundary can miss the
+	// pre-game window.
+	fprintf(stderr, "[srv] target observer count reached; short grace period...\n");
+	auto grace_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+	while (std::chrono::steady_clock::now() < grace_end) {
 		funcs.sync(server);
 		std::this_thread::sleep_for(std::chrono::milliseconds(20));
 	}
+	(void)start_wait;
+
 	funcs.start_game(server);
-	fprintf(stderr, "[srv] game started with seed=%u\n", args.seed);
+	fprintf(stderr, "[srv] game started with seed=%u (%d observers)\n",
+		args.seed, count_ready_observers());
 
 	// 4. Fixed-rate tick loop.
 	using clock_t = std::chrono::steady_clock;

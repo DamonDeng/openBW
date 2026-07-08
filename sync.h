@@ -385,11 +385,21 @@ struct sync_functions: action_functions {
 				if (get_client(uid)) {
 					this->kill_client(client);
 				} else {
-					size_t clients_with_uid = 0;
+					// The stock check is `clients_with_uid >= 2`, which caps
+					// pre-game peers at "local + one remote". That's fine for
+					// BW-style 1v1 lobbies, but rejects extra observers.
+					// A pre-game peer is either a player (will occupy a slot
+					// once id_occupy_slot arrives) or a pure observer
+					// (player_slot stays -1). Count only the ones that could
+					// take a player slot; observers are unlimited.
+					size_t peers_with_slot = 0;
 					for (auto* c : ptr(sync_st.clients)) {
-						if (c->has_uid) ++clients_with_uid;
+						if (!c->has_uid) continue;
+						if (c == sync_st.local_client || c->player_slot != -1) {
+							++peers_with_slot;
+						}
 					}
-					if (clients_with_uid >= 2) {
+					if (peers_with_slot >= 2) {
 						this->kill_client(client);
 					} else {
 						client->uid = uid;
