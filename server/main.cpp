@@ -13,6 +13,7 @@
 #include "bwgame.h"
 #include "sync.h"
 #include "sync_server_asio_tcp.h"
+#include "replay_saver.h"
 
 #include "auth.h"
 
@@ -48,7 +49,12 @@ struct args_t {
 	std::string map_path;
 	int port = 6112;
 	uint32_t seed = 42;
-	int wait_observers = 1;
+	// Default 0: server starts the sim immediately and late-joining
+	// observers catch up via id_catchup_data. Set >0 if you want the
+	// server to hold the pre-game lobby until N observers have finished
+	// the auth+uid handshake (useful when you want everyone to see the
+	// opening seconds live rather than fast-forwarded).
+	int wait_observers = 0;
 	std::string users_path;
 	bool no_auth = false;
 };
@@ -72,8 +78,9 @@ args_t parse_args(int argc, char** argv) {
 				"  --port             TCP port to bind (default: 6112)\n"
 				"  --seed             RNG seed (default: 42)\n"
 				"  --wait-observers N wait for N observers to connect before\n"
-				"                     starting the game (default: 1). Late\n"
-				"                     joiners are rejected until task #13 lands.\n"
+				"                     starting the game (default: 0). With 0,\n"
+				"                     the game starts immediately and late\n"
+				"                     joiners catch up via replay fast-forward.\n"
 				"  --users <path>     users.json for API-key auth\n"
 				"  --no-auth          disable auth entirely (dev-only)\n",
 				argv[0]);
@@ -95,7 +102,7 @@ args_t parse_args(int argc, char** argv) {
 		fprintf(stderr, "error: --users and --no-auth are mutually exclusive\n");
 		std::exit(1);
 	}
-	if (a.wait_observers < 1) a.wait_observers = 1;
+	if (a.wait_observers < 0) a.wait_observers = 0;
 	return a;
 }
 
@@ -128,6 +135,30 @@ int main(int argc, char** argv) {
 
 	// Give the local (server) client a name so the sync handshake is happy.
 	sync_st.local_client->name = "openbw_server";
+
+	// Enable the replay recorder so every applied action gets appended to
+	// an in-memory history buffer. This is what we ship to late-joining
+	// observers in id_catchup_data.
+	replay_saver_state replay_saver;
+	sync_st.save_replay = &replay_saver;
+
+	// Provide the catchup bundle when sync.h asks for it. Concatenates the
+	// history deque into one contiguous byte vector -- observers stream it
+	// through action_functions::execute_actions to fast-forward.
+	sync_st.catchup_provider = [&]() {
+		sync_state::catchup_bundle_t b;
+		b.current_frame = (uint32_t)st.current_frame;
+		b.seed = sync_st.initial_rand_state;
+		size_t total = 0;
+		for (auto& chunk : replay_saver.history) total += chunk.size();
+		b.action_bytes.reserve(total);
+		for (auto& chunk : replay_saver.history) {
+			b.action_bytes.insert(b.action_bytes.end(), chunk.begin(), chunk.end());
+		}
+		fprintf(stderr, "[srv] catchup bundle: frame=%u seed=%08x action_bytes=%zu\n",
+			b.current_frame, b.seed, b.action_bytes.size());
+		return b;
+	};
 
 	// Wire auth if requested.
 	openbw_auth::user_registry registry;
@@ -167,55 +198,51 @@ int main(int argc, char** argv) {
 	server.bind("0.0.0.0", args.port);
 	fprintf(stderr, "[srv] listening on 0.0.0.0:%d\n", args.port);
 
-	// 3. sync.h refuses new connections once game_started is true (this is
-	//    the "no late-join" gap tracked in task #13). Until we implement
-	//    fast-forward replay for late joiners, wait for `wait_observers`
-	//    observers to connect and complete the handshake before starting.
-	//
-	//    Use funcs.sync(server) here rather than raw server.poll() -- sync()
-	//    binds the proper on_new_client handler in sync.h that actually
-	//    registers new peers in sync_st.clients.
+	// 3. Optionally hold pre-game until N observers have connected. With
+	//    N == 0 (default), the sim starts right away and late joiners
+	//    catch up via id_catchup_data.
 	auto count_ready_observers = [&]() {
 		int n = 0;
 		for (auto& c : sync_st.clients) {
 			if (&c == sync_st.local_client) continue;
-			// has_uid == true means the client has completed the greeting +
-			// uid exchange (see sync.h::recv id_client_uid). Anything less
-			// and we can't safely start_game.
 			if (c.has_uid) ++n;
 		}
 		return n;
 	};
 
-	fprintf(stderr, "[srv] waiting for %d observer(s) to connect...\n", args.wait_observers);
-	int last_reported = -1;
-	auto start_wait = std::chrono::steady_clock::now();
-	while (true) {
-		funcs.sync(server);
-		int n_ready = count_ready_observers();
-		if (n_ready != last_reported) {
-			fprintf(stderr, "[srv]  observers ready: %d/%d\n", n_ready, args.wait_observers);
-			last_reported = n_ready;
-			start_wait = std::chrono::steady_clock::now();
+	if (args.wait_observers > 0) {
+		fprintf(stderr, "[srv] waiting for %d observer(s) to connect...\n", args.wait_observers);
+		int last_reported = -1;
+		while (true) {
+			funcs.sync(server);
+			int n_ready = count_ready_observers();
+			if (n_ready != last_reported) {
+				fprintf(stderr, "[srv]  observers ready: %d/%d\n", n_ready, args.wait_observers);
+				last_reported = n_ready;
+			}
+			if (n_ready >= args.wait_observers) break;
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		}
-		if (n_ready >= args.wait_observers) break;
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		fprintf(stderr, "[srv] target observer count reached; short grace period...\n");
+		auto grace_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+		while (std::chrono::steady_clock::now() < grace_end) {
+			funcs.sync(server);
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		}
+	} else {
+		fprintf(stderr, "[srv] starting immediately; observers may join at any time.\n");
 	}
 
-	// Extra grace period so any in-flight handshakes settle. Without this,
-	// a second observer that arrives right at the boundary can miss the
-	// pre-game window.
-	fprintf(stderr, "[srv] target observer count reached; short grace period...\n");
-	auto grace_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-	while (std::chrono::steady_clock::now() < grace_end) {
+	// funcs.start_game() only kicks off a countdown; the actual sim init
+	// (and initial_rand_state population) happens a few sync cycles later
+	// inside process_messages(). Log the true state after that settles.
+	funcs.start_game(server);
+	while (!sync_st.game_started) {
 		funcs.sync(server);
 		std::this_thread::sleep_for(std::chrono::milliseconds(20));
 	}
-	(void)start_wait;
-
-	funcs.start_game(server);
-	fprintf(stderr, "[srv] game started with seed=%u (%d observers)\n",
-		args.seed, count_ready_observers());
+	fprintf(stderr, "[srv] game started, initial_rand=%08x (%d observers)\n",
+		sync_st.initial_rand_state, count_ready_observers());
 
 	// 4. Fixed-rate tick loop.
 	using clock_t = std::chrono::steady_clock;

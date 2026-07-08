@@ -116,6 +116,12 @@ struct sync_state {
 	std::array<uint32_t, 4> insync_hash{};
 	uint8_t insync_hash_index = 0;
 
+	// Captured at start_game() time so late-joiners can seed their own sim
+	// identically to what the server (or earlier peers) computed. This is
+	// the post-mix rand_state that start_game() derived from the raw seed
+	// XOR'd with all client UIDs at that moment.
+	uint32_t initial_rand_state = 0;
+
 	// Optional per-connection authentication hook. If set, every incoming
 	// remote client must send id_auth as its first sync message; the check
 	// is called with the raw key bytes. Return non-null (an opaque user
@@ -137,10 +143,28 @@ struct sync_state {
 	// assignment (client renders with full vision).
 	std::function<int8_t(const void* auth_user)> perspective_for;
 
+	// Server-side: called when a late-joining observer needs the catch-up
+	// bundle. Must fill `out` with the concatenated replay_saver action
+	// history (frame + chunk + owner + bytes, repeated) and return the
+	// server's current sim frame + seed. If nullptr, no catch-up data is
+	// sent (observer will start from frame 0 with no history).
+	struct catchup_bundle_t {
+		uint32_t current_frame;
+		uint32_t seed;
+		a_vector<uint8_t> action_bytes;
+	};
+	std::function<catchup_bundle_t()> catchup_provider;
+
 	// Client-side: perspective slot assigned by the server. -1 means full
 	// vision. Updated when id_assign_perspective arrives. The UI polls
 	// this each frame to filter rendering.
 	int8_t viewing_slot = -1;
+
+	// Client-side: set to true when an id_catchup_data message is being
+	// processed. The observer's main loop watches this so the UI can
+	// render a "catching up" indicator instead of stale state. Cleared
+	// once fast-forward completes.
+	bool catching_up = false;
 
 };
 
@@ -220,7 +244,21 @@ namespace sync_messages {
 		// "full vision" (spectator). Sent once after auth succeeds; the
 		// receiver stashes it on sync_state::viewing_slot for the UI to
 		// pick up.
-		id_assign_perspective
+		id_assign_perspective,
+		// Server -> client: mid-game catch-up bundle for a late joiner.
+		// Payload:
+		//   [uint32_t current_frame]   -- server's current frame
+		//   [uint32_t seed]            -- lcg_rand_state at game start
+		//   [uint32_t action_bytes_len]
+		//   [action_bytes]             -- concatenated replay_saver history
+		//                                 (the BW replay action stream format)
+		// On receipt, the observer:
+		//   1. runs local start_game(seed) to spawn starting units + set race
+		//   2. fast-forwards through the action stream up to current_frame
+		//   3. transitions into normal live-sync mode
+		// The action stream layout is [uint32_t frame][uint8_t chunk_size]
+		// [uint8_t owner][action bytes] repeated -- see replay_saver.h.
+		id_catchup_data
 	};
 	enum {
 		id_game_started_escape = 0xdc
@@ -501,17 +539,30 @@ struct sync_functions: action_functions {
 							client->name += c;
 						}
 
-						for (int i = 0; i != 12; ++i) {
-							st.players[i].controller = sync_st.initial_slot_controllers[i];
-							st.players[i].race = sync_st.initial_slot_races[i];
+						// Pre-game: reset all peers so the lobby is
+						// consistent. Post-game (late-join): only initialize
+						// the new peer; do NOT reset sync_frame or the other
+						// peers, or the running sim would break.
+						if (!sync_st.game_started) {
+							for (int i = 0; i != 12; ++i) {
+								st.players[i].controller = sync_st.initial_slot_controllers[i];
+								st.players[i].race = sync_st.initial_slot_races[i];
+							}
+							for (auto* c : ptr(sync_st.clients)) {
+								c->player_slot = -1;
+								clear_scheduled_actions(c);
+								c->frame = 0;
+							}
+							sync_st.sync_frame = 0;
+						} else {
+							// Late-join: align this peer's frame counter with
+							// the current sync frame so all_clients_in_sync
+							// doesn't stall waiting for their id_client_frame.
+							client->player_slot = -1;
+							clear_scheduled_actions(client);
+							client->frame = (uint8_t)sync_st.sync_frame;
 						}
 
-						for (auto* c : ptr(sync_st.clients)) {
-							c->player_slot = -1;
-							clear_scheduled_actions(c);
-							c->frame = 0;
-						}
-						sync_st.sync_frame = 0;
 						if (client->h) {
 							server.allow_send(client->h, true);
 							// Now that this client's socket is enabled for
@@ -527,6 +578,23 @@ struct sync_functions: action_functions {
 								pw.put<int8_t>(slot);
 								send(pw, client->h);
 							}
+
+							// If the game is already running and we have a
+							// catchup provider, ship the action log to this
+							// late joiner so they can fast-forward.
+							if (sync_st.game_started
+								&& client != sync_st.local_client
+								&& client->has_auth
+								&& sync_st.catchup_provider) {
+								auto bundle = sync_st.catchup_provider();
+								dynamic_writer<> cw;
+								cw.put<uint8_t>(sync_messages::id_catchup_data);
+								cw.put<uint32_t>(bundle.current_frame);
+								cw.put<uint32_t>(bundle.seed);
+								cw.put<uint32_t>((uint32_t)bundle.action_bytes.size());
+								cw.put_bytes(bundle.action_bytes.data(), bundle.action_bytes.size());
+								send(cw, client->h);
+							}
 						}
 
 						sync_st.clients.sort([&](auto& a, auto& b) {
@@ -534,6 +602,12 @@ struct sync_functions: action_functions {
 						});
 					}
 				}
+				break;
+			}
+			case sync_messages::id_catchup_data: {
+				// Client-side receipt: deserialize + fast-forward locally.
+				// Delegated to a member function so the code is testable.
+				handle_catchup(r);
 				break;
 			}
 			default:
@@ -548,6 +622,64 @@ struct sync_functions: action_functions {
 		void recv(sync_state::client_t* client, const uint8_t* data, size_t data_size) {
 			data_loading::data_reader_le r(data, data + data_size);
 			return recv(client, r);
+		}
+
+		// Storage for the action bytes shipped in id_catchup_data. Kept as
+		// a member so execute_actions can walk it across many next_frame
+		// iterations without re-copying. Only the catch-up path touches
+		// this; once live, action_st.actions_data_position is left alone.
+		a_vector<uint8_t> catchup_action_bytes;
+
+		// Called by the observer on receipt of id_catchup_data. Reads the
+		// payload, seeds the local sim, and fast-forwards to the server's
+		// current frame. Runs entirely locally: no messages are sent.
+		template<typename reader_T>
+		void handle_catchup(reader_T& r) {
+			uint32_t target_frame = r.template get<uint32_t>();
+			uint32_t rand_state = r.template get<uint32_t>();
+			uint32_t action_bytes_len = r.template get<uint32_t>();
+
+			if (action_bytes_len > r.left()) {
+				// Corrupt bundle; abandon.
+				return;
+			}
+			catchup_action_bytes.resize(action_bytes_len);
+			if (action_bytes_len > 0) {
+				r.get_bytes(catchup_action_bytes.data(), action_bytes_len);
+			}
+
+			sync_st.catching_up = true;
+
+			// Bootstrap the sim identically to how the server did it. This
+			// installs starting units, initial resources, races, etc.
+			if (!sync_st.game_started) {
+				start_game_local(rand_state);
+			}
+
+			// Feed the action stream through execute_actions, alternating
+			// with next_frame(), until current_frame reaches target_frame.
+			// action_functions::execute_actions is the same driver the
+			// replay path uses.
+			if (!catchup_action_bytes.empty()) {
+				uint8_t* buf_begin = catchup_action_bytes.data();
+				uint8_t* buf_end = buf_begin + catchup_action_bytes.size();
+				while ((uint32_t)st.current_frame < target_frame) {
+					funcs.action_functions::execute_actions(buf_begin, buf_end);
+					funcs.action_functions::next_frame();
+				}
+			} else {
+				// No actions in the log yet; just advance frames locally.
+				while ((uint32_t)st.current_frame < target_frame) {
+					funcs.action_functions::next_frame();
+				}
+			}
+
+			// Align our sync_frame counter with the server's so future
+			// id_client_frame heartbeats + all_clients_in_sync work.
+			sync_st.sync_frame = (int)target_frame;
+			sync_st.local_client->frame = (uint8_t)target_frame;
+
+			sync_st.catching_up = false;
 		}
 
 		void send_greeting(const void* h) {
@@ -688,10 +820,11 @@ struct sync_functions: action_functions {
 		}
 
 		void on_new_client(const void* h) {
-			if (sync_st.game_started || sync_st.game_starting_countdown) {
-				server.kill_client(h);
-				return;
-			}
+			// Previously we rejected connections once the game was running,
+			// forcing observers to be present before start_game. That gap is
+			// now closed by id_catchup_data: a late joiner is admitted, and
+			// the id_client_uid handler ships the action history + seed so
+			// they can fast-forward locally.
 			auto* c = new_client(h);
 			send_greeting(h);
 			// If we have an API key to present (client-side observer), send
@@ -806,11 +939,26 @@ struct sync_functions: action_functions {
 		}
 
 		void start_game(uint32_t seed) {
-
 			a_string seed_str;
 			for (auto& v : sync_st.clients) seed_str += v.uid.str();
 			uint32_t rand_state = seed ^ data_loading::crc32_t()((const uint8_t*)seed_str.data(), seed_str.size());
+			start_game_impl(rand_state, /*broadcast=*/true);
+		}
+
+		// Same as start_game(seed) but takes the already-mixed
+		// lcg_rand_state directly and does NOT broadcast id_game_started.
+		// Used by a late-joining observer whose local sim needs to be
+		// bootstrapped with the exact rand stream the server computed at
+		// its start_game time. Handshake mixing normally XORs the seed
+		// with all client UIDs, which differ for late joiners.
+		void start_game_local(uint32_t rand_state) {
+			start_game_impl(rand_state, /*broadcast=*/false);
+		}
+
+		void start_game_impl(uint32_t rand_state, bool broadcast) {
+
 			st.lcg_rand_state = rand_state;
+			sync_st.initial_rand_state = rand_state;
 
 			for (int i = 0; i != 12; ++i) {
 				auto& v = st.players[i];
@@ -871,7 +1019,9 @@ struct sync_functions: action_functions {
 				if ((unsigned)a.player_slot != (unsigned)b.player_slot) return (unsigned)a.player_slot < (unsigned)b.player_slot;
 				return a.uid < b.uid;
 			});
-			send_game_started();
+			if (broadcast) {
+				send_game_started();
+			}
 
 			for (auto* c : ptr(sync_st.clients)) {
 				if (c->player_slot != -1) sync_st.player_names.at(c->player_slot) = c->name;
