@@ -948,6 +948,11 @@ struct sync_functions: action_functions {
 
 		bool all_clients_in_sync() {
 			for (auto* c : ptr(sync_st.clients)) {
+				// Observer clients (player_slot == -1) never issue player
+				// commands; they only receive the action broadcast. Don't
+				// let them gate sim progress -- a slow observer would
+				// otherwise stall the whole game.
+				if (c->player_slot == -1 && c != sync_st.local_client) continue;
 				if ((int8_t)(sync_st.sync_frame - c->frame) >= (int8_t)sync_st.latency) {
 					return false;
 				}
