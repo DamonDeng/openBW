@@ -1,6 +1,10 @@
 # SC1 game assets (copyrighted; never commit)
 original_resources/
 
+# Local test scratch: API keys, generated user files, etc.
+# Contents are secrets and machine-specific; never commit.
+test_resource/
+
 # Build outputs
 build/
 build_*/
