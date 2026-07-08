@@ -1307,6 +1307,12 @@ struct sync_functions: action_functions {
 				// let them gate sim progress -- a slow observer would
 				// otherwise stall the whole game.
 				if (c->player_slot == -1 && c != sync_st.local_client) continue;
+				// Virtual clients (server-side placeholders for agent
+				// slots, no socket handle) never send id_client_frame
+				// heartbeats. Their frame counter would fall behind
+				// immediately if we checked it, stalling the sim. They're
+				// internal, not real peers -- exclude from the check.
+				if (c != sync_st.local_client && c->h == nullptr) continue;
 				if ((int8_t)(sync_st.sync_frame - c->frame) >= (int8_t)sync_st.latency) {
 					return false;
 				}
