@@ -3,7 +3,10 @@ original_resources/
 
 # Build outputs
 build/
+build_*/
 cmake-build-*/
+observer_log.txt
+log.txt
 
 # Editor / OS cruft
 .DS_Store

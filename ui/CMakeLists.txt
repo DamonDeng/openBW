@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.5)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,3 +39,12 @@ add_library(openbw_ui ./sdl2.cpp)
 target_link_libraries(openbw_ui ${SDL2_LIBRARIES} ${_openbw_ui_extra_libs})
 
 set_property(TARGET openbw_ui PROPERTY POSITION_INDEPENDENT_CODE ON)
+
+# openbw_observer: SDL2 spectator client for the openbw_server.
+# Only built when explicitly requested (top-level project drives this).
+if (OPENBW_BUILD_OBSERVER)
+	find_package(Threads REQUIRED)
+	add_executable(openbw_observer ./observer.cpp)
+	target_link_libraries(openbw_observer
+		PRIVATE openbw_ui ${SDL2_LIBRARIES} ${_openbw_ui_extra_libs} Threads::Threads)
+endif()
