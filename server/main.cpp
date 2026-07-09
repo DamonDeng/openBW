@@ -23,8 +23,10 @@
 #include "query_request.h"
 #include "ws_server.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -71,6 +73,12 @@ struct args_t {
 	// defaults to fast; multiplayer defaults to fastest. We pick fastest
 	// as our default so agent iteration is snappy.
 	int tick_ms = 42;
+
+	// Per-slot race override. -1 means "use map default". Indices are
+	// player slots (0..7). We only accept overrides for the 8 melee
+	// slots; slots 8..11 are reserved (neutral/rescue/etc.).
+	// race_t values match game_types.h: 0=zerg, 1=terran, 2=protoss.
+	std::array<int8_t, 8> race_overrides{{-1,-1,-1,-1,-1,-1,-1,-1}};
 };
 
 // Named speeds (matches retail BW's ms/frame table).
@@ -83,6 +91,27 @@ inline int speed_name_to_ms(const std::string& name) {
 	if (name == "faster")  return 48;
 	if (name == "fastest") return 42;
 	return -1;
+}
+
+// Parse "N=NAME" (e.g., "0=protoss") into (slot, race_id). Returns
+// false on malformed input. race_id matches game_types.h race_t.
+inline bool parse_race_override(const std::string& v, int& slot, int8_t& race_id) {
+	auto eq_pos = v.find('=');
+	if (eq_pos == std::string::npos) return false;
+	std::string lhs = v.substr(0, eq_pos);
+	std::string rhs = v.substr(eq_pos + 1);
+	if (lhs.empty() || rhs.empty()) return false;
+	slot = std::atoi(lhs.c_str());
+	if (slot < 0 || slot > 7) return false;
+	if (rhs == "zerg")    { race_id = 0; return true; }
+	if (rhs == "terran")  { race_id = 1; return true; }
+	if (rhs == "protoss") { race_id = 2; return true; }
+	return false;
+}
+
+inline const char* race_name(int8_t r) {
+	switch (r) { case 0: return "zerg"; case 1: return "terran";
+	             case 2: return "protoss"; default: return "?"; }
 }
 
 args_t parse_args(int argc, char** argv) {
@@ -98,6 +127,17 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--no-auth")) a.no_auth = true;
 		else if (eq("--ws-port") && i + 1 < argc) a.ws_port = std::atoi(argv[++i]);
 		else if (eq("--no-agents")) a.no_agents = true;
+		else if (eq("--race") && i + 1 < argc) {
+			std::string v = argv[++i];
+			int slot; int8_t race_id;
+			if (!parse_race_override(v, slot, race_id)) {
+				fprintf(stderr,
+					"error: --race expects <slot>=<zerg|terran|protoss>, "
+					"slot in 0..7. got %s\n", v.c_str());
+				std::exit(1);
+			}
+			a.race_overrides[slot] = race_id;
+		}
 		else if (eq("--game-speed") && i + 1 < argc) {
 			std::string v = argv[++i];
 			int as_name = speed_name_to_ms(v);
@@ -135,7 +175,14 @@ args_t parse_args(int argc, char** argv) {
 				"                     name: slowest, slower, slow, normal,\n"
 				"                     fast, faster, fastest (default:\n"
 				"                     fastest = 42 ms/frame ~ 24 FPS).\n"
-				"                     Retail BW campaign uses 'fast' (56).\n",
+				"                     Retail BW campaign uses 'fast' (56).\n"
+				"  --race N=RACE      override slot N's race, one of\n"
+				"                     zerg/terran/protoss. Repeat for\n"
+				"                     multiple slots (e.g. --race 0=zerg\n"
+				"                     --race 1=terran). Overrides the race\n"
+				"                     the map assigned to that slot. Only\n"
+				"                     meaningful on melee maps where\n"
+				"                     starting units are spawned by race.\n",
 				argv[0]);
 			std::exit(0);
 		} else {
@@ -176,7 +223,38 @@ int main(int argc, char** argv) {
 	{
 		game_load_functions loader(st);
 		for (size_t i = 0; i < 8; ++i) loader.setup_info.create_melee_units_for_player[i] = true;
-		loader.load_map_file(a_string(args.map_path.c_str()));
+
+		// setup_f runs inside load_map_file AFTER the map's SIDE chunk
+		// has populated st.players[i].race and BEFORE create_starting_units
+		// spawns the initial units. This is where we override, so the
+		// spawn code sees the new race and hands out the right nexus/
+		// hatchery/CC + workers. See bwgame.h load_map_data around the
+		// setup_f() call and the create_starting_units loop below it.
+		auto setup_f = [&args, &st]() {
+			// Preserve BW's default: turn "open" slots into "occupied"
+			// so create_starting_units actually spawns for them. This
+			// mirrors the fallback block that runs when setup_f is
+			// omitted (bwgame.h ~ line 21790).
+			for (size_t i = 0; i != 12; ++i) {
+				if (st.players[i].controller == player_t::controller_open) {
+					st.players[i].controller = player_t::controller_occupied;
+				}
+				if (st.players[i].controller == player_t::controller_computer) {
+					st.players[i].controller = player_t::controller_computer_game;
+				}
+			}
+			// Then apply race overrides.
+			for (size_t i = 0; i < 8; ++i) {
+				if (args.race_overrides[i] < 0) continue;
+				race_t old_race = st.players[i].race;
+				st.players[i].race = (race_t)args.race_overrides[i];
+				fprintf(stderr,
+					"[srv] slot %zu race override: %d -> %s\n",
+					i, (int)old_race,
+					race_name(args.race_overrides[i]));
+			}
+		};
+		loader.load_map_file(a_string(args.map_path.c_str()), setup_f);
 	}
 	action_state action_st;
 	sync_state sync_st;
@@ -379,7 +457,19 @@ int main(int argc, char** argv) {
 	auto next_tick = clock_t::now() + tick_interval;
 	auto last_heartbeat = clock_t::now();
 
+	// Diagnostic counters, reset every heartbeat second. If the loop
+	// body (queue drains + next_frame + observer broadcasts) exceeds
+	// tick_interval, our fixed-rate scheduler can't sleep and the sim
+	// runs as fast as the code allows -- --game-speed then has no
+	// effect. Track this so we can tell a "flag not working" issue
+	// from a "budget exhausted" issue.
+	int overrun_frames = 0;      // frames whose body exceeded tick_interval
+	int total_frames = 0;
+	long long worst_ms = 0;      // slowest single tick body this second
+
 	while (true) {
+		auto loop_start = clock_t::now();
+
 		// Drain pending agent commands in slot order (0 -> 7, FIFO within
 		// each slot). Each command was pre-encoded by ws_server into one
 		// or more BW action blobs (select + verb, typically). We do two
@@ -441,6 +531,15 @@ int main(int argc, char** argv) {
 		current_frame_atomic.store(st.current_frame);
 
 		auto now = clock_t::now();
+
+		// Measure tick-body cost. If we routinely exceed tick_interval,
+		// --game-speed has no effect: the fixed-rate loop can't sleep.
+		auto body_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+			now - loop_start).count();
+		++total_frames;
+		if (body_ms > args.tick_ms) ++overrun_frames;
+		if (body_ms > worst_ms) worst_ms = body_ms;
+
 		if (now - last_heartbeat >= std::chrono::seconds(1)) {
 			int n_clients = 0;
 			int n_observers = 0;
@@ -451,8 +550,20 @@ int main(int argc, char** argv) {
 				if (c.player_slot == -1) ++n_observers;
 				else if (c.h == nullptr) ++n_agents;
 			}
-			fprintf(stderr, "[srv] frame=%d observers=%d virtual-agents=%d pending-cmds=%zu\n",
-				st.current_frame, n_observers, n_agents, cmd_queue.total_pending());
+			fprintf(stderr,
+				"[srv] frame=%d observers=%d virtual-agents=%d pending-cmds=%zu "
+				"loop_body: %d/%d over budget (worst=%lldms, budget=%dms)\n",
+				st.current_frame, n_observers, n_agents, cmd_queue.total_pending(),
+				overrun_frames, total_frames, worst_ms, args.tick_ms);
+			if (overrun_frames > total_frames / 2) {
+				fprintf(stderr,
+					"[srv] WARNING: over half of ticks exceeded budget; "
+					"--game-speed setting won't slow the sim below what "
+					"the loop body can achieve.\n");
+			}
+			overrun_frames = 0;
+			total_frames = 0;
+			worst_ms = 0;
 			last_heartbeat = now;
 		}
 
