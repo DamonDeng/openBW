@@ -164,6 +164,37 @@ async def scenario_neutrals_visible(c: Client) -> None:
     print(f"[smoke]  {len(minerals)} mineral fields visible -- OK")
 
 
+async def scenario_gather_verb(c: Client) -> None:
+    """Send a worker to gather; after a few seconds, minerals should
+    start climbing."""
+    print("[smoke] scenario: gather verb actually mines")
+    obs = await c.observe()
+    starting_minerals = obs["resources"]["minerals"]
+    workers = [u for u in obs["units"]
+               if u["type"] in WORKER_TYPES and u["order"] in IDLE_ORDERS]
+    check(len(workers) > 0, "no idle workers to gather with")
+
+    # Find a mineral to point them at.
+    obs_n = await c.observe(targets=["neutrals"])
+    minerals = [n for n in obs_n.get("neutrals", [])
+                if n["type"] in (176, 177, 178)]
+    check(len(minerals) > 0, "no mineral to gather")
+    m = minerals[0]
+
+    for w in workers[:2]:  # send two workers
+        await c.gather(unit_id=w["unit_id"], target_unit=m["unit_id"])
+
+    # Wait long enough for a full mining trip. On fastest ~ 5s is
+    # marginal; give it 10.
+    await asyncio.sleep(10.0)
+    obs2 = await c.observe()
+    delta = obs2["resources"]["minerals"] - starting_minerals
+    check(delta >= 8,
+          f"minerals only rose by {delta} after 10s of gather; "
+          f"expected >= 8 (one mining trip = 8)")
+    print(f"[smoke]  minerals +{delta} after 10s of gather -- OK")
+
+
 async def scenario_error_on_bad_verb(c: Client) -> None:
     """The server should reply with an error message for unknown verbs."""
     print("[smoke] scenario: server rejects invalid verb")
@@ -190,6 +221,7 @@ async def run_scenarios(api_key: str) -> None:
         await scenario_neutrals_visible(c)
         await scenario_error_on_bad_verb(c)
         await scenario_observe_move_verify(c)
+        await scenario_gather_verb(c)
 
 
 def main() -> int:

@@ -98,11 +98,25 @@ inline std::string build_observation(
 	const auto& st = funcs.st;
 
 	if (opts.include_resources && slot >= 0 && slot < 12) {
-		int race_idx = 1; // terran default; index into supply arrays
-		auto r = (int)st.players[slot].race;
-		if (r == 0) race_idx = 0;       // zerg
-		else if (r == 2) race_idx = 2;  // protoss
-		else race_idx = 1;              // terran (or fallback)
+		// Supply is tracked per-race (index 0=zerg, 1=terran, 2=protoss)
+		// because some maps allow a player to have units of multiple
+		// races. In practice each player owns exactly one race's supply
+		// arrays; the other two are empty. Pick the one with any
+		// non-zero data so we return the meaningful values regardless
+		// of how the map recorded the player's race.
+		int race_idx = -1;
+		for (int i = 0; i < 3; ++i) {
+			if (st.supply_used[slot][i].raw_value != 0
+			 || st.supply_available[slot][i].raw_value != 0) {
+				race_idx = i;
+				break;
+			}
+		}
+		// Fallback to player's declared race if all three are zero.
+		if (race_idx < 0) {
+			auto r = (int)st.players[slot].race;
+			race_idx = (r == 0) ? 0 : (r == 2) ? 2 : 1;
+		}
 		nlohmann::json rr;
 		rr["minerals"] = st.current_minerals[slot];
 		rr["gas"] = st.current_gas[slot];

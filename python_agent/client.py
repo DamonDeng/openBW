@@ -165,6 +165,11 @@ class Client:
                                "target_unit": target_unit,
                                "x": x, "y": y, "queue": queue})
 
+    async def gather(self, unit_id: int, target_unit: int) -> dict:
+        """Send a worker to harvest a mineral field or vespene geyser."""
+        return await self.cmd({"verb": "gather", "unit": unit_id,
+                               "target_unit": target_unit})
+
     async def stop(self, unit_id: int, queue: bool = False) -> dict:
         return await self.cmd({"verb": "stop", "unit": unit_id,
                                "queue": queue})

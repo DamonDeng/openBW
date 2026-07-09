@@ -145,6 +145,22 @@ Attack a specific unit, or attack-move to a position.
 - `target_unit`: unit id of the target, or `0` for attack-move.
 - `x`,`y`: only used for attack-move. Ignored if `target_unit != 0`.
 
+### Gather
+
+Send a worker to mine minerals or harvest gas.
+
+```json
+{"verb": "gather", "unit": 3684, "target_unit": 3721}
+```
+
+- `unit`: id of the worker (SCV / Drone / Probe).
+- `target_unit`: id of the mineral field or vespene geyser (from the
+  `neutrals` list in an observation).
+
+**Note**: attacking a mineral field with the `attack` verb won't
+start a gather cycle -- retail BW does that translation on the game
+client, not in the sim. Use `gather` for mining.
+
 ### Stop
 
 Cancel current orders.

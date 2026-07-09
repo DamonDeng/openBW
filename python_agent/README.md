@@ -11,12 +11,30 @@ check after server changes).
 python_agent/
 ├── client.py                # thin async WebSocket client (one method per API call)
 ├── enums.py                 # unit-type / order name<->id lookups
+├── helpers.py               # shared utilities: find workers, nearest, race, etc.
 ├── agents/
 │   ├── random_walk.py       # move idle workers to random points
-│   └── miner.py             # send idle workers to gather nearest minerals
+│   ├── miner.py             # send idle workers to gather nearest minerals
+│   ├── trainer.py           # keep the main producer training workers
+│   ├── builder.py           # place a supply-cap building near main (DEMO)
+│   └── attacker.py          # attack-move combat units toward enemy corner
 ├── smoke_test.py            # spawns server + runs scripted scenarios
 └── README.md                # this file
 ```
+
+The five agents cover the core BW verbs:
+
+- **random_walk** — move + observe loop
+- **miner** — gather (workers actually mine, minerals accumulate)
+- **trainer** — train (producers build new units, resources consumed)
+- **builder** — build (issues the verb; placement math is a learning
+  exercise -- see the file's docstring)
+- **attacker** — attack + attack-move; combines observe of enemies +
+  target selection
+
+Combine them freely: `miner + trainer` gives a functional economy on
+one slot. `attacker` needs combat units so pair it with a trainer +
+tech that produces them (attendee work).
 
 Zero dependencies beyond `websockets`. Python 3.9+ (uses dataclasses,
 `asyncio.run`, and type-hint syntax like `dict[int, str]`).
@@ -46,14 +64,23 @@ Start the server in one terminal:
 Then in another terminal:
 
 ```bash
-# Random-walk agent
-python3 -m python_agent.agents.random_walk \
-  sk-LYvXIzRDaDEe8GTlPgyf8eMxAyamUJt_Ig2413DbEjw
+# Pick one:
+python3 -m python_agent.agents.random_walk KEY
+python3 -m python_agent.agents.miner       KEY
+python3 -m python_agent.agents.trainer     KEY
+python3 -m python_agent.agents.builder     KEY
+python3 -m python_agent.agents.attacker    KEY
 
-# Auto-miner agent
-python3 -m python_agent.agents.miner \
-  sk-LYvXIzRDaDEe8GTlPgyf8eMxAyamUJt_Ig2413DbEjw
+# Where KEY = one of the api_key values in test_resources/users.json.
+# Alice's key (slot 0):
+#   sk-LYvXIzRDaDEe8GTlPgyf8eMxAyamUJt_Ig2413DbEjw
+# Bob's (slot 1):
+#   sk-anYTfuY-QL9szAzIlvtv44RxpgJlJPC1ocqIA26qpf0
 ```
+
+Multiple agents can run for the same slot — miner + trainer together
+gives you a functional economy on alice's side. Just launch them in
+separate terminals with the same key.
 
 Launch `openbw_observer` with the same key to watch what your agent
 does.

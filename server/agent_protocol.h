@@ -133,6 +133,35 @@ inline std::optional<encode_error> encode_command(
 		return std::nullopt;
 	}
 
+	// --- Gather ---
+	// {"verb":"gather","unit":<worker_id>,"target_unit":<mineral or geyser id>}
+	// Sends a worker to harvest a mineral field or vespene geyser. This
+	// is a dedicated verb rather than an alias of attack because BW's
+	// sim only starts a gather cycle for Orders::Harvest1, not
+	// Orders::AttackUnit -- retail clients translate the right-click
+	// on a mineral to Harvest1 on the client side, which we can't do
+	// from the sim.
+	if (verb == "gather") {
+		auto* u = need("unit"); auto* t = need("target_unit");
+		if (!u || !t) return encode_error{"gather: needs unit, target_unit"};
+		uint16_t unit_id = u->get<uint16_t>();
+		uint16_t target_id = t->get<uint16_t>();
+		if (target_id == 0)
+			return encode_error{"gather: target_unit must not be 0"};
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, ACT_ORDER);
+		put_i16(b, 0); put_i16(b, 0);            // position ignored for gather
+		put_u16(b, target_id);
+		put_u16(b, (uint16_t)bwgame::UnitTypes::None);
+		put_u8(b, (uint8_t)bwgame::Orders::Harvest1);
+		put_u8(b, 0);                            // queue = false
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
 	// --- Stop ---
 	// {"verb":"stop","unit":<id>,"queue":false}
 	if (verb == "stop") {
@@ -207,6 +236,7 @@ inline std::optional<encode_error> encode_command(
 //     where cmd is one of:
 //       {"verb":"move",   "unit":123, "x":1024, "y":768, "queue":false}
 //       {"verb":"attack", "unit":123, "x":1024, "y":768, "target_unit":0}
+//       {"verb":"gather", "unit":42, "target_unit":800}   // mineral or geyser id
 //       {"verb":"stop",   "unit":123, "queue":false}
 //       {"verb":"train",  "unit":42, "unit_type":7}      // Terran_SCV
 //       {"verb":"build",  "unit":42, "unit_type":106,     // CC = 106
