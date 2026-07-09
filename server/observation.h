@@ -44,6 +44,9 @@ inline observation_options parse_targets(const std::vector<std::string>& targets
 		}
 		if (t == "units") o.include_units = true;
 		else if (t == "enemies") o.include_enemies = true;
+		// "neutrals" is an alias -- the enemies pass produces both
+		// enemies and neutrals in one loop over st.visible_units.
+		else if (t == "neutrals") o.include_enemies = true;
 		else if (t == "resources") o.include_resources = true;
 		else if (t == "map_info") o.include_map_info = true;
 	}
