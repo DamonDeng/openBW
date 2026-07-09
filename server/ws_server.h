@@ -367,9 +367,40 @@ struct ws_connection : std::enable_shared_from_this<ws_connection> {
 			} else if (opcode == 0x1 && fin) {
 				handle_text_frame(std::string((const char*)frame_payload.data(),
 					frame_payload.size()));
+			} else if (opcode == 0x9) {
+				// Ping. Reply with a pong echoing the payload. Many
+				// WS client libraries (Python's `websockets` in
+				// particular) auto-ping every 20s and close the
+				// connection if they don't get a pong within another
+				// 20s -- so we can't just ignore these.
+				send_pong(frame_payload.data(), frame_payload.size());
 			}
-			// ignore ping/pong/continuation for MVP
+			// pong (0xA) and continuation (0x0) frames are still ignored:
+			// we never send pings, so incoming pongs are unsolicited,
+			// and we don't handle fragmented text messages (all our
+			// messages fit in one frame).
 		}
+	}
+
+	// Server -> client control frame with opcode. Same framing as
+	// send_text but the caller specifies the opcode + raw payload.
+	void send_control_frame(uint8_t opcode, const uint8_t* payload, size_t n) {
+		std::vector<uint8_t> out;
+		out.push_back((uint8_t)(0x80 | (opcode & 0x0f))); // FIN + opcode
+		// Control frames are capped at 125 bytes of payload per spec.
+		// Longer inputs get truncated; a ping payload above that is
+		// already a protocol violation on the sender's side.
+		if (n > 125) n = 125;
+		out.push_back((uint8_t)n);
+		out.insert(out.end(), payload, payload + n);
+		auto self = shared_from_this();
+		auto buf = std::make_shared<std::vector<uint8_t>>(std::move(out));
+		asio::async_write(socket, asio::buffer(*buf),
+			[self, buf](const asio::error_code&, size_t) {});
+	}
+
+	void send_pong(const uint8_t* payload, size_t n) {
+		send_control_frame(0xA, payload, n);
 	}
 
 	void handle_text_frame(const std::string& text) {
