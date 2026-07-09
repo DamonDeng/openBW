@@ -64,7 +64,24 @@ struct args_t {
 	std::string users_path;
 	bool no_auth = false;
 	bool no_agents = false;
+	// ms/frame. Retail BW ships seven speeds: slowest=167, slower=111,
+	// slow=83, normal=67, fast=56, faster=48, fastest=42. Campaign
+	// defaults to fast; multiplayer defaults to fastest. We pick fastest
+	// as our default so agent iteration is snappy.
+	int tick_ms = 42;
 };
+
+// Named speeds (matches retail BW's ms/frame table).
+inline int speed_name_to_ms(const std::string& name) {
+	if (name == "slowest") return 167;
+	if (name == "slower")  return 111;
+	if (name == "slow")    return 83;
+	if (name == "normal")  return 67;
+	if (name == "fast")    return 56;
+	if (name == "faster")  return 48;
+	if (name == "fastest") return 42;
+	return -1;
+}
 
 args_t parse_args(int argc, char** argv) {
 	args_t a;
@@ -79,6 +96,24 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--no-auth")) a.no_auth = true;
 		else if (eq("--ws-port") && i + 1 < argc) a.ws_port = std::atoi(argv[++i]);
 		else if (eq("--no-agents")) a.no_agents = true;
+		else if (eq("--game-speed") && i + 1 < argc) {
+			std::string v = argv[++i];
+			int as_name = speed_name_to_ms(v);
+			if (as_name > 0) {
+				a.tick_ms = as_name;
+			} else {
+				int as_int = std::atoi(v.c_str());
+				if (as_int <= 0 || as_int > 1000) {
+					fprintf(stderr,
+						"error: --game-speed must be one of "
+						"slowest/slower/slow/normal/fast/faster/fastest, "
+						"or an integer number of ms/frame (1-1000). "
+						"got %s\n", v.c_str());
+					std::exit(1);
+				}
+				a.tick_ms = as_int;
+			}
+		}
 		else if (eq("--help") || eq("-h")) {
 			fprintf(stderr,
 				"usage: %s --map <path> (--users <path> | --no-auth) [options]\n"
@@ -93,7 +128,12 @@ args_t parse_args(int argc, char** argv) {
 				"  --users <path>     users.json for API-key auth\n"
 				"  --no-auth          disable auth entirely (dev-only)\n"
 				"  --ws-port          TCP port for agent WebSocket (default: 6113)\n"
-				"  --no-agents        disable the agent WebSocket server\n",
+				"  --no-agents        disable the agent WebSocket server\n"
+				"  --game-speed <s>   ms/frame; either an integer or a BW\n"
+				"                     name: slowest, slower, slow, normal,\n"
+				"                     fast, faster, fastest (default:\n"
+				"                     fastest = 42 ms/frame ~ 24 FPS).\n"
+				"                     Retail BW campaign uses 'fast' (56).\n",
 				argv[0]);
 			std::exit(0);
 		} else {
@@ -329,7 +369,9 @@ int main(int argc, char** argv) {
 
 	// 4. Fixed-rate tick loop.
 	using clock_t = std::chrono::steady_clock;
-	const auto tick_interval = std::chrono::milliseconds(42); // ~24 FPS
+	const auto tick_interval = std::chrono::milliseconds(args.tick_ms);
+	fprintf(stderr, "[srv] tick_interval=%dms (%.1f FPS)\n",
+		args.tick_ms, 1000.0 / args.tick_ms);
 	auto next_tick = clock_t::now() + tick_interval;
 	auto last_heartbeat = clock_t::now();
 
