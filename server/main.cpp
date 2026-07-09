@@ -19,6 +19,8 @@
 #include "command_queue.h"
 #include "observe_request.h"
 #include "observation.h"
+#include "queries.h"
+#include "query_request.h"
 #include "ws_server.h"
 
 #include <atomic>
@@ -355,13 +357,15 @@ int main(int argc, char** argv) {
 	// Observation request queue: WS handler pushes when an agent calls
 	// observe(); sim thread drains + serializes on tick.
 	openbw_agents::observe_queue obs_queue;
+	// General read-only query queue: find_placement, future kinds.
+	openbw_agents::query_queue q_queue;
 	std::atomic<int> current_frame_atomic{0};
 
 	// Start the agent WS server unless disabled.
 	std::unique_ptr<openbw_agents::ws_server> ws;
 	if (!args.no_agents && !args.users_path.empty()) {
 		ws = std::make_unique<openbw_agents::ws_server>(
-			registry, cmd_queue, obs_queue, current_frame_atomic);
+			registry, cmd_queue, obs_queue, q_queue, current_frame_atomic);
 		ws->start((uint16_t)args.ws_port);
 	} else if (!args.no_agents) {
 		fprintf(stderr, "[srv] agent WS requires --users; skipping (or pass --no-agents).\n");
@@ -405,6 +409,23 @@ int main(int argc, char** argv) {
 			std::string body = openbw_agents::build_observation(
 				funcs, slot, (uint32_t)st.current_frame,
 				req.request_id, opts);
+			if (req.respond) req.respond(std::move(body));
+		});
+
+		// Drain pending read-only queries (find_placement, ...). Sim
+		// thread safe to read state here.
+		q_queue.drain([&](int slot, openbw_agents::query_request& req) {
+			std::string body;
+			if (req.kind == "find_placement") {
+				body = openbw_agents::build_placement_response(
+					funcs, slot, req.request_id, req.payload);
+			} else {
+				nlohmann::json err;
+				err["type"] = "error";
+				err["id"] = req.request_id;
+				err["message"] = "unknown query kind: " + req.kind;
+				body = err.dump();
+			}
 			if (req.respond) req.respond(std::move(body));
 		});
 

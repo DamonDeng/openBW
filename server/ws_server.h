@@ -25,6 +25,7 @@
 #include "auth.h"
 #include "command_queue.h"
 #include "observe_request.h"
+#include "query_request.h"
 #include "agent_protocol.h"
 
 #include "../deps/nlohmann/json.hpp"
@@ -142,6 +143,7 @@ struct ws_connection : std::enable_shared_from_this<ws_connection> {
 	openbw_auth::user_registry* registry = nullptr;
 	command_queue* queue = nullptr;
 	observe_queue* obs_queue = nullptr;
+	query_queue* q_queue = nullptr;
 	std::atomic<int>* server_current_frame = nullptr;
 	// So the sim thread can post its serialized observation back to our
 	// io_service for delivery over the wire. Owned by ws_server.
@@ -418,9 +420,34 @@ struct ws_connection : std::enable_shared_from_this<ws_connection> {
 			handle_cmd(j, id);
 		} else if (type == "observe") {
 			handle_observe(j, id);
+		} else if (type == "find_placement") {
+			handle_query(j, id, "find_placement");
 		} else {
 			send_error(id, "unknown message type: " + type);
 		}
+	}
+
+	// Read-only queries that need sim-thread access -- dispatched via
+	// query_queue. Response body is built on the sim thread and posted
+	// back to this WS thread for delivery.
+	void handle_query(const nlohmann::json& j, const std::string& id,
+	                  const std::string& kind) {
+		if (!q_queue) {
+			send_error(id, "query service not available");
+			return;
+		}
+		query_request req;
+		req.kind = kind;
+		req.request_id = id;
+		req.payload = j;   // the specific serializer inspects fields
+		auto self = shared_from_this();
+		req.respond = [self](std::string body) {
+			if (!self->our_io) return;
+			self->our_io->post([self, body = std::move(body)]() {
+				self->send_text(body);
+			});
+		};
+		q_queue->push(slot, std::move(req));
 	}
 
 	void handle_cmd(const nlohmann::json& j, const std::string& id) {
@@ -514,8 +541,9 @@ struct ws_connection : std::enable_shared_from_this<ws_connection> {
 class ws_server {
 public:
 	ws_server(openbw_auth::user_registry& reg, command_queue& q,
-		observe_queue& oq, std::atomic<int>& current_frame)
-		: registry(reg), queue(q), obs_queue(oq),
+		observe_queue& oq, query_queue& qq,
+		std::atomic<int>& current_frame)
+		: registry(reg), queue(q), obs_queue(oq), q_queue(qq),
 		  current_frame(current_frame), acceptor(io) {}
 
 	void start(uint16_t port) {
@@ -550,6 +578,7 @@ private:
 					conn->registry = &registry;
 					conn->queue = &queue;
 					conn->obs_queue = &obs_queue;
+					conn->q_queue = &q_queue;
 					conn->our_io = &io;
 					conn->server_current_frame = &current_frame;
 					conn->start();
@@ -561,6 +590,7 @@ private:
 	openbw_auth::user_registry& registry;
 	command_queue& queue;
 	observe_queue& obs_queue;
+	query_queue& q_queue;
 	std::atomic<int>& current_frame;
 	asio::io_service io;
 	asio::io_service::work work{io};

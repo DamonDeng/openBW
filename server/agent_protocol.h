@@ -200,7 +200,13 @@ inline std::optional<encode_error> encode_command(
 	// --- Build ---
 	// {"verb":"build","unit":<worker_id>,"unit_type":<UnitTypes int>,
 	//  "tile_x":<u16>,"tile_y":<u16>}
-	// Selects the worker then issues action_build with PlaceBuilding.
+	// The order type depends on the target building's race:
+	//   Terran   -> PlaceBuilding  (order 30, dispatches to order_PlaceBuilding)
+	//   Protoss  -> PlaceProtossBuilding (order 31)
+	//   Zerg     -> handled via train verb, not build (Larva morph)
+	// unit_build_order_valid at bwgame.h:18167 accepts both, but the
+	// dispatch table at bwgame.h:7652 routes to different order handlers
+	// with different placement + power-matrix logic.
 	if (verb == "build") {
 		auto* u = need("unit"); auto* ut = need("unit_type");
 		auto* tx = need("tile_x"); auto* ty = need("tile_y");
@@ -211,11 +217,26 @@ inline std::optional<encode_error> encode_command(
 		uint16_t tile_x = tx->get<uint16_t>();
 		uint16_t tile_y = ty->get<uint16_t>();
 
+		// Pick order by unit_type id. Buildings are grouped in
+		// bwenums.h roughly by race:
+		//   Terran buildings:   106..122 (with a gap for Vulture_Mine)
+		//   Zerg buildings:     130..150
+		//   Protoss buildings:  154..172
+		// Any override via optional "order" field in JSON.
+		uint8_t order = (uint8_t)bwgame::Orders::PlaceBuilding;
+		if (cmd.contains("order") && cmd["order"].is_number_integer()) {
+			order = (uint8_t)cmd["order"].get<int>();
+		} else if (unit_type >= 154 && unit_type <= 172) {
+			order = (uint8_t)bwgame::Orders::PlaceProtossBuilding;
+		}
+		// Zerg building placement isn't reachable through the build
+		// verb -- the Larva morph path is a train.
+
 		out.push_back(make_select(unit_id));
 
 		action_blob b;
 		put_u8(b, ACT_BUILD);
-		put_u8(b, (uint8_t)bwgame::Orders::PlaceBuilding);
+		put_u8(b, order);
 		put_u16(b, tile_x);
 		put_u16(b, tile_y);
 		put_u16(b, unit_type);

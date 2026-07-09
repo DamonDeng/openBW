@@ -195,6 +195,48 @@ Have a worker place a building.
 - `tile_x`, `tile_y`: position in **tile** units (1 tile = 32 pixels).
   See [Coordinate system](#coordinate-system).
 
+The order (Terran `PlaceBuilding` vs Protoss `PlaceProtossBuilding`)
+is auto-selected from the building's `unit_type` id. Zerg buildings
+morph from a Larva -- use the `train` verb, not `build`, for those.
+
+To find a **valid** tile (not blocked by minerals, unbuildable
+terrain, or unexplored fog) use the [`find_placement`](#find_placement-query)
+query first.
+
+### find_placement (query)
+
+Not a command -- a read-only query. Asks the server "where can I put
+a building of this type?" and gets back a list of valid tiles.
+
+```json
+{"type": "find_placement", "id": "fp1",
+ "unit_type": 156,               // Protoss_Pylon
+ "worker_unit": 3684,            // optional; anchors search around this unit
+ "center_x": 3800, "center_y": 2400,   // optional; alternative anchor
+ "radius_tiles": 12,             // optional; default 12
+ "max_results": 8}               // optional; default 24
+```
+
+Response:
+
+```json
+{"type": "placement_result", "id": "fp1",
+ "unit_type": 156, "tile_size_x": 2, "tile_size_y": 2,
+ "spots": [
+   {"tile_x": 119, "tile_y": 76, "center_x": 3840, "center_y": 2464},
+   {"tile_x": 120, "tile_y": 76, "center_x": 3872, "center_y": 2464},
+   ...
+ ]}
+```
+
+Spots are ordered nearest-first. Empty `spots` means nothing valid
+in the search radius. Feed `spot["tile_x"]`, `spot["tile_y"]` back
+into a `build` command to place the building.
+
+The server uses the sim's `can_place_building` internally, so if
+`spots` contains a tile, the subsequent `build` command will
+succeed (assuming enough minerals + a live worker).
+
 ---
 
 ## Observation format

@@ -164,6 +164,30 @@ async def scenario_neutrals_visible(c: Client) -> None:
     print(f"[smoke]  {len(minerals)} mineral fields visible -- OK")
 
 
+async def scenario_find_placement(c: Client) -> None:
+    """find_placement query returns valid tiles for a Pylon."""
+    print("[smoke] scenario: find_placement returns valid tiles")
+    obs = await c.observe()
+    workers = [u for u in obs["units"] if u["type"] in WORKER_TYPES]
+    check(len(workers) > 0, "no worker to anchor placement search")
+    w = workers[0]
+    # Ask for Pylon placement (unit type 156).
+    r = await c.find_placement(unit_type=156, worker_unit=w["unit_id"],
+                               radius_tiles=15, max_results=5)
+    check(r["type"] == "placement_result", f"bad response type: {r}")
+    check("spots" in r, f"no spots in response: {r}")
+    check(len(r["spots"]) > 0,
+          f"find_placement found no valid tile within 15 tiles of "
+          f"({w['x']},{w['y']}) for unit_type=156 (Pylon)")
+    # First spot should be closest to the worker; sanity-check it's
+    # inside a reasonable box.
+    s = r["spots"][0]
+    check(abs(s["center_x"] - w["x"]) < 20 * 32,
+          f"nearest spot too far in x: {s}")
+    print(f"[smoke]  {len(r['spots'])} placement tiles found; "
+          f"nearest at tile ({s['tile_x']},{s['tile_y']}) -- OK")
+
+
 async def scenario_gather_verb(c: Client) -> None:
     """Send a worker to gather; after a few seconds, minerals should
     start climbing."""
@@ -221,6 +245,7 @@ async def run_scenarios(api_key: str) -> None:
         await scenario_neutrals_visible(c)
         await scenario_error_on_bad_verb(c)
         await scenario_observe_move_verify(c)
+        await scenario_find_placement(c)
         await scenario_gather_verb(c)
 
 

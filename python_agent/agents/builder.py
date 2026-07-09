@@ -1,28 +1,22 @@
-"""Builder agent: picks a worker and orders it to place a supply-cap
-building near its main structure.
+"""Builder agent: places a supply-cap building near the main structure
+using the server's find_placement query to pick a valid tile.
 
-Terran -> Supply Depot,  Protoss -> Pylon,  Zerg -> Overlord (special:
-Zerg supply comes from morphing a Larva, not a build placement, so
-zerg falls back to training an Overlord like the trainer agent does).
+Race-aware:
+  Terran   -> Supply Depot
+  Protoss  -> Pylon
+  Zerg     -> Overlord (train from Larva; no build placement needed)
 
-DEMO / LEARNING SCAFFOLD, not a working economy bot.
+Loop:
+  1. observe -> know minerals, workers, main structure, existing supply
+     buildings.
+  2. If we already have enough supply capacity, wait.
+  3. If we can afford the next supply building, query find_placement
+     for a valid tile near our main structure.
+  4. Pick the first (nearest) tile from the result. Issue the build.
+  5. Remember the worker we chose so we don't interrupt it on the next
+     tick with a new build command.
 
-BW's `build` command is finicky: the placement tile must be buildable,
-unoccupied, and (for Protoss non-Pylons) in range of a Pylon. This
-agent picks a fixed offset from the main structure and repeatedly
-tries; you'll see the build command going over the wire in the log,
-but for Protoss on Bottleneck the fixed offset often lands on
-minerals or unbuildable ground and the sim silently rejects it. The
-verb, wire path, and worker selection all work -- the placement math
-is the workshop attendee's problem to solve.
-
-Realistic follow-ups:
-  1. Scan the map for a buildable tile near the main structure
-     (check tile flags for buildable + unoccupied).
-  2. Watch for the worker's order to transition to ConstructingBuilding
-     as the signal of success; retry with a different tile otherwise.
-  3. Track worker occupancy explicitly so we don't perpetually
-     interrupt one worker with new build commands.
+Runs alongside miner + trainer to keep the economy going.
 
 Usage:
     python3 -m python_agent.agents.builder <api_key>
@@ -38,63 +32,74 @@ from python_agent.enums import (
     unit_type_name, ORDERS_BY_NAME, UNIT_TYPES_BY_NAME,
 )
 from python_agent.helpers import (
-    guess_race, workers, pixel_to_tile,
+    guess_race, workers, buildings,
 )
 
 
-# Orders a worker enters after being told to build.
+# Orders a worker enters after being told to build. If our chosen
+# worker is in any of these, our previous build order is still in
+# progress -- don't spam another.
 BUILDING_ORDERS: set[int] = {
     ORDERS_BY_NAME["ConstructingBuilding"],
     ORDERS_BY_NAME["PlaceBuilding"],
     ORDERS_BY_NAME["PlaceProtossBuilding"],
     ORDERS_BY_NAME["DroneStartBuild"],
     ORDERS_BY_NAME["DroneBuild"],
+    ORDERS_BY_NAME["Move"],   # walking to the placement tile
 }
 
 
-# Race -> (main structure ids to anchor placement, building unit id,
-# mineral cost, tile offset from main to place at).
-RACE_SUPPLY = {
+# Race -> supply-building plan.
+#   'building': unit_type id of what we build
+#   'cost_min': minerals cost per structure
+#   'mode':     'build' for Terran/Protoss (place via worker),
+#               'train' for Zerg (morph Larva into Overlord)
+#   'main':    set of unit_type ids used to find our base
+#              anchor for placement search.
+RACE_PLANS = {
     "terran": {
-        "main":     {UNIT_TYPES_BY_NAME["Terran_Command_Center"]},
         "building": UNIT_TYPES_BY_NAME["Terran_Supply_Depot"],
         "cost_min": 100,
-        "offset":   (0, 3),   # 3 tiles down
+        "mode":     "build",
+        "main":     {UNIT_TYPES_BY_NAME["Terran_Command_Center"]},
     },
     "protoss": {
-        "main":     {UNIT_TYPES_BY_NAME["Protoss_Nexus"]},
         "building": UNIT_TYPES_BY_NAME["Protoss_Pylon"],
         "cost_min": 100,
-        # 5 tiles down. Pylons need to be far enough from the Nexus
-        # to not overlap; not so far that the worker has to trek across
-        # the map to reach the site.
-        "offset":   (0, 5),
+        "mode":     "build",
+        "main":     {UNIT_TYPES_BY_NAME["Protoss_Nexus"]},
     },
-    # Zerg: no build verb needed for supply; morph a Larva into an
-    # Overlord via train. Handled below.
     "zerg": {
-        "main":     {UNIT_TYPES_BY_NAME["Zerg_Larva"]},
         "building": UNIT_TYPES_BY_NAME["Zerg_Overlord"],
         "cost_min": 100,
-        "offset":   None,     # signal: use train not build
+        "mode":     "train",
+        "main":     {UNIT_TYPES_BY_NAME["Zerg_Larva"]},
     },
 }
 
 
-async def run(c: Client, interval_sec: float) -> None:
+def _building_or_pending(u: dict) -> bool:
+    """True if this unit is either flagged as a building on the wire
+    or has an order that means 'a building of me is being placed'."""
+    if u.get("building"):
+        return True
+    return u["order"] in BUILDING_ORDERS
+
+
+async def run(c: Client, interval_sec: float, target_supply_gap: int) -> None:
     print(f"[builder] connected as slot={c.welcome.slot} "
           f"at frame={c.welcome.current_frame}")
 
     race = None
     plan = None
-    already_ordered = False   # simple: place one depot then keep watching.
+    outstanding_worker: int | None = None  # worker with a build order in flight
 
     while True:
         obs = await c.observe(targets=["units", "resources"])
 
         if race is None:
             race = guess_race(obs["units"])
-            plan = RACE_SUPPLY.get(race)
+            plan = RACE_PLANS.get(race)
             print(f"[builder] inferred race={race}")
             if plan is None:
                 print("[builder] no plan for this race; exiting")
@@ -102,86 +107,119 @@ async def run(c: Client, interval_sec: float) -> None:
 
         r = obs["resources"]
 
-        # Recount how many supply structures we own. Rough proxy: number
-        # of completed buildings of the right type in own units.
-        target_building = plan["building"]
-        have = sum(
-            1 for u in obs["units"]
-            if u["type"] == target_building
-        )
-        # Ceiling: don't spam the whole map with pylons.
-        print(f"[builder] frame={obs['current_frame']} "
-              f"race={race} min={r['minerals']} "
-              f"supply={r['supply_used']}/{r['supply_max']} "
-              f"have_{unit_type_name(target_building)}={have}")
+        # Count owned supply buildings. A unit is in-progress when the
+        # server explicitly omits the "completed" flag; when the flag is
+        # set (default true), it's built. This keeps the two counts
+        # disjoint.
+        target_type = plan["building"]
+        matching = [u for u in obs["units"] if u["type"] == target_type]
+        have_completed = sum(1 for u in matching if u.get("completed") is True)
+        have_in_progress = sum(1 for u in matching if not u.get("completed", False))
 
-        if have >= 4:
-            # We've built plenty; go quiet.
+        print(f"[builder] frame={obs['current_frame']} race={race} "
+              f"min={r['minerals']} supply={r['supply_used']}/{r['supply_max']} "
+              f"have {unit_type_name(target_type)}={have_completed} "
+              f"(+{have_in_progress} in progress)")
+
+        # Do we need more supply?
+        # - Always try to keep >=3 free (build proactively).
+        # - AND cap the total build attempts so we don't cover the map
+        #   with pylons -- a max of ~6 supply buildings is plenty for
+        #   feature-coverage purposes.
+        gap = r["supply_max"] - r["supply_used"]
+        need_more = (gap < target_supply_gap
+                     and have_in_progress == 0
+                     and (have_completed + have_in_progress) < 6)
+
+        if not need_more:
             await asyncio.sleep(interval_sec)
             continue
 
-        if r["minerals"] < plan["cost_min"]:
+        # Need to hold back some minerals so the trainer can keep making
+        # workers. If we spend everything on a Pylon at 100 min we starve
+        # the trainer at 50 for a probe. Wait until we have cost_min + 60.
+        if r["minerals"] < plan["cost_min"] + 60:
             await asyncio.sleep(interval_sec)
             continue
 
-        if plan["offset"] is None:
-            # Zerg overlord: train from an idle Larva.
-            larvas = [u for u in obs["units"] if u["type"] in plan["main"]]
-            if larvas:
-                try:
-                    ack = await c.train(unit_id=larvas[0]["unit_id"],
-                                        unit_type=plan["building"])
-                    print(f"[builder]  morph Larva {larvas[0]['unit_id']} -> "
-                          f"{unit_type_name(plan['building'])} "
-                          f"@frame={ack['queued_at_frame']}")
-                except Exception as e:
-                    print(f"[builder]  cmd error: {e}")
-        else:
-            # Terran/Protoss: find a worker + a main structure + a spot.
-            mains = [u for u in obs["units"] if u["type"] in plan["main"]]
-            wu = workers(obs["units"])
-            if not mains or not wu:
-                await asyncio.sleep(interval_sec)
-                continue
-
-            # If any worker is already walking-to-build or actively
-            # building, don't issue another command -- give the previous
-            # order time to complete. Otherwise we perpetually interrupt.
-            walking_to_build = any(
-                w["order"] in BUILDING_ORDERS or
-                # Move + we recently told them to build; approximate by
-                # skipping if any worker isn't in a normal gather/idle
-                # state. Better: track our own outstanding orders.
-                w["order"] == ORDERS_BY_NAME["Move"]
-                for w in wu
+        # If we've already dispatched a worker and it's still walking
+        # or building, don't re-dispatch.
+        if outstanding_worker is not None:
+            still_busy = any(
+                u["unit_id"] == outstanding_worker and u["order"] in BUILDING_ORDERS
+                for u in obs["units"]
             )
-            if walking_to_build:
+            if still_busy:
                 await asyncio.sleep(interval_sec)
                 continue
+            outstanding_worker = None
 
-            main = mains[0]
-            worker = wu[0]
-            main_tx, main_ty = pixel_to_tile(main["x"], main["y"])
-            dx, dy = plan["offset"]
-            # Shift a bit for each extra depot so they don't stack.
-            tile_x = main_tx + dx + (have * 2)
-            tile_y = main_ty + dy
+        if plan["mode"] == "train":
+            # Zerg overlord path: find a Larva and morph.
+            larvas = [u for u in obs["units"] if u["type"] in plan["main"]]
+            if not larvas:
+                await asyncio.sleep(interval_sec)
+                continue
             try:
-                ack = await c.build(unit_id=worker["unit_id"],
-                                    unit_type=plan["building"],
-                                    tile_x=tile_x, tile_y=tile_y)
-                print(f"[builder]  worker {worker['unit_id']} -> "
-                      f"place {unit_type_name(plan['building'])} @tile "
-                      f"({tile_x},{tile_y}) @frame={ack['queued_at_frame']}")
+                ack = await c.train(unit_id=larvas[0]["unit_id"],
+                                    unit_type=target_type)
+                print(f"[builder]  morph Larva {larvas[0]['unit_id']} "
+                      f"-> {unit_type_name(target_type)} "
+                      f"@frame={ack['queued_at_frame']}")
             except Exception as e:
                 print(f"[builder]  cmd error: {e}")
+            await asyncio.sleep(interval_sec)
+            continue
+
+        # Terran / Protoss build path.
+        wu = workers(obs["units"])
+        if not wu:
+            await asyncio.sleep(interval_sec)
+            continue
+        worker = wu[0]
+
+        # Ask the server where we can put one.
+        try:
+            resp = await c.find_placement(
+                unit_type=target_type,
+                worker_unit=worker["unit_id"],
+                radius_tiles=15,
+                max_results=8,
+            )
+        except Exception as e:
+            print(f"[builder]  find_placement error: {e}")
+            await asyncio.sleep(interval_sec)
+            continue
+
+        spots = resp.get("spots", [])
+        if not spots:
+            print(f"[builder]  no valid placement found within 15 tiles; "
+                  f"widening search would go here")
+            await asyncio.sleep(interval_sec)
+            continue
+
+        # Take the nearest one.
+        spot = spots[0]
+        try:
+            ack = await c.build(unit_id=worker["unit_id"],
+                                unit_type=target_type,
+                                tile_x=spot["tile_x"],
+                                tile_y=spot["tile_y"])
+            outstanding_worker = worker["unit_id"]
+            print(f"[builder]  worker {worker['unit_id']} -> place "
+                  f"{unit_type_name(target_type)} @tile "
+                  f"({spot['tile_x']},{spot['tile_y']}) "
+                  f"@frame={ack['queued_at_frame']}")
+        except Exception as e:
+            print(f"[builder]  cmd error: {e}")
 
         await asyncio.sleep(interval_sec)
 
 
-async def main(api_key: str, host: str, port: int, interval_sec: float) -> None:
+async def main(api_key: str, host: str, port: int,
+               interval_sec: float, gap: int) -> None:
     async with Client(api_key=api_key, host=host, port=port) as c:
-        await run(c, interval_sec)
+        await run(c, interval_sec, gap)
 
 
 def entrypoint() -> None:
@@ -189,10 +227,14 @@ def entrypoint() -> None:
     p.add_argument("api_key")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=6113)
-    p.add_argument("--interval-sec", type=float, default=3.0)
+    p.add_argument("--interval-sec", type=float, default=2.0)
+    p.add_argument("--supply-gap", type=int, default=3,
+                   help="build another supply building when "
+                        "(supply_max - supply_used) drops below this")
     args = p.parse_args()
     try:
-        asyncio.run(main(args.api_key, args.host, args.port, args.interval_sec))
+        asyncio.run(main(args.api_key, args.host, args.port,
+                         args.interval_sec, args.supply_gap))
     except KeyboardInterrupt:
         print("\n[builder] stopped")
 

@@ -141,6 +141,39 @@ class Client:
             payload["targets"] = list(targets)
         return await self._request(payload)
 
+    async def find_placement(self, unit_type: int,
+                             worker_unit: int | None = None,
+                             center_x: int | None = None,
+                             center_y: int | None = None,
+                             radius_tiles: int = 12,
+                             max_results: int = 24,
+                             id: str | None = None) -> dict:
+        """Ask the server where a building can be placed.
+
+        Returns the placement_result dict:
+            {"type": "placement_result", "unit_type": <int>,
+             "tile_size_x": <int>, "tile_size_y": <int>,
+             "spots": [{"tile_x", "tile_y", "center_x", "center_y"}, ...]}
+
+        spots is ordered nearest-first. Empty spots means nothing
+        valid within the radius.
+        """
+        payload: dict[str, Any] = {
+            "type": "find_placement",
+            "unit_type": unit_type,
+            "radius_tiles": radius_tiles,
+            "max_results": max_results,
+        }
+        if id is not None:
+            payload["id"] = id
+        if worker_unit is not None:
+            payload["worker_unit"] = worker_unit
+        if center_x is not None:
+            payload["center_x"] = center_x
+        if center_y is not None:
+            payload["center_y"] = center_y
+        return await self._request(payload)
+
     async def cmd(self, verb_payload: dict, id: str | None = None) -> dict:
         """Send a raw command dict. Prefer the typed helpers below."""
         payload = {"type": "cmd", "cmd": verb_payload}
