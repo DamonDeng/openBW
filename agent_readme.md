@@ -259,6 +259,10 @@ cmake --build build_srv -j
   --map "original_resources/(2)Bottleneck.scm" \
   --data-path original_resources \
   --users test_resources/users.json
+# Optional: override races so both slots don't spawn the map's default
+# race. `--race N=RACE` is per-slot and repeatable:
+#   --race 0=terran --race 1=zerg
+# See test_resources/test_guidance.md for the full CLI reference.
 
 # Terminal 2: observer as alice (slot 0)
 ./build_srv/ui/openbw_observer \

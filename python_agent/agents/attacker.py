@@ -52,8 +52,8 @@ async def run(c: Client, interval_sec: float) -> None:
 
         # Priority: any visible enemy? focus-fire the nearest.
         for u in cu:
-            if u["order"] not in IDLE_ORDERS and enemies:
-                # Only redirect idle units unless we have a hot target.
+            # Skip units already on an attack/move; don't chatter.
+            if u["order"] not in IDLE_ORDERS:
                 continue
             if enemies:
                 target = nearest(u, enemies)

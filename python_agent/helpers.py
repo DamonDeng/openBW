@@ -131,6 +131,23 @@ VESPENE_GEYSER_TYPES = {
     UNIT_TYPES_BY_NAME["Resource_Vespene_Geyser"],
 }
 
+# Race-specific gas structures. Once completed, a worker sent here via
+# the gather verb will enter the HarvestGas cycle.
+REFINERY_TYPES = {
+    UNIT_TYPES_BY_NAME["Terran_Refinery"],
+    UNIT_TYPES_BY_NAME["Zerg_Extractor"],
+    UNIT_TYPES_BY_NAME["Protoss_Assimilator"],
+}
+
+# Race-specific producer buildings that train ground combat units.
+# (Zerg has no producer building in the Terran/Protoss sense -- Larva
+# morphs directly; kept here for the completeness check the trainer
+# does, since Zergling morph is driven from Larva.)
+PRODUCER_TYPES = {
+    UNIT_TYPES_BY_NAME["Terran_Barracks"],
+    UNIT_TYPES_BY_NAME["Protoss_Gateway"],
+}
+
 
 def mineral_fields(neutrals: Iterable[dict]) -> list[dict]:
     return by_type(neutrals, MINERAL_FIELD_TYPES)
@@ -138,3 +155,15 @@ def mineral_fields(neutrals: Iterable[dict]) -> list[dict]:
 
 def vespene_geysers(neutrals: Iterable[dict]) -> list[dict]:
     return by_type(neutrals, VESPENE_GEYSER_TYPES)
+
+
+def own_refineries(own_units: Iterable[dict]) -> list[dict]:
+    """Completed own gas structures (Refinery/Extractor/Assimilator)."""
+    return [u for u in own_units
+            if u["type"] in REFINERY_TYPES and u.get("completed") is True]
+
+
+def own_producers(own_units: Iterable[dict]) -> list[dict]:
+    """Completed own producer buildings (Barracks/Gateway)."""
+    return [u for u in own_units
+            if u["type"] in PRODUCER_TYPES and u.get("completed") is True]

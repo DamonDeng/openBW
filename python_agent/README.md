@@ -13,28 +13,54 @@ python_agent/
 ├── enums.py                 # unit-type / order name<->id lookups
 ├── helpers.py               # shared utilities: find workers, nearest, race, etc.
 ├── agents/
+│   ├── ai_v1_agent.py       # ⭐ integrated closed-loop agent (recommended)
 │   ├── random_walk.py       # move idle workers to random points
-│   ├── miner.py             # send idle workers to gather nearest minerals
-│   ├── trainer.py           # keep the main producer training workers
-│   ├── builder.py           # place a supply-cap building near main (DEMO)
+│   ├── miner.py             # gather minerals; top up gas workers per refinery
+│   ├── trainer.py           # train workers + combat units when producers ready
+│   ├── builder.py           # walk a race build order: supply→gas→producer→tech
 │   └── attacker.py          # attack-move combat units toward enemy corner
 ├── smoke_test.py            # spawns server + runs scripted scenarios
 └── README.md                # this file
 ```
 
-The five agents cover the core BW verbs:
+## Which agent to run
+
+- **For actual gameplay: `ai_v1_agent`.** One process, one connection,
+  one decision loop, one intent store. It verifies each build/gas
+  assignment by observing outcomes (was a matching building placed?
+  is `resources.gas` actually rising?) and retries when the sim
+  silently drops a command. This is what you want if you're testing
+  end-to-end play.
+- **For learning / workshop demos: the split agents** (miner, trainer,
+  builder, attacker). Each is <100 lines and focuses on one verb.
+  They work fine in isolation and are easy to fork, but running all
+  four together on the same slot has known open-loop issues — see
+  `ai_v1_agent.py`'s docstring for the failure modes it fixes.
+
+The five split agents cover the core BW verbs and, together, form a
+minimal opening:
 
 - **random_walk** — move + observe loop
-- **miner** — gather (workers actually mine, minerals accumulate)
-- **trainer** — train (producers build new units, resources consumed)
-- **builder** — build (issues the verb; placement math is a learning
-  exercise -- see the file's docstring)
+- **miner** — gather; prioritizes gas (~3 workers per completed
+  refinery) then sends the rest to minerals
+- **trainer** — train workers up to `--worker-cap` (default 16), then
+  train combat units from any completed producer building; Zerg
+  alternates on the shared Larva
+- **builder** — walks a race-specific build order via
+  `find_placement`: supply → gas → producer → tech (Protoss:
+  Pylon → Assimilator → Gateway → Cybernetics Core; Terran:
+  Supply Depot → Refinery → Barracks; Zerg partially wired, see
+  builder's docstring)
 - **attacker** — attack + attack-move; combines observe of enemies +
-  target selection
+  target selection; won't chatter (leaves already-moving units alone)
 
-Combine them freely: `miner + trainer` gives a functional economy on
-one slot. `attacker` needs combat units so pair it with a trainer +
-tech that produces them (attendee work).
+Combine them freely on one slot: `miner + trainer + builder + attacker`
+gives an end-to-end opening that mines, expands to gas, techs up,
+trains a combat unit, and sends it toward the enemy base.
+
+**Race**: agents infer the race from the first observed worker / main
+structure. To pick a race explicitly, use the server's `--race`
+flag (see `../test_resources/test_guidance.md`).
 
 Zero dependencies beyond `websockets`. Python 3.9+ (uses dataclasses,
 `asyncio.run`, and type-hint syntax like `dict[int, str]`).
@@ -59,16 +85,22 @@ Start the server in one terminal:
   --map "original_resources/(2)Bottleneck.scm" \
   --data-path original_resources \
   --users test_resources/users.json
+
+# To force a specific race per slot (map's default is used otherwise):
+#   --race 0=terran --race 1=zerg
 ```
 
 Then in another terminal:
 
 ```bash
-# Pick one:
+# Recommended: the integrated agent (one process, closed-loop):
+python3 -m python_agent.agents.ai_v1_agent KEY                    # --interval-sec 1.5
+
+# Or run the individual demos:
 python3 -m python_agent.agents.random_walk KEY
-python3 -m python_agent.agents.miner       KEY
-python3 -m python_agent.agents.trainer     KEY
-python3 -m python_agent.agents.builder     KEY
+python3 -m python_agent.agents.miner       KEY                    # --gas-workers 3
+python3 -m python_agent.agents.trainer     KEY                    # --worker-cap 16
+python3 -m python_agent.agents.builder     KEY                    # --supply-gap 3
 python3 -m python_agent.agents.attacker    KEY
 
 # Where KEY = one of the api_key values in test_resources/users.json.
@@ -77,6 +109,10 @@ python3 -m python_agent.agents.attacker    KEY
 # Bob's (slot 1):
 #   sk-anYTfuY-QL9szAzIlvtv44RxpgJlJPC1ocqIA26qpf0
 ```
+
+Each agent supports `--help` for its flags. The typical tuning is
+`--worker-cap` (higher = more mining, later combat) and
+`--gas-workers` (default 3 is BW's saturation).
 
 Multiple agents can run for the same slot — miner + trainer together
 gives you a functional economy on alice's side. Just launch them in
