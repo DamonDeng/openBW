@@ -1279,6 +1279,29 @@ struct sync_functions: action_functions {
 			st.lcg_rand_state = rand_state;
 			sync_st.initial_rand_state = rand_state;
 
+			// Populate the identity map action_st.player_id[slot] = slot
+			// for slots 0..11. Otherwise action_state is default-constructed
+			// with all zeros, and action_functions::read_action's single-arg
+			// form (see actions.h:1339-1345) does std::find(player_id, N)
+			// to translate a wire "owner" byte into a slot. With the array
+			// zeroed, slot 0 accidentally works but every other slot fails
+			// with "execute_action: player id N not found". Live scheduled
+			// actions on both server and observer use the two-arg
+			// read_action(slot, r) form (see execute_scheduled_actions in
+			// this file, line 1455) and never trip this. The catchup path
+			// on the observer (handle_catchup -> action_functions::
+			// execute_actions -> actions.h:1470 single-arg read_action)
+			// DOES trip it -- any owner byte >= 1 in the catchup bundle
+			// crashes the observer. Replay .rep loading (replay.h:187)
+			// already populates player_id for the same reason; do it here
+			// too so multiplayer games work symmetrically. Setting it in
+			// start_game_impl means both server and observer get it before
+			// any action dispatch, and start_game_local (observer's local
+			// bootstrap prior to catchup replay) inherits the fix too.
+			for (int i = 0; i < 12; ++i) {
+				funcs.action_st.player_id[i] = i;
+			}
+
 			for (int i = 0; i != 12; ++i) {
 				auto& v = st.players[i];
 				if (v.controller == player_t::controller_computer) {
