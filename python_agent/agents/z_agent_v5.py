@@ -565,39 +565,59 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
 
 
 # --------------------------------------------------------------------
-# Building anchor (Hatchery-centric spread).
+# Building anchor (creep-aware, Hatchery-centric).
 # --------------------------------------------------------------------
-
-_ANCHOR_STRATEGIES = ["toward_center", "furthest_own", "toward_center"]
+#
+# CRITICAL: Zerg buildings require CREEP to place (bwgame.h:2546
+# unit_can_place_building rejects Zerg buildings on tiles without
+# flag_has_creep). Creep only exists in a small radius around a
+# Hatch/Lair/Hive (~10 tiles ~= 320 px) and Creep_Colony (small
+# additional patch). The inherited p_agent_v4 / t_agent_v4 anchor
+# strategies -- toward_center, furthest_own -- were designed for
+# Protoss/Terran where placement is only gated on ground clearance +
+# power matrix, so anchoring 800-1500 px from the base was fine. For
+# Zerg those anchors sit far off creep, find_placement's spiral
+# within radius_tiles never reaches any creep tile, and returns
+# empty. The agent silently stalls at "Hatchery + a few Extractors"
+# and never gets a Spawning_Pool.
+#
+# Fix: for Zerg, ALWAYS anchor on the nearest own completed
+# Hatchery/Lair/Hive to home. That guarantees find_placement is
+# searching a spiral that overlaps the creep patch. Once the agent
+# expands to a second Hatchery, subsequent buildings can rotate
+# to the newer base's creep too (see the strategy_idx modulo below).
 
 
 def pick_anchor(units: list[dict], own_type_id: int,
                 strategy_idx: int,
                 home_x: int, home_y: int,
                 map_w: int, map_h: int) -> tuple[int, int] | None:
-    strat = _ANCHOR_STRATEGIES[strategy_idx % len(_ANCHOR_STRATEGIES)]
-    # For Zerg, "own_type_id" is Hatchery; Lair (132) and Hive (133) are
-    # tier-morphs of the same base so include them as anchors too.
+    """Pick an anchor point for find_placement.
+
+    All Zerg buildings require creep, so the anchor MUST be near an
+    existing creep provider (Hatch/Lair/Hive). We rotate through the
+    list of own completed bases so buildings spread across bases as
+    the player expands, but every anchor is still ON creep.
+
+    Falls back to (home_x, home_y) only if no completed base exists
+    yet (shouldn't happen -- the starting Hatchery is completed).
+    """
     LAIR = UNIT_TYPES_BY_NAME["Zerg_Lair"]
     HIVE = UNIT_TYPES_BY_NAME["Zerg_Hive"]
     hatch_types = {own_type_id, LAIR, HIVE}
     cands = [u for u in units if u["type"] in hatch_types
              and u.get("completed") is True]
-    if strat == "nearest_own" and cands:
-        c = min(cands, key=lambda u: dist_pixels(u["x"], u["y"],
-                                                 home_x, home_y))
-        return (c["x"], c["y"])
-    if strat == "furthest_own" and cands:
-        c = max(cands, key=lambda u: dist_pixels(u["x"], u["y"],
-                                                 home_x, home_y))
-        return (c["x"], c["y"])
-    cx, cy = map_w // 2, map_h // 2
-    t = random.uniform(0.2, 0.9)
-    ax = int(home_x + t * (cx - home_x))
-    ay = int(home_y + t * (cy - home_y))
-    ax += random.randint(-160, 160)
-    ay += random.randint(-160, 160)
-    return (ax, ay)
+    if not cands:
+        # No completed base yet; use home as best-effort. Only
+        # happens pre-frame-1 or if the main base is destroyed.
+        return (home_x, home_y)
+    # Sort by distance from home so the main base is index 0, first
+    # expansion index 1, etc. Rotating strategy_idx across this list
+    # spreads new buildings across all our bases while keeping every
+    # anchor on some patch of creep.
+    cands.sort(key=lambda u: dist_pixels(u["x"], u["y"], home_x, home_y))
+    pick = cands[strategy_idx % len(cands)]
+    return (pick["x"], pick["y"])
 
 
 # --------------------------------------------------------------------
@@ -1213,10 +1233,36 @@ async def run(c: Client, interval_sec: float,
         # v5: respect BuildingSpec.target_count so Creep_Colonies /
         # Extractors can appear multiple times per game (needed by the
         # Sunken/Spore defense pass below and by multi-base gas).
+        #
+        # Pool-first hard gate: Spawning_Pool is a strict prerequisite
+        # for Zerglings + Sunken + Metabolic_Boost + Adrenal_Glands +
+        # Burrowing + the Sunken defense pass. Zerg starts with 0
+        # minerals; by the time we accumulate 200m, cheaper catalog
+        # entries (Evo_Chamber 75, Creep_Colony 75, Hydra_Den 100+50g)
+        # keep grabbing the "1 build per tick" quota AND spending the
+        # income so min never crosses 200. Symptom: game runs 30k+
+        # frames with several Extractors + Evo_Chamber but NEVER a
+        # Pool.
+        # Fix: while Pool is missing, refuse to build ANYTHING else
+        # via the catalog. Priority 4 (Extractor) already ran; we
+        # still get gas mining. Priority 4.5 (expansion) also still
+        # runs -- expanding is fine since another Hatchery gives us
+        # more Larvae and more creep. But everything downstream of
+        # Pool (Hydra_Den etc.) truly does depend on Pool, and Evo
+        # + Creep_Colony are non-critical this early.
+        POOL_TYPE = UNIT_TYPES_BY_NAME["Zerg_Spawning_Pool"]
+        pool_c, pool_ip = count_units(units, POOL_TYPE)
+        pool_missing = (pool_c + pool_ip == 0)
+
         catalog_build_this_tick = 0
         for spec in catalog_buildings:
             key = f"build:{spec.type_id}"
             if key in pending: continue
+            # Pool-first hard gate: skip everything except Pool while
+            # Pool is missing. Zerg can't do anything meaningful
+            # combat-wise without Pool, so waiting is correct.
+            if pool_missing and spec.type_id != POOL_TYPE:
+                continue
             completed, ip = count_units(units, spec.type_id)
             if completed + ip >= spec.target_count: continue
             if catalog_build_this_tick >= 1: break
