@@ -17,7 +17,16 @@ namespace bwgame {
 
 struct sync_state {
 	struct scheduled_action {
-		uint8_t frame;
+		// Widened from uint8_t. Stock BW sync uses an 8-bit rolling
+		// frame counter, fine when all peers advance in lock-step at
+		// 42ms/frame. Our agent+observer setup can produce action bursts
+		// where the observer falls >128 frames behind the server, at
+		// which point the uint8_t (and its 2's-complement wraparound
+		// arithmetic in all_clients_in_sync) sign-flips and actions
+		// scheduled with frame==200 get skipped when sync_frame wraps
+		// past them. Widening to uint32_t eliminates the wraparound
+		// window entirely (128M frames = 33+ hours at 100 FPS).
+		uint32_t frame;
 		size_t data_begin;
 		size_t data_end;
 	};
@@ -80,7 +89,8 @@ struct sync_state {
 		size_t buffer_begin = 0;
 		size_t buffer_end = 0;
 		a_circular_vector<scheduled_action> scheduled_actions;
-		uint8_t frame = 0;
+		// Widened from uint8_t; see scheduled_action::frame comment.
+		uint32_t frame = 0;
 		a_string name;
 		bool game_started = false;
 		bool has_greeted = false;
@@ -166,6 +176,13 @@ struct sync_state {
 	// once fast-forward completes.
 	bool catching_up = false;
 
+	// Optional diagnostic sink for agent-action lifecycle events. When
+	// set, both server and observer emit one line per interesting event
+	// (SCHED / APPLY / etc.) so we can diff the two logs and see
+	// exactly where they diverge. Format is tab-separated so awk/diff
+	// are easy. See the AGENT_LOG_* call sites below for schemas.
+	std::function<void(const a_string&)> sync_log;
+
 	// Both sides: pointers into `clients` for the per-slot virtual clients
 	// that carry agent-issued actions. NULL for slots without an agent
 	// (inactive slots, or the observer-side before catchup wires them up).
@@ -175,6 +192,35 @@ struct sync_state {
 	std::array<client_t*, 8> virtual_clients_by_slot{};
 
 };
+
+// Hex-dump the first up-to-`max` bytes of `data` into a comma-separated
+// string. Used to include a fingerprint of each agent-action payload in
+// the log so we can tell "was it the same action bytes both sides saw?"
+inline a_string sync_log_bytes(const uint8_t* data, size_t n, size_t max = 8) {
+	a_string out;
+	size_t k = n < max ? n : max;
+	for (size_t i = 0; i < k; ++i) {
+		if (i) out += ",";
+		char buf[4];
+		snprintf(buf, sizeof(buf), "%02x", (unsigned)data[i]);
+		out += buf;
+	}
+	if (n > k) out += "..";
+	return out;
+}
+
+// Emit one line to the sync_log sink if it's installed. `side` is 'S'
+// for server or 'O' for observer.
+inline void sync_log_line(sync_state& sync_st, char side, const a_string& body) {
+	if (!sync_st.sync_log) return;
+	char prefix[24];
+	snprintf(prefix, sizeof(prefix), "%c\t%d\t", side, sync_st.sync_frame);
+	a_string line;
+	line += prefix;
+	line += body;
+	line += "\n";
+	sync_st.sync_log(line);
+}
 
 struct sync_server_noop {
 	struct message_t {
@@ -292,12 +338,30 @@ struct sync_functions: action_functions {
 		for (auto i = sync_st.clients.begin(); i != sync_st.clients.end();) {
 			sync_state::client_t* c = &*i;
 			++i;
-			while (!c->scheduled_actions.empty() && (uint8_t)sync_st.sync_frame == c->scheduled_actions.front().frame) {
+			while (!c->scheduled_actions.empty() && (uint32_t)sync_st.sync_frame == c->scheduled_actions.front().frame) {
 				auto act = c->scheduled_actions.front();
 				c->scheduled_actions.pop_front();
 				c->buffer_begin = act.data_end;
 				const uint8_t* data = c->buffer.data();
 				if (data + act.data_end > data + c->buffer.size()) error("data beyond end");
+
+				// Log the apply BEFORE action_f runs so we see it even if
+				// action_f throws.
+				if (sync_st.sync_log
+				    && c->h == nullptr
+				    && c->player_slot >= 0)
+				{
+					char side = sync_st.auth_check ? 'S' : 'O';
+					size_t n = act.data_end - act.data_begin;
+					char buf[128];
+					snprintf(buf, sizeof(buf),
+						"AGENT_APPLY\tslot=%d\tn_bytes=%zu\tbytes=",
+						c->player_slot, n);
+					a_string body = buf;
+					body += sync_log_bytes(data + act.data_begin, n);
+					sync_log_line(sync_st, side, body);
+				}
+
 				data_loading::data_reader_le r(data + act.data_begin, data + act.data_end);
 				if (!action_f(c, r)) break;
 			}
@@ -310,6 +374,51 @@ struct sync_functions: action_functions {
 	void next_frame(server_T& server) {
 		sync(server);
 		action_functions::next_frame();
+	}
+
+	// Diagnostic: dump a per-slot unit-type inventory to the sync-log.
+	// Called manually at whatever cadence the caller wants (server main
+	// loop / observer main loop). Output format:
+	//   S/O <sync_frame> INVENTORY slot=N min=M gas=G <type_id>:<count> ...
+	// If server and observer log the same frame with the same counts,
+	// their sims are in sync. Difference reveals divergence and points
+	// at which unit-type first diverges.
+	void log_inventory(char side, int slot) {
+		if (!sync_st.sync_log) return;
+		if (slot < 0 || slot > 7) return;
+		std::array<int, 256> counts{};
+		std::array<int, 256> ipcounts{};
+		for (auto* u : bwgame::ptr(this->st.player_units[slot])) {
+			int t = (int)u->unit_type->id;
+			if (t < 0 || t >= 256) continue;
+			if (u->status_flags & bwgame::unit_t::status_flag_completed) counts[t]++;
+			else ipcounts[t]++;
+		}
+		a_string body = "INVENTORY";
+		char buf[64];
+		snprintf(buf, sizeof(buf), "\tslot=%d\tmin=%d\tgas=%d",
+			slot, this->st.current_minerals[slot],
+			this->st.current_gas[slot]);
+		body += buf;
+		body += "\tcompleted=";
+		bool first = true;
+		for (int t = 0; t < 256; ++t) {
+			if (counts[t] == 0) continue;
+			if (!first) body += ",";
+			first = false;
+			snprintf(buf, sizeof(buf), "%d:%d", t, counts[t]);
+			body += buf;
+		}
+		body += "\tin_progress=";
+		first = true;
+		for (int t = 0; t < 256; ++t) {
+			if (ipcounts[t] == 0) continue;
+			if (!first) body += ",";
+			first = false;
+			snprintf(buf, sizeof(buf), "%d:%d", t, ipcounts[t]);
+			body += buf;
+		}
+		sync_log_line(sync_st, side, body);
 	}
 
 	template<typename server_T>
@@ -376,7 +485,26 @@ struct sync_functions: action_functions {
 		r.get_bytes(buffer.data() + pos, n);
 		a_string str;
 		for (size_t i = 0; i != n; ++i) str += format("%02x", (buffer.data() + pos)[i]);
-		client->scheduled_actions.push_back({(uint8_t)(client->frame + sync_st.latency), pos, buffer_end});
+		uint32_t target_frame = (uint32_t)(client->frame + sync_st.latency);
+		client->scheduled_actions.push_back({target_frame, pos, buffer_end});
+
+		// Only log agent-slot schedules -- observer/server sync heartbeats
+		// use schedule_action too but aren't interesting for the divergence
+		// diff. Real BW peers have client->h != nullptr; agent virtuals
+		// have h == nullptr AND player_slot >= 0. That's our filter.
+		if (sync_st.sync_log
+		    && client->h == nullptr
+		    && client->player_slot >= 0)
+		{
+			char side = sync_st.auth_check ? 'S' : 'O';
+			char buf[128];
+			snprintf(buf, sizeof(buf),
+				"AGENT_SCHED_LOCAL\tslot=%d\tvc_frame=%u\ttarget_frame=%u\tn_bytes=%zu\tbytes=",
+				client->player_slot, client->frame, target_frame, n);
+			a_string body = buf;
+			body += sync_log_bytes(buffer.data() + pos, n);
+			sync_log_line(sync_st, side, body);
+		}
 		return true;
 	}
 
@@ -519,7 +647,12 @@ struct sync_functions: action_functions {
 				break;
 			}
 			case sync_messages::id_client_frame:
-				client->frame = r.template get<uint8_t>();
+				// Wire widened from uint8_t to uint32_t so an observer
+				// that lags >128 frames still schedules actions on the
+				// correct target frame instead of wrapping. Client and
+				// server must be built together -- no cross-version
+				// compat with retail BW replays.
+				client->frame = r.template get<uint32_t>();
 				break;
 			case sync_messages::id_client_uid: {
 				sync_state::uid_t uid;
@@ -585,7 +718,7 @@ struct sync_functions: action_functions {
 							// doesn't stall waiting for their id_client_frame.
 							client->player_slot = -1;
 							clear_scheduled_actions(client);
-							client->frame = (uint8_t)sync_st.sync_frame;
+							client->frame = (uint32_t)sync_st.sync_frame;
 						}
 
 						if (client->h) {
@@ -637,16 +770,38 @@ struct sync_functions: action_functions {
 			}
 			case sync_messages::id_agent_action: {
 				// Server -> observer live agent action. Payload:
-				//   [uint8_t slot][action bytes...]
+				//   [uint8_t slot][uint32_t server_frame][action bytes...]
 				// Route to our own virtual client for that slot so
-				// execute_scheduled_actions applies it on the same frame
-				// the server did. Create the virtual client lazily on
-				// first sighting; a fresh observer joining mid-game
-				// wouldn't have any yet.
+				// execute_scheduled_actions applies it on the same
+				// ABSOLUTE frame the server did -- we stamp vc->frame
+				// with the server's sync_frame (from the message) rather
+				// than our own local sync_frame, then schedule_action
+				// enqueues at server_frame + latency. Since our local
+				// sim advances one frame per id_client_frame heartbeat
+				// after we're in sync, this fires on the same game
+				// state the server had.
+				//
+				// Create the virtual client lazily on first sighting; a
+				// fresh observer joining mid-game wouldn't have any yet.
 				int slot = (int)r.template get<uint8_t>();
 				if (slot < 0 || slot > 7) break;
+				uint32_t server_frame = r.template get<uint32_t>();
 				size_t n = r.left();
 				if (n == 0) break;
+
+				if (sync_st.sync_log) {
+					char buf[128];
+					snprintf(buf, sizeof(buf),
+						"AGENT_RECV\tslot=%d\tserver_frame=%u\tn_bytes=%zu\tbytes=",
+						slot, server_frame, n);
+					a_string body = buf;
+					// r.get_n(n) below advances the reader; snapshot bytes
+					// without consuming.
+					const uint8_t* peek = r.ptr;
+					body += sync_log_bytes(peek, n);
+					sync_log_line(sync_st, 'O', body);
+				}
+
 				sync_state::client_t* vc = sync_st.virtual_clients_by_slot[slot];
 				if (!vc) {
 					sync_st.clients.emplace_back();
@@ -658,12 +813,12 @@ struct sync_functions: action_functions {
 					vc->has_greeted = true;
 					vc->game_started = true;
 					vc->player_slot = slot;
-					vc->frame = (uint8_t)sync_st.sync_frame;
+					vc->frame = server_frame;
 					sync_st.virtual_clients_by_slot[slot] = vc;
 				}
-				// Keep the virtual client's frame counter aligned so the
-				// sync lag check doesn't stall on it.
-				vc->frame = (uint8_t)sync_st.sync_frame;
+				// Anchor the schedule at the server's authoritative
+				// frame, not ours.
+				vc->frame = server_frame;
 				funcs.schedule_action(vc, r.get_n(n), n);
 				break;
 			}
@@ -734,7 +889,7 @@ struct sync_functions: action_functions {
 			// Align our sync_frame counter with the server's so future
 			// id_client_frame heartbeats + all_clients_in_sync work.
 			sync_st.sync_frame = (int)target_frame;
-			sync_st.local_client->frame = (uint8_t)target_frame;
+			sync_st.local_client->frame = (uint32_t)target_frame;
 
 			sync_st.catching_up = false;
 		}
@@ -742,7 +897,13 @@ struct sync_functions: action_functions {
 		void send_greeting(const void* h) {
 			auto d = server.new_message();
 			d.template put<uint32_t>(greeting_value);
-			d.template put<uint8_t>(sync_st.sync_frame);
+			// Widened from uint8_t along with the id_client_frame /
+			// scheduled_action counter widening. The reader in
+			// on_message() only checks greeting_value and ignores this
+			// byte, but we keep it in the payload for future use and
+			// widen it to stay consistent with the rest of the frame
+			// counter representation.
+			d.template put<uint32_t>(sync_st.sync_frame);
 			server.send_message(d, h);
 		}
 
@@ -916,9 +1077,12 @@ struct sync_functions: action_functions {
 			recv(client, (const uint8_t*)data, size);
 		}
 		void send_client_frame() {
-			writer<2> w;
+			// Message layout: [u8 id][u32 frame]. Widened from u8 to
+			// support observers that lag >128 frames (see the note on
+			// sync_state::scheduled_action::frame).
+			writer<5> w;
 			w.put<uint8_t>(sync_messages::id_client_frame);
-			w.put<uint8_t>(sync_st.sync_frame);
+			w.put<uint32_t>(sync_st.sync_frame);
 			send(w);
 		}
 		void timeout_func() {
@@ -927,7 +1091,9 @@ struct sync_functions: action_functions {
 				auto* c = &*i;
 				++i;
 				if (now - c->last_synced >= std::chrono::seconds(60)) {
-					if ((int8_t)(sync_st.sync_frame - c->frame) >= (int8_t)sync_st.latency) {
+					// Wraparound-safe delta at 32 bits (was int8_t when
+					// c->frame was uint8_t).
+					if ((int32_t)((uint32_t)sync_st.sync_frame - c->frame) >= (int32_t)sync_st.latency) {
 						kill_client(c);
 					}
 				}
@@ -1000,6 +1166,22 @@ struct sync_functions: action_functions {
 		// its own virtual client via schedule_action; observers need the
 		// same bytes so their local sim tracks the server frame-for-frame.
 		//
+		// Wire layout:
+		//   [uint8_t msg_id][uint8_t slot][uint32_t server_frame][action bytes...]
+		//
+		// server_frame is the sync_frame at which the server called
+		// schedule_action for this agent command. The observer stamps
+		// its virtual client's frame counter with this value before
+		// scheduling, so both sims fire the action at the same absolute
+		// frame ((server_frame + latency)). Without this, the observer
+		// schedules against its OWN sync_frame, which lags the server;
+		// the action then applies earlier in the observer's local sim
+		// than it did on the server -- and if that earlier state doesn't
+		// have enough resources (e.g. a 100-min Pylon build with only
+		// 60 min accumulated locally), unit_build_order_valid rejects
+		// the action and the observer silently diverges from server
+		// state.
+		//
 		// We call the transport layer's send_message directly so we skip
 		// the sync-layer send()'s local_client loopback, and we broadcast
 		// (h == nullptr) so every socket peer receives it.
@@ -1007,16 +1189,24 @@ struct sync_functions: action_functions {
 			if (size == 0) return;
 			if (slot < 0 || slot > 7) return;
 			auto d = server.new_message();
-			uint8_t header[2] = {
-				(uint8_t)sync_messages::id_agent_action,
-				(uint8_t)slot,
-			};
-			d.put(header, 2);
+			d.template put<uint8_t>((uint8_t)sync_messages::id_agent_action);
+			d.template put<uint8_t>((uint8_t)slot);
+			d.template put<uint32_t>((uint32_t)sync_st.sync_frame);
 			d.put(data, size);
 			// h == nullptr broadcasts to every socket peer. NOTE: send_message
 			// does NOT loopback to local_client (that happens in the sync-
 			// layer send() wrapper, which we deliberately bypass).
 			server.send_message(d, nullptr);
+
+			if (sync_st.sync_log) {
+				char buf[128];
+				snprintf(buf, sizeof(buf),
+					"AGENT_SCHED_SEND\tslot=%d\tserver_frame=%u\tn_bytes=%zu\tbytes=",
+					slot, (uint32_t)sync_st.sync_frame, size);
+				a_string body = buf;
+				body += sync_log_bytes(data, size);
+				sync_log_line(sync_st, 'S', body);
+			}
 		}
 
 		void start_game(uint32_t seed) {
@@ -1095,6 +1285,30 @@ struct sync_functions: action_functions {
 				}
 			}
 			sync_st.game_started = true;
+
+			// Reset sync_frame to align with st.current_frame at game
+			// start. Before this point, the server's pre-game
+			// `funcs.sync(server)` busy-loop (used to wait for observers
+			// / handshakes) has been incrementing sync_frame via
+			// sync_next_frame() while st.current_frame stayed at 0.
+			// Meanwhile the observer's sync_frame is still 0 (it hasn't
+			// been ticking yet). If we don't reset, the server has
+			// sync_frame == N and st.current_frame == 0 at game start,
+			// but the observer has sync_frame == 0 == st.current_frame.
+			// Actions get scheduled at sync_frame, but the sim state
+			// advances by st.current_frame -- so the SAME action applied
+			// at sync_frame X on both sides hits DIFFERENT st.current_frame
+			// values, and the two sims diverge from that point on.
+			//
+			// Symptom: server builds many Pylons; observer freezes at
+			// 2-3 because minerals/positions/build-validity checks all
+			// evaluate against different game-state instants.
+			sync_st.sync_frame = 0;
+			// Also reset any per-client frame counters that were
+			// stamped from the pre-game sync_frame. `local_client`
+			// was doing sync ticks; other clients don't matter yet
+			// because their sync_frame comes from wire messages.
+			if (sync_st.local_client) sync_st.local_client->frame = 0;
 
 			sync_st.clients.sort([&](auto& a, auto& b) {
 				if ((unsigned)a.player_slot != (unsigned)b.player_slot) return (unsigned)a.player_slot < (unsigned)b.player_slot;
@@ -1327,7 +1541,10 @@ struct sync_functions: action_functions {
 				// tick_ms -- without it we race ahead as fast as our own
 				// main loop can iterate.
 
-				if ((int8_t)(sync_st.sync_frame - c->frame) >= (int8_t)sync_st.latency) {
+				// Wraparound-safe delta at 32 bits (was int8_t when
+				// c->frame was uint8_t). See scheduled_action::frame
+				// comment for why we widened.
+				if ((int32_t)((uint32_t)sync_st.sync_frame - c->frame) >= (int32_t)sync_st.latency) {
 					return false;
 				}
 			}

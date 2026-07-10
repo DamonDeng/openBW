@@ -17,6 +17,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -52,6 +54,7 @@ struct args_t {
 	int screen_width = 1280;
 	int screen_height = 800;
 	std::string api_key;
+	std::string sync_log_path;
 };
 
 args_t parse_args(int argc, char** argv) {
@@ -72,6 +75,7 @@ args_t parse_args(int argc, char** argv) {
 		} else if (eq("--width") && i + 1 < argc) a.screen_width = std::atoi(argv[++i]);
 		else if (eq("--height") && i + 1 < argc) a.screen_height = std::atoi(argv[++i]);
 		else if (eq("--api-key") && i + 1 < argc) a.api_key = argv[++i];
+		else if (eq("--sync-log") && i + 1 < argc) a.sync_log_path = argv[++i];
 		else if (eq("--help") || eq("-h")) {
 			fprintf(stderr,
 				"usage: %s --map <path> [--server 127.0.0.1:6112] [--data-path .]\n"
@@ -80,7 +84,9 @@ args_t parse_args(int argc, char** argv) {
 				"  --data-path  MPQ dir (default: .)\n"
 				"  --width      window width (default: 1280)\n"
 				"  --height     window height (default: 800)\n"
-				"  --api-key    API key for auth (omit if server has --no-auth)\n",
+				"  --api-key    API key for auth (omit if server has --no-auth)\n"
+				"  --sync-log <path>  append per-frame agent-action events to <path>.\n"
+				"                     Diff against server's sync-log to find replay divergence.\n",
 				argv[0]);
 			std::exit(0);
 		} else {
@@ -139,6 +145,23 @@ int main(int argc, char** argv) {
 		sync_st.outgoing_api_key = a_string(args.api_key.c_str());
 	}
 
+	// Diagnostic sync-log sink. Matches the server's --sync-log so a
+	// diff of both files reveals replay divergence.
+	if (!args.sync_log_path.empty()) {
+		auto f = std::make_shared<std::ofstream>(args.sync_log_path,
+			std::ios::out | std::ios::trunc);
+		if (!f->good()) {
+			ui::log("[obs] failed to open --sync-log=%s\n",
+				args.sync_log_path.c_str());
+			std::exit(1);
+		}
+		ui::log("[obs] sync-log -> %s\n", args.sync_log_path.c_str());
+		sync_st.sync_log = [f](const bwgame::a_string& s) {
+			f->write(s.data(), (std::streamsize)s.size());
+			f->flush();
+		};
+	}
+
 	sync_server_asio_tcp server;
 	server.connect(a_string(args.server_host.c_str()), args.server_port);
 	ui::log("[obs] connecting to %s:%d ...\n", args.server_host.c_str(), args.server_port);
@@ -171,8 +194,33 @@ int main(int argc, char** argv) {
 
 	// 5. Main loop. next_frame drives sync + sim; ui.update handles render.
 	int last_logged_slot = -2;
+	bool rand_logged = false;
+	int last_inventory_frame = -1;
 	while (true) {
 		funcs.next_frame(server);
+
+		// Emit the initial rand state once, as soon as game_started
+		// flips true on our side. If server and observer disagree,
+		// they're playing different sims from that instant on.
+		if (!rand_logged && sync_st.game_started && sync_st.sync_log) {
+			char buf[64];
+			snprintf(buf, sizeof(buf), "GAME_START\tinitial_rand=%08x",
+				sync_st.initial_rand_state);
+			bwgame::sync_log_line(sync_st, 'O',
+				bwgame::a_string(buf));
+			rand_logged = true;
+		}
+
+		// Diagnostic: every 300 frames dump inventory for slots 0..1.
+		// Matches the server's cadence so a diff of the two logs lines
+		// up frame-for-frame.
+		int cf = (int)ui.st.current_frame;
+		if (sync_st.sync_log && cf > 0 && cf != last_inventory_frame
+		    && cf % 300 == 0) {
+			for (int s = 0; s < 2; ++s) funcs.log_inventory('O', s);
+			last_inventory_frame = cf;
+		}
+
 		// Server sent id_assign_perspective after our auth -- pick it up
 		// and route it into the UI so fog rendering activates.
 		if (ui.viewing_slot != sync_st.viewing_slot) {

@@ -30,6 +30,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -68,6 +70,10 @@ struct args_t {
 	std::string users_path;
 	bool no_auth = false;
 	bool no_agents = false;
+	// Diagnostic: if non-empty, append AGENT_SCHED/APPLY events for
+	// each agent action to this file. Same format as the observer's
+	// sync-log so `diff` catches divergence.
+	std::string sync_log_path;
 	// ms/frame. Retail BW ships seven speeds: slowest=167, slower=111,
 	// slow=83, normal=67, fast=56, faster=48, fastest=42. Campaign
 	// defaults to fast; multiplayer defaults to fastest. We pick fastest
@@ -127,6 +133,7 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--no-auth")) a.no_auth = true;
 		else if (eq("--ws-port") && i + 1 < argc) a.ws_port = std::atoi(argv[++i]);
 		else if (eq("--no-agents")) a.no_agents = true;
+		else if (eq("--sync-log") && i + 1 < argc) a.sync_log_path = argv[++i];
 		else if (eq("--race") && i + 1 < argc) {
 			std::string v = argv[++i];
 			int slot; int8_t race_id;
@@ -171,6 +178,9 @@ args_t parse_args(int argc, char** argv) {
 				"  --no-auth          disable auth entirely (dev-only)\n"
 				"  --ws-port          TCP port for agent WebSocket (default: 6113)\n"
 				"  --no-agents        disable the agent WebSocket server\n"
+				"  --sync-log <path>  append per-frame agent-action events\n"
+				"                     to <path>. Diff against observer's\n"
+				"                     sync-log to find replay divergence.\n"
 				"  --game-speed <s>   ms/frame; either an integer or a BW\n"
 				"                     name: slowest, slower, slow, normal,\n"
 				"                     fast, faster, fastest (default:\n"
@@ -291,6 +301,22 @@ int main(int argc, char** argv) {
 		return b;
 	};
 
+	// Wire diagnostic sync-log sink if requested.
+	if (!args.sync_log_path.empty()) {
+		auto f = std::make_shared<std::ofstream>(args.sync_log_path,
+			std::ios::out | std::ios::trunc);
+		if (!f->good()) {
+			fprintf(stderr, "[srv] failed to open --sync-log=%s\n",
+				args.sync_log_path.c_str());
+			return 1;
+		}
+		fprintf(stderr, "[srv] sync-log -> %s\n", args.sync_log_path.c_str());
+		sync_st.sync_log = [f](const bwgame::a_string& s) {
+			f->write(s.data(), (std::streamsize)s.size());
+			f->flush();
+		};
+	}
+
 	// Wire auth if requested.
 	openbw_auth::user_registry registry;
 	if (!args.users_path.empty()) {
@@ -374,6 +400,12 @@ int main(int argc, char** argv) {
 	}
 	fprintf(stderr, "[srv] game started, initial_rand=%08x (%d observers)\n",
 		sync_st.initial_rand_state, count_ready_observers());
+	if (sync_st.sync_log) {
+		char buf[64];
+		snprintf(buf, sizeof(buf), "GAME_START\tinitial_rand=%08x",
+			sync_st.initial_rand_state);
+		bwgame::sync_log_line(sync_st, 'S', bwgame::a_string(buf));
+	}
 
 	// Register 8 virtual sync clients -- one per player slot -- so agent
 	// actions can be dispatched via sync.h's execute_scheduled_actions
@@ -401,7 +433,7 @@ int main(int argc, char** argv) {
 		// execute_scheduled_actions skips their queued actions.
 		c.game_started = true;
 		c.player_slot = slot;
-		c.frame = (uint8_t)sync_st.sync_frame;
+		c.frame = (uint32_t)sync_st.sync_frame;
 		c.name = bwgame::a_string("agent_") + bwgame::a_string(std::to_string(slot).c_str());
 		virtual_clients[slot] = &c;
 		// Publish into the sync_state array so recv-side code (on
@@ -486,7 +518,7 @@ int main(int argc, char** argv) {
 			if (!vc) return;
 			// Keep virtual client's frame counter aligned so sync's lag
 			// check doesn't stall on this "client".
-			vc->frame = (uint8_t)sync_st.sync_frame;
+			vc->frame = (uint32_t)sync_st.sync_frame;
 			funcs.schedule_action(vc, data, size);
 			funcs.broadcast_agent_action(server, slot, data, size);
 		});
@@ -523,12 +555,21 @@ int main(int argc, char** argv) {
 		// no commands arrived, or all_clients_in_sync could stall.
 		for (auto& c : sync_st.clients) {
 			if (&c != sync_st.local_client && c.player_slot >= 0) {
-				c.frame = (uint8_t)sync_st.sync_frame;
+				c.frame = (uint32_t)sync_st.sync_frame;
 			}
 		}
 
 		funcs.next_frame(server); // advances sim + syncs to observers
 		current_frame_atomic.store(st.current_frame);
+
+		// Diagnostic: every 300 frames dump inventory for slots 0..1 so
+		// we can compare against the observer's dump. Diff reveals sim
+		// divergence.
+		if (sync_st.sync_log && st.current_frame > 0
+		    && st.current_frame % 300 == 0)
+		{
+			for (int s = 0; s < 2; ++s) funcs.log_inventory('S', s);
+		}
 
 		auto now = clock_t::now();
 
