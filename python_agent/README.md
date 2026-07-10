@@ -19,7 +19,8 @@ python_agent/
 │   ├── p_agent_v1.py        # Protoss: early integrated agent (superseded by v2+)
 │   ├── t_agent_v5.py        # ⭐ Terran: v4 + addons + siege/mine/lift
 │   ├── t_agent_v4.py        # Terran: v3 + SCV repair (mirrors p_agent_v4)
-│   ├── z_agent_v4.py        # ⭐ Zerg:   v3 + Larva keepup (mirrors p_agent_v4)
+│   ├── z_agent_v5.py        # ⭐ Zerg:   v4 + Sunken/Spore + Lurker + Guardian/Devourer
+│   ├── z_agent_v4.py        # Zerg:   v3 + Larva keepup (mirrors p_agent_v4)
 │   ├── ai_debug_agent.py    # minimal bisection tool for sync-divergence hunts
 │   ├── random_walk.py       # move idle workers to random points
 │   ├── miner.py             # gather minerals; top up gas workers per refinery
@@ -90,7 +91,23 @@ Terran (agent still plays correctly, just visually wrong).
 
 **Zerg agents:**
 
-- **For the fullest coverage: `z_agent_v4`.** Zerg counterpart of
+- **For the fullest coverage: `z_agent_v5`.** Everything z_agent_v4
+  does plus three Zerg-specific tactical passes built on the same
+  `morph` / `morph_building` verbs -- no new server verbs required:
+    * **Sunken/Spore defense**: once Spawning_Pool / Evolution_Chamber
+      are up, morph completed Creep_Colonies to Sunken (anti-ground)
+      or Spore (anti-air). Target 1 of each per completed base.
+      Catalog builds enough Creep_Colonies (target_count=4) so both
+      Sunken and Spore have raw material.
+    * **Lurker morph**: once Lurker_Aspect research completes, morph
+      completed Hydralisks above a keep-fodder threshold into
+      Lurkers. Target 4 Lurkers, keep ≥4 Hydras un-morphed as army.
+    * **Guardian/Devourer morph**: once Greater_Spire completes,
+      morph completed Mutalisks into Guardians (anti-ground) and
+      Devourers (anti-air), alternating so both types build up.
+      Target 3 Guardians + 2 Devourers, keep ≥4 Mutas un-morphed.
+
+- **For a slightly simpler agent: `z_agent_v4`.** Zerg counterpart of
   p_agent_v4 / t_agent_v4 -- same v3-derived infrastructure
   (scouting, expansion, priority-ordered decision loop) plus the
   new `morph` and `morph_building` verbs that landed alongside it.
@@ -189,8 +206,9 @@ python3 -m python_agent.agents.t_agent_v5 KEY                    # Terran: v4 + 
 python3 -m python_agent.agents.t_agent_v4 KEY                    # Terran: v3 + SCV repair
                                                                  #   Both need matching --race N=terran on
                                                                  #   both server and observer.
+python3 -m python_agent.agents.z_agent_v5 KEY                    # Zerg: v4 + Sunken/Spore + Lurker + Guardian/Devourer
 python3 -m python_agent.agents.z_agent_v4 KEY                    # Zerg: v3 + Larva keepup
-                                                                 #   Needs matching --race N=zerg on
+                                                                 #   Both need matching --race N=zerg on
                                                                  #   both server and observer.
 
 # Or run the individual demos:
