@@ -17,7 +17,8 @@ python_agent/
 │   ├── p_agent_v3.py        # Protoss: v2 + scouting + wider spread + upgrades
 │   ├── p_agent_v2.py        # Protoss: coverage-oriented (one of every building/unit)
 │   ├── p_agent_v1.py        # Protoss: early integrated agent (superseded by v2+)
-│   ├── t_agent_v4.py        # ⭐ Terran: v3 + SCV repair (mirrors p_agent_v4)
+│   ├── t_agent_v5.py        # ⭐ Terran: v4 + addons + siege/mine/lift
+│   ├── t_agent_v4.py        # Terran: v3 + SCV repair (mirrors p_agent_v4)
 │   ├── ai_debug_agent.py    # minimal bisection tool for sync-divergence hunts
 │   ├── random_walk.py       # move idle workers to random points
 │   ├── miner.py             # gather minerals; top up gas workers per refinery
@@ -58,16 +59,27 @@ refill for Protoss, SCV repair for Terran, etc).
   testing, but a good compact reference for the closed-loop pattern.
 **Terran agents:**
 
-- **For the fullest coverage: `t_agent_v4`.** Terran counterpart of
-  p_agent_v4. Everything the Protoss version does (scouting,
-  expansion, catalog-driven build/train/upgrade) but adapted for
-  Terran's Barracks/Factory/Starport tech tree. Flagship feature:
-  **SCV repair** via the new `repair` verb. For every own damaged
-  mechanical unit (vehicle, air, or building), pulls the nearest
-  idle SCV to repair it -- keeps late-game investments (Siege Tanks,
-  Battlecruisers, Science Vessels) alive through firefights
-  instead of just watching them die. Addons (Machine Shop, Comsat,
-  Control Tower) are deferred to a later revision.
+- **For the fullest coverage: `t_agent_v5`.** Everything v4 does
+  (Terran build order + SCV repair) plus four Terran-tactical
+  priority passes that actually use the late-game verbs:
+    * **Addon build**: Machine Shop attached to Factories, Control
+      Tower to Starports, Comsat Station to CCs. Unlocks the
+      Machine-Shop-gated techs (Tank Siege Mode, Spider Mines,
+      Ion Thrusters, Charon Boosters) which v4 could never reach.
+    * **Auto-siege / auto-unsiege**: Siege Tanks in enemy range
+      fire `siege`; tanks out of range unsiege (with hysteresis).
+    * **Vulture Spider Mine drop**: Vultures with mines remaining
+      drop them along the home-to-enemy vector (3 mines per
+      Vulture, progressive distance).
+    * **Building lift-to-safety**: lift-capable buildings at
+      < 30 % HP with an enemy in range lift off and float back
+      to home for the SCVs to repair. v5.1 will auto-land them
+      once safe.
+- **For the previous v4 (SCV repair only): `t_agent_v4`.** Terran
+  counterpart of p_agent_v4. Same v3-derived decision loop
+  adapted for Barracks/Factory/Starport tech tree with SCV repair
+  as the flagship. Doesn't build addons, so Siege Tank and Spider
+  Mine tech are never reachable.
 
 **Launching a Terran run:** BOTH the server AND the observer need
 `--race N=terran` args -- observer's map load runs before it gets
@@ -144,9 +156,10 @@ python3 -m python_agent.agents.p_agent_v4 KEY                    # Protoss: v3 +
 python3 -m python_agent.agents.p_agent_v3 KEY                    # Protoss: v2 + scouting/upgrades
 python3 -m python_agent.agents.p_agent_v2 KEY                    # Protoss: coverage-only
 python3 -m python_agent.agents.p_agent_v1 KEY                    # Protoss: historical
+python3 -m python_agent.agents.t_agent_v5 KEY                    # Terran: v4 + addons + siege/mine/lift
 python3 -m python_agent.agents.t_agent_v4 KEY                    # Terran: v3 + SCV repair
-                                                                 #   Needs matching --race N=terran on both
-                                                                 #   server and observer.
+                                                                 #   Both need matching --race N=terran on
+                                                                 #   both server and observer.
 
 # Or run the individual demos:
 python3 -m python_agent.agents.random_walk KEY
