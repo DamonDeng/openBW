@@ -30,10 +30,16 @@ enum : uint8_t {
 	ACT_BUILD = 12,
 	ACT_STOP = 26,
 	ACT_TRAIN = 31,
+	ACT_UNIT_MORPH = 35,     // payload: u16 unit_type. Zerg Larva -> unit,
+	                         // Hydralisk -> Lurker, Mutalisk -> Guardian/Devourer.
 	ACT_UNSIEGE = 37,        // payload: u8 queue. Terran Siege Tank -> Tank Mode.
 	ACT_SIEGE = 38,          // payload: u8 queue. Terran Siege Tank -> Siege Mode.
 	ACT_TRAIN_FIGHTER = 39,  // no payload; applies to selected Carrier / Reaver
 	ACT_LIFTOFF = 47,        // payload: i16 x, i16 y. Terran building takes off.
+	ACT_BUILDING_MORPH = 53, // payload: u16 unit_type. Zerg building tier morph
+	                         // (Hatch->Lair->Hive, Creep_Colony->Sunken/Spore,
+	                         // Spire->Greater_Spire). NOT for Drone->building
+	                         // (that uses ACT_BUILD with order=DroneStartBuild=25).
 	ACT_DEFAULT_ORDER = 20,
 	ACT_ORDER = 21,
 	ACT_RESEARCH = 48,  // payload: TechTypes u8
@@ -292,16 +298,75 @@ inline std::optional<encode_error> encode_command(
 		return std::nullopt;
 	}
 
+	// --- Morph (Zerg unit morph) ---
+	// {"verb":"morph","unit":<larva_or_hydra_or_muta_id>,
+	//  "unit_type":<UnitTypes int>}
+	// Selects the source Zerg unit and issues action_morph
+	// (actions.h:871 -> read_action_morph:1237). The sim consumes the
+	// source unit into a Zerg_Egg (or Lurker_Egg / Cocoon) and starts
+	// Orders::ZergUnitMorph. Payload is just a u16 unit_type after
+	// the action byte. Sim silent-rejects if:
+	//   - selection is not a Larva / Hydralisk / Mutalisk
+	//   - target unit_type is not a valid morph target from that source
+	//   - insufficient minerals / gas / supply / tech
+	if (verb == "morph") {
+		auto* u = need("unit"); auto* ut = need("unit_type");
+		if (!u || !ut) return encode_error{"morph: needs unit, unit_type"};
+		uint16_t unit_id = u->get<uint16_t>();
+		uint16_t unit_type = ut->get<uint16_t>();
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, ACT_UNIT_MORPH);
+		put_u16(b, unit_type);
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
+	// --- Morph Building (Zerg building tier morph) ---
+	// {"verb":"morph_building","unit":<building_id>,
+	//  "unit_type":<UnitTypes int>}
+	// Selects the source Zerg building and issues action_morph_building
+	// (actions.h:888 -> read_action_morph_building:1243). Payload is
+	// just a u16 unit_type. Handles:
+	//   Hatchery -> Lair -> Hive
+	//   Spire -> Greater_Spire
+	//   Creep_Colony -> Sunken_Colony / Spore_Colony
+	// action_morph_building REQUIRES the selection to already be a Zerg
+	// building (actions.h:893 unit_is_zerg_building check). Drone ->
+	// new building goes through the "build" verb with order=25
+	// (DroneStartBuild), NOT this verb.
+	if (verb == "morph_building") {
+		auto* u = need("unit"); auto* ut = need("unit_type");
+		if (!u || !ut) return encode_error{"morph_building: needs unit, unit_type"};
+		uint16_t unit_id = u->get<uint16_t>();
+		uint16_t unit_type = ut->get<uint16_t>();
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, ACT_BUILDING_MORPH);
+		put_u16(b, unit_type);
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
 	// --- Build ---
 	// {"verb":"build","unit":<worker_id>,"unit_type":<UnitTypes int>,
-	//  "tile_x":<u16>,"tile_y":<u16>}
+	//  "tile_x":<u16>,"tile_y":<u16>, "order":<optional int>}
 	// The order type depends on the target building's race:
-	//   Terran   -> PlaceBuilding  (order 30, dispatches to order_PlaceBuilding)
-	//   Protoss  -> PlaceProtossBuilding (order 31)
-	//   Zerg     -> handled via train verb, not build (Larva morph)
-	// unit_build_order_valid at bwgame.h:18167 accepts both, but the
-	// dispatch table at bwgame.h:7652 routes to different order handlers
-	// with different placement + power-matrix logic.
+	//   Terran   -> PlaceBuilding        (order 30, order_PlaceBuilding)
+	//   Protoss  -> PlaceProtossBuilding (order 31, order_PlaceProtossBuilding)
+	//   Zerg     -> DroneStartBuild      (order 25, order_DroneStartBuild;
+	//                                    caller must set "order":25 explicitly)
+	//   Terran addon -> PlaceAddon       (order 36, caller passes "order":36)
+	// The bwgame.h::place_building special-cases Zerg Drones (line 2452)
+	// so the same action_build path handles Drone->egg->building.
+	// unit_build_order_valid at bwgame.h:18167 accepts all three
+	// DroneStartBuild / PlaceBuilding / PlaceProtossBuilding, but the
+	// dispatch table at bwgame.h:7652 routes them to different order
+	// handlers with different placement + creep + power-matrix logic.
 	if (verb == "build") {
 		auto* u = need("unit"); auto* ut = need("unit_type");
 		auto* tx = need("tile_x"); auto* ty = need("tile_y");
@@ -469,6 +534,12 @@ inline std::optional<encode_error> encode_command(
 //       {"verb":"research", "unit":42, "tech":0}          // TechTypes int
 //       {"verb":"upgrade",  "unit":42, "upgrade":0}       // UpgradeTypes int
 //       {"verb":"train_fighter", "unit":42}                // Carrier or Reaver
+//       {"verb":"morph", "unit":42, "unit_type":37}        // Zerg unit morph
+//                                                          //   (Larva->unit, Hydra->Lurker, Muta->Guardian/Devourer)
+//       {"verb":"morph_building", "unit":42, "unit_type":132} // Zerg building tier morph
+//                                                          //   (Hatch->Lair->Hive, Creep_Colony->Sunken/Spore)
+//       {"verb":"build", "unit":42, "unit_type":142,       // Zerg: Drone -> building
+//                          "tile_x":24, "tile_y":30, "order":25} //   order=25 (DroneStartBuild)
 //
 // Server -> client (sent per frame while any command is being executed):
 //   {"type":"welcome", "slot":N, "current_frame":F}    // sent on WS open

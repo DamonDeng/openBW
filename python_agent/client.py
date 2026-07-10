@@ -212,10 +212,22 @@ class Client:
                                "unit_type": unit_type})
 
     async def build(self, unit_id: int, unit_type: int,
-                    tile_x: int, tile_y: int) -> dict:
-        return await self.cmd({"verb": "build", "unit": unit_id,
-                               "unit_type": unit_type,
-                               "tile_x": tile_x, "tile_y": tile_y})
+                    tile_x: int, tile_y: int,
+                    order: int | None = None) -> dict:
+        """Place a building at (tile_x, tile_y). The server picks the
+        placement order from the target unit_type by default:
+          - Terran (106..122)   -> PlaceBuilding (30)
+          - Protoss (154..172)  -> PlaceProtossBuilding (31)
+          - Zerg (130..150)     -> defaults to PlaceBuilding; caller
+            MUST pass order=25 (DroneStartBuild) for Drone -> building.
+        `order` overrides the default (used for Zerg builds and Terran
+        addons: order=36 = PlaceAddon)."""
+        payload = {"verb": "build", "unit": unit_id,
+                   "unit_type": unit_type,
+                   "tile_x": tile_x, "tile_y": tile_y}
+        if order is not None:
+            payload["order"] = order
+        return await self.cmd(payload)
 
     async def research(self, unit_id: int, tech: int) -> dict:
         """Research a tech (single-target ability) at a building.
@@ -290,3 +302,41 @@ class Client:
         return await self.cmd({"verb": "land", "unit": unit_id,
                                "unit_type": unit_type,
                                "tile_x": tile_x, "tile_y": tile_y})
+
+    async def morph(self, unit_id: int, unit_type: int) -> dict:
+        """Zerg unit morph. Source unit is consumed into a Zerg_Egg (or
+        Lurker_Egg / Cocoon) which then hatches as `unit_type`.
+
+        Valid source -> target combinations enforced by the sim:
+          - Zerg_Larva (35) -> any of Zerg_Drone/Zergling/Overlord/
+            Hydralisk/Mutalisk/Scourge/Queen/Defiler/Ultralisk/
+            Infested_Terran.
+          - Zerg_Hydralisk (38) -> Zerg_Lurker (requires Lurker_Aspect
+            tech researched at the Hydralisk Den).
+          - Zerg_Mutalisk (43) -> Zerg_Guardian or Zerg_Devourer
+            (requires Greater_Spire).
+        Sim silent-rejects if the source unit is not one of these, if
+        the target isn't a legal morph, or if minerals/gas/supply/tech
+        aren't sufficient."""
+        return await self.cmd({"verb": "morph", "unit": unit_id,
+                               "unit_type": unit_type})
+
+    async def morph_building(self, unit_id: int, unit_type: int) -> dict:
+        """Zerg building tier morph. The source building's unit_type
+        changes in place (no Egg intermediate for tier morphs).
+
+        Valid source -> target combinations:
+          - Zerg_Hatchery (131) -> Zerg_Lair (132) (needs Spawning_Pool)
+          - Zerg_Lair (132) -> Zerg_Hive (133) (needs Queens_Nest)
+          - Zerg_Spire (141) -> Zerg_Greater_Spire (137) (needs Hive)
+          - Zerg_Creep_Colony (143) -> Zerg_Sunken_Colony (146)
+            (needs Spawning_Pool) or Zerg_Spore_Colony (144)
+            (needs Evolution_Chamber).
+        This verb is ONLY for tier morphs on an existing Zerg building
+        (action_morph_building at actions.h:888 enforces
+        unit_is_zerg_building on the selection). To have a Drone create
+        a new Zerg building, use `build(drone_id, building_type,
+        tile_x, tile_y, order=25)` instead -- order 25 is
+        Orders::DroneStartBuild."""
+        return await self.cmd({"verb": "morph_building", "unit": unit_id,
+                               "unit_type": unit_type})
