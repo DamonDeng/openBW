@@ -246,3 +246,47 @@ class Client:
         the target's costs, prorated by damage) while repairing."""
         return await self.cmd({"verb": "repair", "unit": unit_id,
                                "target_unit": target_unit})
+
+    async def siege(self, unit_id: int) -> dict:
+        """Terran Siege Tank -> Siege Mode. Requires Tank_Siege_Mode
+        tech researched at Machine Shop; sim silent-rejects otherwise.
+        The tank's unit_type changes from Terran_Siege_Tank_Tank_Mode
+        (5) to Terran_Siege_Tank_Siege_Mode (30). It gains long-range
+        AoE splash and loses mobility."""
+        return await self.cmd({"verb": "siege", "unit": unit_id})
+
+    async def unsiege(self, unit_id: int) -> dict:
+        """Terran Siege Tank -> Tank Mode. Mirror of `siege`; drops
+        the tank from Siege_Mode back to mobile Tank_Mode."""
+        return await self.cmd({"verb": "unsiege", "unit": unit_id})
+
+    async def place_mine(self, unit_id: int, x: int, y: int) -> dict:
+        """Terran Vulture drops a Spider Mine at position (x, y) in
+        pixels. Requires Spider_Mines tech researched at Machine Shop.
+        Each Vulture carries up to 3 mines; sim silent-rejects when the
+        Vulture has no mines left or the tech isn't researched."""
+        return await self.cmd({"verb": "place_mine", "unit": unit_id,
+                               "x": x, "y": y})
+
+    async def lift(self, unit_id: int, x: int, y: int) -> dict:
+        """Terran building takes off from the ground and flies to the
+        given pixel destination. Only these building types can lift:
+        Command_Center (106), Barracks (111), Factory (113),
+        Starport (114), Science_Facility (116). Sim silent-rejects
+        for other buildings or when the building is still under
+        construction. While airborne, the building's `flying` flag
+        is set in the observation and it can't train units."""
+        return await self.cmd({"verb": "lift", "unit": unit_id,
+                               "x": x, "y": y})
+
+    async def land(self, unit_id: int, unit_type: int,
+                   tile_x: int, tile_y: int) -> dict:
+        """Terran flying building descends to a tile. `unit_type` MUST
+        equal the flying building's own type_id (the sim's
+        `unit_build_order_valid` check enforces this). Tile must be
+        clear -- landing on top of other units silent-rejects.
+        Buildings resume being usable (training units, producing)
+        once they finish landing."""
+        return await self.cmd({"verb": "land", "unit": unit_id,
+                               "unit_type": unit_type,
+                               "tile_x": tile_x, "tile_y": tile_y})

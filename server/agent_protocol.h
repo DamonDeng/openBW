@@ -30,7 +30,10 @@ enum : uint8_t {
 	ACT_BUILD = 12,
 	ACT_STOP = 26,
 	ACT_TRAIN = 31,
+	ACT_UNSIEGE = 37,        // payload: u8 queue. Terran Siege Tank -> Tank Mode.
+	ACT_SIEGE = 38,          // payload: u8 queue. Terran Siege Tank -> Siege Mode.
 	ACT_TRAIN_FIGHTER = 39,  // no payload; applies to selected Carrier / Reaver
+	ACT_LIFTOFF = 47,        // payload: i16 x, i16 y. Terran building takes off.
 	ACT_DEFAULT_ORDER = 20,
 	ACT_ORDER = 21,
 	ACT_RESEARCH = 48,  // payload: TechTypes u8
@@ -336,6 +339,108 @@ inline std::optional<encode_error> encode_command(
 		return std::nullopt;
 	}
 
+	// --- Siege / Unsiege (Terran Siege Tank mode toggle) ---
+	// {"verb":"siege","unit":<tank_id>}
+	// {"verb":"unsiege","unit":<tank_id>}
+	// action_siege / action_unsiege in actions.h:1394 validate:
+	//   - selection contains a Terran Siege Tank
+	//   - Tank_Siege_Mode tech is researched
+	// then issue Orders::Sieging / Orders::Unsieging. The unit-type
+	// morph (Tank_Mode <-> Siege_Mode) happens inside those order
+	// handlers, not here. Silent-reject if tech missing.
+	if (verb == "siege" || verb == "unsiege") {
+		auto* u = need("unit");
+		if (!u) return encode_error{verb + ": needs unit"};
+		uint16_t unit_id = u->get<uint16_t>();
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, verb == "siege" ? ACT_SIEGE : ACT_UNSIEGE);
+		put_u8(b, 0);  // queue = false
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
+	// --- Place Mine (Vulture Spider Mine drop) ---
+	// {"verb":"place_mine","unit":<vulture_id>,"x":<int16>,"y":<int16>}
+	// The Vulture must have Spider_Mines tech researched (silent-
+	// reject otherwise). Reuses ACT_ORDER with Orders::PlaceMine --
+	// no dedicated opcode. Payload same shape as move/attack: pixel
+	// position, target_unit=0, target_type=None.
+	if (verb == "place_mine") {
+		auto* u = need("unit"); auto* x = need("x"); auto* y = need("y");
+		if (!u || !x || !y) return encode_error{"place_mine: needs unit, x, y"};
+		uint16_t unit_id = u->get<uint16_t>();
+		int16_t px = x->get<int16_t>();
+		int16_t py = y->get<int16_t>();
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, ACT_ORDER);
+		put_i16(b, px); put_i16(b, py);
+		put_u16(b, 0);                                    // no target unit
+		put_u16(b, (uint16_t)bwgame::UnitTypes::None);    // no target type
+		put_u8(b, (uint8_t)bwgame::Orders::PlaceMine);
+		put_u8(b, 0);                                     // queue = false
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
+	// --- Lift (Terran building takes off) ---
+	// {"verb":"lift","unit":<building_id>,"x":<int16>,"y":<int16>}
+	// x/y is the pixel destination the building will fly toward
+	// (typically its current position for a straight liftoff, or
+	// a nearby tile to relocate). Only applies to lift-capable
+	// buildings: CC(106), Barracks(111), Factory(113), Starport(114),
+	// Science_Facility(116). action_liftoff at actions.h:660 checks
+	// unit_can_receive_order(BuildingLiftoff); sim rejects otherwise.
+	if (verb == "lift") {
+		auto* u = need("unit"); auto* x = need("x"); auto* y = need("y");
+		if (!u || !x || !y) return encode_error{"lift: needs unit, x, y"};
+		uint16_t unit_id = u->get<uint16_t>();
+		int16_t px = x->get<int16_t>();
+		int16_t py = y->get<int16_t>();
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, ACT_LIFTOFF);
+		put_i16(b, px); put_i16(b, py);
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
+	// --- Land (a flying Terran building descends to a tile) ---
+	// {"verb":"land","unit":<flying_building_id>,"unit_type":<building_type_id>,
+	//  "tile_x":<u16>,"tile_y":<u16>}
+	// The unit_type must equal the flying building's own type
+	// (unit_build_order_valid at bwgame.h:18183 requires it).
+	// Reuses ACT_BUILD with Orders::BuildingLand as the order byte,
+	// distinguishing landing from initial placement.
+	if (verb == "land") {
+		auto* u = need("unit"); auto* ut = need("unit_type");
+		auto* tx = need("tile_x"); auto* ty = need("tile_y");
+		if (!u || !ut || !tx || !ty)
+			return encode_error{"land: needs unit, unit_type, tile_x, tile_y"};
+		uint16_t unit_id = u->get<uint16_t>();
+		uint16_t unit_type = ut->get<uint16_t>();
+		uint16_t tile_x = tx->get<uint16_t>();
+		uint16_t tile_y = ty->get<uint16_t>();
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, ACT_BUILD);
+		put_u8(b, (uint8_t)bwgame::Orders::BuildingLand);
+		put_u16(b, tile_x);
+		put_u16(b, tile_y);
+		put_u16(b, unit_type);
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
 	return encode_error{"unknown verb: " + verb};
 }
 
@@ -351,6 +456,12 @@ inline std::optional<encode_error> encode_command(
 //       {"verb":"attack", "unit":123, "x":1024, "y":768, "target_unit":0}
 //       {"verb":"gather", "unit":42, "target_unit":800}   // mineral or geyser id
 //       {"verb":"repair", "unit":42, "target_unit":800}   // SCV -> damaged friendly mech
+//       {"verb":"siege",  "unit":42}                       // Tank -> Siege Mode
+//       {"verb":"unsiege","unit":42}                       // Tank -> Tank Mode
+//       {"verb":"place_mine","unit":42, "x":1024, "y":768} // Vulture drops Spider Mine at pos
+//       {"verb":"lift",   "unit":42, "x":1024, "y":768}   // Terran building takes off
+//       {"verb":"land",   "unit":42, "unit_type":106,     // flying building descends
+//                          "tile_x":24, "tile_y":30}       //   (unit_type = the flying bldg's type)
 //       {"verb":"stop",   "unit":123, "queue":false}
 //       {"verb":"train",  "unit":42, "unit_type":7}      // Terran_SCV
 //       {"verb":"build",  "unit":42, "unit_type":106,     // CC = 106
