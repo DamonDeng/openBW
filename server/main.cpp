@@ -290,6 +290,16 @@ int main(int argc, char** argv) {
 		sync_state::catchup_bundle_t b;
 		b.current_frame = (uint32_t)st.current_frame;
 		b.seed = sync_st.initial_rand_state;
+		// Ship the server's authoritative races for the observer to
+		// apply BEFORE it runs start_game_local. Without this, if the
+		// server used --race override (or, later, an agent-selected
+		// race), the observer's map-loaded race values differ, and
+		// start_game_impl's "race > 2 -> lcg_rand(144)" branch fires
+		// on one side but not the other. Downstream lcg_rand_state
+		// diverges silently for the whole game.
+		for (int i = 0; i < 12; ++i) {
+			b.slot_races[i] = (uint8_t)st.players[i].race;
+		}
 		size_t total = 0;
 		for (auto& chunk : replay_saver.history) total += chunk.size();
 		b.action_bytes.reserve(total);

@@ -104,6 +104,32 @@ These are correctness guarantees the code must enforce:
    reasons.
 6. **Server assigns frame numbers to commands on the sim thread only.** This
    is what makes the action log — and therefore observer replays — bit-exact.
+7. **⚠️ RNG consumption on server and observer must match tick-for-tick.**
+   `st.lcg_rand_state` is the shared random stream. Any code path that
+   calls `lcg_rand(...)` on one side but not the other causes the stream
+   to silently diverge — the sim keeps running, no error, but every
+   downstream `lcg_rand` call returns a different value on each side.
+   Symptoms show up much later as timing drift (mining trips off by 1
+   tick, buildings completing at different frames, etc). Concrete rules:
+     - **Any decision that reads `st.players[i].race`, controller, or any
+       other authoritative slot metadata inside `start_game_impl` must
+       be based on the SAME values on server and observer.** Config the
+       server applies locally (like `--race` overrides) MUST be shipped
+       to observers before they run `start_game_local` — see the
+       `slot_races` field of `catchup_bundle_t` for the pattern.
+     - **When adding a new pre-game or game-setup path** (e.g. an
+       agent-selected race, difficulty knob, computer-player AI type),
+       add its state to the catchup bundle and apply on the observer
+       before `start_game_local`. Do NOT hope the map load gives the
+       observer the right value.
+     - **When adding a new sim code path that calls `lcg_rand`**, verify
+       it either runs on BOTH sides (in `action_functions::next_frame`
+       which both sides call) OR on NEITHER side (server-only paths must
+       not touch `st.lcg_rand_state`).
+   The multi-day 2026-07 observer-desync bug was `--race` overrides
+   applied on server-only, causing observers to consume 2 extra
+   `lcg_rand(144)` calls in `start_game_impl`. See
+   `[[project_multi_observer_desync]]` for the debugging trail.
 
 ## Why this over alternatives
 

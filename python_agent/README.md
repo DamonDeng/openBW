@@ -13,9 +13,10 @@ python_agent/
 ├── enums.py                 # unit-type / order name<->id lookups
 ├── helpers.py               # shared utilities: find workers, nearest, race, etc.
 ├── agents/
-│   ├── ai_v3_agent.py       # ⭐ v2 + scouting + wider spread + upgrades
+│   ├── ai_v4_agent.py       # ⭐ v3 + Carrier/Reaver fighter refill
+│   ├── ai_v3_agent.py       # v2 + scouting + wider spread + upgrades
 │   ├── ai_v2_agent.py       # coverage-oriented (one of every building/unit)
-│   ├── ai_v1_agent.py       # early integrated agent (superseded by v2/v3)
+│   ├── ai_v1_agent.py       # early integrated agent (superseded by v2+)
 │   ├── random_walk.py       # move idle workers to random points
 │   ├── miner.py             # gather minerals; top up gas workers per refinery
 │   ├── trainer.py           # train workers + combat units when producers ready
@@ -27,7 +28,11 @@ python_agent/
 
 ## Which agent to run
 
-- **For the fullest coverage: `ai_v3_agent`.** Everything v2 does
+- **For the fullest coverage: `ai_v4_agent`.** Everything v3 does
+  plus the `train_fighter` verb: maintains a full complement of
+  Interceptors in each Carrier and Scarabs in each Reaver using
+  the observation's new `fighter_count` / `fighter_max` fields.
+- **For a slightly simpler agent: `ai_v3_agent`.** Everything v2 does
   (one of every building + one of every unit) plus 2-3 probes on
   radial-from-home scouting patrol, wider building distribution via
   rotating anchor strategies, and the `research`/`upgrade` verbs
@@ -102,8 +107,11 @@ Start the server in one terminal:
 Then in another terminal:
 
 ```bash
-# Recommended: the integrated agent (one process, closed-loop):
-python3 -m python_agent.agents.ai_v1_agent KEY                    # --interval-sec 1.5
+# Recommended: latest integrated agent:
+python3 -m python_agent.agents.ai_v4_agent KEY                    # v3 + fighter refill
+python3 -m python_agent.agents.ai_v3_agent KEY                    # v2 + scouting/upgrades
+python3 -m python_agent.agents.ai_v2_agent KEY                    # coverage-only
+python3 -m python_agent.agents.ai_v1_agent KEY                    # historical
 
 # Or run the individual demos:
 python3 -m python_agent.agents.random_walk KEY

@@ -30,6 +30,7 @@ enum : uint8_t {
 	ACT_BUILD = 12,
 	ACT_STOP = 26,
 	ACT_TRAIN = 31,
+	ACT_TRAIN_FIGHTER = 39,  // no payload; applies to selected Carrier / Reaver
 	ACT_DEFAULT_ORDER = 20,
 	ACT_ORDER = 21,
 	ACT_RESEARCH = 48,  // payload: TechTypes u8
@@ -239,6 +240,26 @@ inline std::optional<encode_error> encode_command(
 		return std::nullopt;
 	}
 
+	// --- TrainFighter (build a baby unit inside a Carrier or Reaver) ---
+	// {"verb":"train_fighter","unit":<carrier_or_reaver_id>}
+	// Zero-payload action beyond the select+action bytes. The sim
+	// looks at the selected unit's type and picks Interceptor for a
+	// Carrier or Scarab for a Reaver (see actions.h::action_train_
+	// fighter). Silent-reject if the selected unit is neither of
+	// those, or if it's already at its fighter cap.
+	if (verb == "train_fighter") {
+		auto* u = need("unit");
+		if (!u) return encode_error{"train_fighter: needs unit"};
+		uint16_t unit_id = u->get<uint16_t>();
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, ACT_TRAIN_FIGHTER);
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
 	// --- Build ---
 	// {"verb":"build","unit":<worker_id>,"unit_type":<UnitTypes int>,
 	//  "tile_x":<u16>,"tile_y":<u16>}
@@ -306,6 +327,7 @@ inline std::optional<encode_error> encode_command(
 //                          "tile_x":24, "tile_y":30}
 //       {"verb":"research", "unit":42, "tech":0}          // TechTypes int
 //       {"verb":"upgrade",  "unit":42, "upgrade":0}       // UpgradeTypes int
+//       {"verb":"train_fighter", "unit":42}                // Carrier or Reaver
 //
 // Server -> client (sent per frame while any command is being executed):
 //   {"type":"welcome", "slot":N, "current_frame":F}    // sent on WS open

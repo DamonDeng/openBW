@@ -161,6 +161,21 @@ struct sync_state {
 	struct catchup_bundle_t {
 		uint32_t current_frame;
 		uint32_t seed;
+		// Authoritative per-slot race the server settled on for this game.
+		// The server may have started with map-default races and then
+		// applied a --race override (or, in the future, a race chosen by
+		// the connecting agent via a lobby message). Either way, the
+		// observer's map load sees only the map's default races -- if it
+		// runs start_game_impl without knowing what the server picked,
+		// the "race > 2 -> lcg_rand(144)" path (sync.h line ~1342) fires
+		// on the observer but not on the server (or vice versa), the two
+		// sides consume different rand values, and lcg_rand_state
+		// silently diverges for the rest of the game.
+		//
+		// Fix: server ships its st.players[i].race in the catchup bundle;
+		// observer writes them into its own st.players before calling
+		// start_game_local. Value at index i is the race enum id.
+		std::array<uint8_t, 12> slot_races;
 		a_vector<uint8_t> action_bytes;
 	};
 	std::function<catchup_bundle_t()> catchup_provider;
@@ -749,6 +764,14 @@ struct sync_functions: action_functions {
 								cw.put<uint8_t>(sync_messages::id_catchup_data);
 								cw.put<uint32_t>(bundle.current_frame);
 								cw.put<uint32_t>(bundle.seed);
+								// Ship the server's authoritative per-slot
+								// races BEFORE the action-bytes payload so
+								// handle_catchup can apply them BEFORE it
+								// runs start_game_local. Order matters here
+								// -- see catchup_bundle_t::slot_races doc.
+								for (int i = 0; i < 12; ++i) {
+									cw.put<uint8_t>(bundle.slot_races[i]);
+								}
 								cw.put<uint32_t>((uint32_t)bundle.action_bytes.size());
 								cw.put_bytes(bundle.action_bytes.data(), bundle.action_bytes.size());
 								send(cw, client->h);
@@ -849,6 +872,31 @@ struct sync_functions: action_functions {
 		void handle_catchup(reader_T& r) {
 			uint32_t target_frame = r.template get<uint32_t>();
 			uint32_t rand_state = r.template get<uint32_t>();
+
+			// Read the server's authoritative slot races. This MUST run
+			// BEFORE start_game_local because start_game_impl reads
+			// st.players[i].race to decide whether to consume an
+			// lcg_rand(144) call for "any race -> random pick". If we
+			// let the observer use its map-loaded race values, they'll
+			// almost certainly differ from what the server settled on
+			// (--race override, agent-selected race), and the rand
+			// stream diverges silently. See catchup_bundle_t::slot_races
+			// for the full story.
+			std::array<uint8_t, 12> slot_races{};
+			for (int i = 0; i < 12; ++i) {
+				slot_races[i] = r.template get<uint8_t>();
+			}
+			// Apply to st.players BEFORE start_game_local runs. Guard on
+			// !game_started: if the observer is somehow reconnecting to
+			// a game it already had bootstrapped, we don't want to stomp
+			// the running sim's races. In practice handle_catchup is
+			// only invoked on fresh joins, but the guard costs nothing.
+			if (!sync_st.game_started) {
+				for (int i = 0; i < 12; ++i) {
+					st.players[i].race = (bwgame::race_t)slot_races[i];
+				}
+			}
+
 			uint32_t action_bytes_len = r.template get<uint32_t>();
 
 			if (action_bytes_len > r.left()) {

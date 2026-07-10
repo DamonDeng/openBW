@@ -230,3 +230,10 @@ class Client:
         it."""
         return await self.cmd({"verb": "upgrade", "unit": unit_id,
                                "upgrade": upgrade})
+
+    async def train_fighter(self, unit_id: int) -> dict:
+        """Have a Protoss Carrier or Reaver build one of its baby
+        fighter units (Interceptor for Carrier, Scarab for Reaver).
+        The parent picks the correct type based on its own type_id.
+        Sim rejects silently at capacity."""
+        return await self.cmd({"verb": "train_fighter", "unit": unit_id})

@@ -78,6 +78,27 @@ inline void serialize_unit(nlohmann::json& out, const bwgame::state_functions& f
 	if (u->status_flags & bwgame::unit_t::status_flag_burrowed)       out["burrowed"] = true;
 	if (u->status_flags & bwgame::unit_t::status_flag_cloaked)        out["cloaked"] = true;
 	if (u->status_flags & bwgame::unit_t::status_flag_grounded_building) out["building"] = true;
+
+	// Carrier / Reaver fighter counts. Interceptors and Scarabs are
+	// owned by a parent Carrier/Reaver -- the parent link isn't on
+	// the wire (they look like ordinary units otherwise), so exposing
+	// these counts here is the only way an agent can decide whether
+	// a specific Carrier/Reaver needs another train_fighter fire.
+	//
+	// `count` = docked-inside + currently-out-attacking.
+	// `queued` = fighters being built (haven't hatched yet).
+	// `max` = capacity including Capacity upgrade (Carrier_Capacity or
+	// Reaver_Capacity). Agents compare count+queued vs max to decide
+	// whether to fire train_fighter without wasting commands.
+	if (funcs.unit_is_carrier(u)) {
+		out["fighter_count"] = (int)funcs.unit_interceptor_count(u);
+		out["fighter_queued"] = (int)funcs.unit_queued_fighter_units(u);
+		out["fighter_max"] = (int)funcs.unit_max_interceptor_count(u);
+	} else if (funcs.unit_is_reaver(u)) {
+		out["fighter_count"] = (int)funcs.unit_scarab_count(u);
+		out["fighter_queued"] = (int)funcs.unit_queued_fighter_units(u);
+		out["fighter_max"] = (int)funcs.unit_max_scarab_count(u);
+	}
 }
 
 // Produce the observation for a given player slot. Passes the sim's
