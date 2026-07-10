@@ -19,6 +19,7 @@ python_agent/
 │   ├── p_agent_v1.py        # Protoss: early integrated agent (superseded by v2+)
 │   ├── t_agent_v5.py        # ⭐ Terran: v4 + addons + siege/mine/lift
 │   ├── t_agent_v4.py        # Terran: v3 + SCV repair (mirrors p_agent_v4)
+│   ├── z_agent_v4.py        # ⭐ Zerg:   v3 + Larva keepup (mirrors p_agent_v4)
 │   ├── ai_debug_agent.py    # minimal bisection tool for sync-divergence hunts
 │   ├── random_walk.py       # move idle workers to random points
 │   ├── miner.py             # gather minerals; top up gas workers per refinery
@@ -30,11 +31,11 @@ python_agent/
 ```
 
 The full-race agents follow a `<race>_agent_v<n>.py` naming scheme:
-`p_` for Protoss, `t_` for Terran (in progress), `z_` for Zerg
-(not yet implemented). Version numbers escalate capability: v1 is a
-single closed loop, v2 adds coverage, v3 adds scouting/upgrades, v4
-adds race-specific "maintenance" features (Carrier/Reaver fighter
-refill for Protoss, SCV repair for Terran, etc).
+`p_` for Protoss, `t_` for Terran, `z_` for Zerg. Version numbers
+escalate capability: v1 is a single closed loop, v2 adds coverage,
+v3 adds scouting/upgrades, v4 adds race-specific "maintenance"
+features (Carrier/Reaver fighter refill for Protoss, SCV repair
+for Terran, Larva keepup for Zerg).
 
 ## Which agent to run
 
@@ -87,7 +88,35 @@ race info from server, so if you skip the flag on the observer
 you'll see Protoss starting units even though the server sim is
 Terran (agent still plays correctly, just visually wrong).
 
-**Zerg agent (`z_agent_v*`):** not yet implemented.
+**Zerg agents:**
+
+- **For the fullest coverage: `z_agent_v4`.** Zerg counterpart of
+  p_agent_v4 / t_agent_v4 -- same v3-derived infrastructure
+  (scouting, expansion, priority-ordered decision loop) plus the
+  new `morph` and `morph_building` verbs that landed alongside it.
+  Adaptations for Zerg's very different production model:
+    * **All units come from Larva morphs.** No producer building.
+      `try_morph_unit` picks an idle Larva and fires
+      `c.morph(larva_id, target_type)`. Larva -> Egg -> unit takes
+      ~5-15s depending on target.
+    * **All buildings come from Drone morphs.** The `build` verb
+      is reused with an `order=25` (Orders::DroneStartBuild)
+      override; the Drone is consumed and becomes the building.
+    * **Supply is a unit (Overlord), not a building.** Priority 2
+      morphs a Larva to Overlord when supply is short.
+    * **Building tier morphs (Hatch->Lair->Hive, Creep_Colony->
+      Sunken/Spore, Spire->Greater_Spire)** use the new
+      `morph_building` verb -- fired on the source building
+      itself, which stays in place while its unit_type changes.
+    * **v4 flagship -- Larva keepup.** For every idle own Larva,
+      the agent picks the currently-most-needed unit (Drone under
+      target, Overlord if supply tight, Zergling for army, Hydra/
+      Muta as tech unlocks) and morphs it. Mirrors the "auto-
+      refill" spirit of the Protoss and Terran flagship features.
+
+  Launching: BOTH server AND observer need `--race N=zerg` args
+  (same reason as Terran: observer's map load runs before race
+  info arrives from the server).
 
 - **For learning / workshop demos: the split agents** (miner, trainer,
   builder, attacker). Each is <100 lines and focuses on one verb.
@@ -159,6 +188,9 @@ python3 -m python_agent.agents.p_agent_v1 KEY                    # Protoss: hist
 python3 -m python_agent.agents.t_agent_v5 KEY                    # Terran: v4 + addons + siege/mine/lift
 python3 -m python_agent.agents.t_agent_v4 KEY                    # Terran: v3 + SCV repair
                                                                  #   Both need matching --race N=terran on
+                                                                 #   both server and observer.
+python3 -m python_agent.agents.z_agent_v4 KEY                    # Zerg: v3 + Larva keepup
+                                                                 #   Needs matching --race N=zerg on
                                                                  #   both server and observer.
 
 # Or run the individual demos:
