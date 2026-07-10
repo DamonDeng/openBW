@@ -9,23 +9,28 @@ train/build verb combination for a given race so we can:
   3. Cover placement, resource, prereq, and supply edge cases without
      hand-writing a build order.
 
-Strategy: dumb greedy loop. Every tick, walk a decision list:
+Strategy: priority-ordered goals with mineral/gas reservation. Each
+tick we walk a list of Goals top-to-bottom. If a goal is unsatisfied
+and its cost fits in the remaining tick budget, it fires ONE command
+and reserves its cost so lower-priority goals see reduced budget. That
+prevents "spent 200 on Cyber Core so no minerals left for Pylon" bugs
+when income briefly touches an expensive threshold.
 
-  - Do we have >= worker_target probes? no -> train probe
-  - Is supply_gap < 8?                     no -> build a Pylon (spread)
-  - Any Assimilator?                       no -> build Assimilator on geyser
-  - Do we have one of building X?          no -> try build X
-  - Do we have one of unit Y from producer Z (Z is complete)?
-                                            no -> train Y
+Priority order (highest first):
+   1. mining      -- idle workers -> nearest mineral (free)
+   2. pylons/supply -- keep 20 pylons OR (supply_used + slack) worth
+   3. workers     -- 40 probes total
+   4. gas structure -- one Assimilator/Refinery
+   5. gas workers -- 3 per completed refinery
+   6. catalog buildings -- one of each in tech-tree order
+   7. catalog units  -- one of each producer/unit pair
+   8. attack      -- idle combat units -> enemy corner
+   9. coverage verbs -- one move + one stop for API smoke coverage
 
 Each "try" fires a command optimistically. We don't check prereqs
 client-side -- if the sim silently rejects, we detect that by
 comparing the next observation's count / resource-delta and log the
 reject. Rate-limited: every 5th failure per (verb, target).
-
-Attack: any completed non-worker non-building is attack-moved toward
-the opposite corner. Also exercises the `move` and `stop` verbs once
-each per session, purely for API coverage.
 
 Usage:
     python3 -m python_agent.agents.ai_v2_agent <api_key>
@@ -228,11 +233,32 @@ def own_of_type(units: list[dict], type_id: int, only_complete: bool = True) -> 
 # --------------------------------------------------------------------
 
 def verify_pending(pending: dict, obs: dict, stats: Stats,
-                   reject_counts: dict[str, int]) -> None:
+                   reject_counts: dict[str, int],
+                   grace_frames: int) -> None:
     """Check outstanding commands against the observation and log rejects.
 
     Called every tick BEFORE we fire new commands. Any pending we can
     confirm (or definitively reject) is popped from the dict.
+
+    We ONLY trust the count-delta signal:
+      - build:  in-progress-or-completed of target went up  -> TOOK
+      - train:  count of unit type went up                  -> TOOK
+
+    An earlier version also used "minerals debited by ~cost" as a
+    faster train signal, but that turned out to be racy: mining
+    workers keep depositing minerals in the same tick, so a train
+    that DID take might show a smaller debit than expected while a
+    train that DIDN'T take can still show mineral drop from other
+    causes. Count-based is slower but ground-truth.
+
+    Since count-based is slower, grace_frames MUST be large enough to
+    cover:
+      - buildings: worker walk-to-tile + first-frame placement
+      - trains:    unit spawn time (300+ frames for Probe)
+    Caller computes grace from measured tick interval so we never
+    reject after only one verify pass -- that would clear pending
+    prematurely and cause the worker to be re-yanked before its
+    build/train registered in the observation.
     """
     r = obs["resources"]
     frame = obs["current_frame"]
@@ -246,40 +272,19 @@ def verify_pending(pending: dict, obs: dict, stats: Stats,
         age = frame - p.issued_frame
 
         if cur_count > p.pre_count:
-            # New unit or in-progress -- command took effect.
             stats.took[p.label()] += 1
             print(f"[ai_v2] TOOK  {p.label():48s} "
-                  f"(count {p.pre_count}->{cur_count})")
+                  f"(count {p.pre_count}->{cur_count} after {age}f)")
             to_drop.append(key)
             continue
 
-        # For train, count often doesn't rise until unit pops from
-        # queue (~15-30s later). Use resource debit as a proxy: if
-        # minerals dropped by ~cost since fire, the sim accepted.
-        if p.verb == "train" and p.cost_min > 0:
-            spent = p.pre_min - r["minerals"]
-            spent_g = p.pre_gas - r["gas"]
-            # Allow a fuzz: other trainers may also debit, or we may
-            # have gained minerals from ongoing mining. If we spent
-            # at least the cost (or an obvious multiple of it),
-            # assume accepted.
-            if spent >= p.cost_min and spent_g >= p.cost_gas:
-                stats.took[p.label()] += 1
-                print(f"[ai_v2] TOOK  {p.label():48s} "
-                      f"(min-{spent}, gas-{spent_g})")
-                to_drop.append(key)
-                continue
-
-        # Give the sim a few ticks of grace before declaring reject
-        # (walk-to-tile latency, etc.). ~5s of BW frames.
-        GRACE = 120
-        if age >= GRACE:
+        if age >= grace_frames:
             stats.reject[p.label()] += 1
             n = stats.reject[p.label()]
             # Log first occurrence + every 5th.
             if n == 1 or n % 5 == 0:
                 print(f"[ai_v2] REJECT {p.label():48s} "
-                      f"after {age}f. n={n}. "
+                      f"after {age}f (grace={grace_frames}). n={n}. "
                       f"pre: min={p.pre_min} gas={p.pre_gas} "
                       f"count={p.pre_count}. "
                       f"now: min={r['minerals']} gas={r['gas']} "
@@ -502,19 +507,52 @@ _MIN_ORDERS   = {ORDERS_BY_NAME["Harvest1"], ORDERS_BY_NAME["Harvest2"],
 
 
 async def phase_mine(c: Client, obs: dict, worker_type: int,
-                     pending_workers: set[int],
-                     target_gas_workers: int) -> None:
+                     busy_workers: set[int],
+                     target_gas_workers: int) -> set[int]:
     """Send idle workers to minerals; top up gas workers per refinery.
 
     Without this, workers spawn in PlayerGuard and never mine, minerals
     stay pinned at 50, and every build/train silently rejects on
     insufficient resources.
+
+    Returns the set of worker unit_ids we JUST assigned this tick.
+    Callers should union this into their `busy_workers` set so later
+    priority phases (build/train) don't yank a worker we already sent
+    off to mining -- otherwise the build command overwrites our
+    gather command in the same tick and no probe ever mines.
     """
+    from python_agent.enums import order_name
+
     units = obs["units"]
-    wu = [u for u in workers(units) if u["type"] == worker_type
-          and u["unit_id"] not in pending_workers]
+    all_workers = [u for u in workers(units) if u["type"] == worker_type]
+    wu = [u for u in all_workers if u["unit_id"] not in busy_workers]
     mfs = mineral_fields(obs.get("neutrals", []))
     refineries = own_refineries(units)
+
+    # ---- DIAGNOSTIC: dump per-worker state so we can see exactly why
+    # (or why not) each probe gets a gather this tick. Delete once the
+    # newborn-idle bug is understood.
+    def _order_of(u: dict) -> str:
+        return order_name(u["order"])
+    breakdown = [
+        (u["unit_id"], _order_of(u),
+         "BUSY" if u["unit_id"] in busy_workers else "free")
+        for u in all_workers
+    ]
+    idle_count = sum(1 for u in all_workers
+                     if u["order"] in IDLE_ORDERS
+                     and u["unit_id"] not in busy_workers)
+    print(f"[ai_v2/MINE] probes={len(all_workers)} idle_free={idle_count} "
+          f"mfs={len(mfs)} refineries={len(refineries)} "
+          f"busy={sorted(busy_workers)}")
+    if idle_count > 0 or len(all_workers) <= 8:
+        # Only dump per-worker when there's an idle one to explain, or
+        # while the base is small enough that the output stays readable.
+        print(f"[ai_v2/MINE]  " +
+              ", ".join(f"{uid}:{ord_}:{tag}"
+                        for uid, ord_, tag in breakdown))
+
+    just_assigned: set[int] = set()
 
     # ---- 1. Gas assignments first (higher value per trip). ----
     if refineries:
@@ -534,25 +572,36 @@ async def phase_mine(c: Client, obs: dict, worker_type: int,
                 try:
                     await c.gather(unit_id=w["unit_id"],
                                    target_unit=target["unit_id"])
+                    just_assigned.add(w["unit_id"])
                     print(f"[ai_v2]  MINE worker {w['unit_id']} -> "
                           f"gas at refinery {target['unit_id']}")
                 except Exception as e:
                     print(f"[ai_v2]  gather-gas error: {e}")
 
-    # ---- 2. Idle -> minerals. ----
-    if mfs:
-        for w in wu:
-            if w["order"] not in IDLE_ORDERS:
-                continue
-            m = nearest(w, mfs)
-            if m is None:
-                break
-            try:
-                await c.gather(unit_id=w["unit_id"], target_unit=m["unit_id"])
-                print(f"[ai_v2]  MINE worker {w['unit_id']} -> "
-                      f"mineral {m['unit_id']}")
-            except Exception as e:
-                print(f"[ai_v2]  gather-min error: {e}")
+    # ---- 2. Idle -> minerals. Also poach probes still in Guard-ish
+    #        states from the "just finished building" transition.
+    if not mfs:
+        if idle_count > 0:
+            print(f"[ai_v2/MINE]  {idle_count} idle probes but no minerals "
+                  f"visible -- neutrals list is empty!")
+        return just_assigned
+    for w in wu:
+        if w["order"] not in IDLE_ORDERS:
+            continue
+        m = nearest(w, mfs)
+        if m is None:
+            print(f"[ai_v2/MINE]  worker {w['unit_id']} idle but "
+                  f"nearest(minerals) returned None?!")
+            break
+        try:
+            await c.gather(unit_id=w["unit_id"], target_unit=m["unit_id"])
+            just_assigned.add(w["unit_id"])
+            print(f"[ai_v2]  MINE worker {w['unit_id']} -> "
+                  f"mineral {m['unit_id']} (order was {_order_of(w)})")
+        except Exception as e:
+            print(f"[ai_v2]  gather-min error: {e}")
+
+    return just_assigned
 
 
 # --------------------------------------------------------------------
@@ -561,7 +610,7 @@ async def phase_mine(c: Client, obs: dict, worker_type: int,
 
 async def run(c: Client, interval_sec: float,
               worker_target: int, supply_slack: int,
-              worker_train_min: int) -> None:
+              worker_train_min: int, pylon_target: int) -> None:
     print(f"[ai_v2] connected as slot={c.welcome.slot} "
           f"at frame={c.welcome.current_frame}")
 
@@ -586,12 +635,41 @@ async def run(c: Client, interval_sec: float,
     move_done = False
     stop_done = False
 
+    # Grace window for verify. If a build/train doesn't show up in the
+    # observation within grace_frames of firing, we declare it rejected.
+    # This MUST exceed a single tick: server may deliver 100-200 sim
+    # frames per real-time tick at --game-speed 10. We start with a
+    # conservative default and refine once we've seen a few tick
+    # deltas from the observation stream.
+    grace_frames = 600
+    last_frame_seen = -1
+    tick_frame_deltas: list[int] = []
+
     while True:
         obs = await c.observe(
             targets=["units", "resources", "enemies", "neutrals"])
         frame = obs["current_frame"]
         r = obs["resources"]
         units = obs["units"]
+
+        # Track how many sim frames pass per real tick, use it to
+        # size the verify grace window.
+        if last_frame_seen >= 0:
+            delta = frame - last_frame_seen
+            if delta > 0:
+                tick_frame_deltas.append(delta)
+                # Keep a rolling window.
+                if len(tick_frame_deltas) > 8:
+                    tick_frame_deltas.pop(0)
+                # Grace: max seen tick-delta * 4, clamped [600, 2400].
+                # 4x covers "worst tick delta so far + a few for build
+                # walk time"; 600 lower bound protects the first ticks
+                # before we have measurements; 2400 upper bound keeps
+                # a truly rejected build from hanging forever (100s at
+                # 24 FPS, ~24s at 100 FPS).
+                worst = max(tick_frame_deltas)
+                grace_frames = max(600, min(2400, worst * 4))
+        last_frame_seen = frame
 
         if race is None:
             race = guess_race(units)
@@ -606,7 +684,7 @@ async def run(c: Client, interval_sec: float,
                   f"home=({home_x},{home_y}) target=({tgt_x},{tgt_y})")
 
         # ---- Verify pending commands from previous ticks. ----
-        verify_pending(pending, obs, stats, reject_counts)
+        verify_pending(pending, obs, stats, reject_counts, grace_frames)
 
         # ---- Status line ----
         n_workers = len(workers(units))
@@ -619,73 +697,86 @@ async def run(c: Client, interval_sec: float,
         u_types_seen  = sum(1 for s in catalog_units
                             if count_units(units, s.type_id)[0] > 0
                             or count_units(units, s.type_id)[1] > 0)
+        pyl_c, pyl_ip = count_units(units, supply_type)
+        pending_summary = ",".join(
+            f"{p.verb}:{unit_type_name(p.target_type)[:12]}"
+            f"(w={p.worker_id}, age={frame - p.issued_frame})"
+            for p in pending.values()
+        ) if pending else "-"
         print(f"[ai_v2] frame={frame} race={race} "
               f"min={r['minerals']} gas={r['gas']} "
               f"supply={r['supply_used']}/{r['supply_max']} "
-              f"workers={n_workers}/{worker_target} combat={n_combat} "
-              f"bldgs={n_bldgs} types_built={b_types_owned}/{len(catalog_buildings)} "
+              f"workers={n_workers}/{worker_target} "
+              f"pylons={pyl_c}(+{pyl_ip})/{pylon_target} "
+              f"combat={n_combat} bldgs={n_bldgs} "
+              f"types_built={b_types_owned}/{len(catalog_buildings)} "
               f"types_trained={u_types_seen}/{len(catalog_units)} "
-              f"pending={len(pending)}")
+              f"grace={grace_frames}f "
+              f"pending=[{pending_summary}]")
 
         # Track workers already committed to a pending build so we don't
         # yank them onto another build in the same tick.
         pending_workers = {p.worker_id for p in pending.values()
                            if p.worker_id is not None}
 
-        # ---- 0. Mine. Without this, minerals stay at 50 forever and
-        #        every build/train rejects on cost. Runs FIRST so a
-        #        newborn worker can head to minerals in the same tick
-        #        it appears.
-        await phase_mine(c, obs, worker_type, pending_workers,
-                         target_gas_workers=3)
+        # ---- Priority-ordered goals ----
+        # Every goal below inspects `obs` and, if the goal is
+        # unsatisfied AND its cost fits `budget`, fires one command +
+        # reserves its cost. Downstream goals see the reduced budget,
+        # so a Cyber Core (200 min) can't starve a Pylon (100 min) just
+        # because minerals briefly hit 200. Higher priority wins.
 
-        # ---- Decision list (top-down, first missing = try this tick). ----
-        # We fire at most ONE new command per (verb, target) so verify
-        # remains unambiguous. Multiple different (verb, target) can
-        # fire in the same tick (e.g. train probe + build gateway).
+        budget = {"min": r["minerals"], "gas": r["gas"]}
 
-        # 1. Worker cap.
-        if (n_workers < worker_target
-                and "train:%d" % worker_type not in pending):
-            p = await try_train_worker(c, obs, worker_type,
-                                       main_type, worker_train_min)
-            if p is not None:
-                pending[f"train:{worker_type}"] = p
-                stats.tried["train:" + unit_type_name(worker_type)] += 1
-                print(f"[ai_v2] FIRE  train:{unit_type_name(worker_type)}")
-                # Re-read obs cheaply -- we already updated pending.
-                # For remaining actions we still use the same obs; that's fine.
+        def reserve(cost_min: int, cost_gas: int) -> bool:
+            if budget["min"] < cost_min or budget["gas"] < cost_gas:
+                return False
+            budget["min"] -= cost_min
+            budget["gas"] -= cost_gas
+            return True
 
-        # 2. Supply. Build another Pylon when gap < supply_slack.
-        gap = r["supply_max"] - r["supply_used"]
-        _, sup_in_progress = count_units(units, supply_type)
-        if gap < supply_slack and sup_in_progress == 0:
-            if f"build:{supply_type}" not in pending:
-                # Anchor a supply build at a RANDOM own building so pylons
-                # spread across the base.
+        # -- Priority 1: mining. Free. Runs unconditionally.
+        # Union the workers we just assigned to mining into
+        # pending_workers so later phases (build/train) skip them and
+        # don't overwrite the gather command in this same tick.
+        mining_now = await phase_mine(c, obs, worker_type, pending_workers,
+                                      target_gas_workers=3)
+        pending_workers |= mining_now
+
+        # -- Priority 2: pylons (supply). Cap at pylon_target overall
+        #    (built + in_progress). Also gate on supply pressure: only
+        #    urgent when gap is small OR we're still far below the
+        #    "one pylon per two supply used" heuristic. Cap parallel
+        #    in-progress at 3 so we don't grab half the workers.
+        pyl_completed, pyl_in_progress = count_units(units, supply_type)
+        pyl_total = pyl_completed + pyl_in_progress
+        supply_gap = r["supply_max"] - r["supply_used"]
+        want_more_pylons = (
+            pyl_total < pylon_target
+            and pyl_in_progress < 3
+            and (supply_gap < supply_slack
+                 or pyl_total < min(pylon_target, r["supply_used"] // 4 + 1))
+        )
+        if want_more_pylons and f"build:{supply_type}" not in pending:
+            if reserve(100, 0):
+                # Anchor at a random own building so Pylons spread out.
                 own_bldgs = [u for u in units if u.get("building")]
-                anchor: dict | None = random.choice(own_bldgs) if own_bldgs else None
-                spec = BuildingSpec(supply_type,
-                                    cost_min=100 if race == "protoss" else 100,
-                                    anchor="nexus")
-                # Custom: override anchor coords via a mini-spec.
+                anchor = random.choice(own_bldgs) if own_bldgs else None
                 cands = [u for u in workers(units)
                          if u["type"] == worker_type
                          and u["unit_id"] not in pending_workers]
+                fired = False
                 if cands and anchor is not None:
                     worker = cands[0]
-                    kwargs = {"unit_type": supply_type,
-                              "worker_unit": worker["unit_id"],
-                              "center_x": anchor["x"],
-                              "center_y": anchor["y"],
-                              "radius_tiles": 15,
-                              "max_results": 8}
                     try:
-                        resp = await c.find_placement(**kwargs)
+                        resp = await c.find_placement(
+                            unit_type=supply_type,
+                            worker_unit=worker["unit_id"],
+                            center_x=anchor["x"], center_y=anchor["y"],
+                            radius_tiles=15, max_results=8)
                         spots = resp.get("spots", [])
                         if spots:
                             spot = spots[0]
-                            completed, ipg = count_units(units, supply_type)
                             await c.build(unit_id=worker["unit_id"],
                                           unit_type=supply_type,
                                           tile_x=spot["tile_x"],
@@ -694,21 +785,67 @@ async def run(c: Client, interval_sec: float,
                                 verb="build", target_type=supply_type,
                                 issued_frame=frame,
                                 pre_min=r["minerals"], pre_gas=r["gas"],
-                                pre_count=completed + ipg,
+                                pre_count=pyl_total,
                                 cost_min=100, cost_gas=0,
                                 worker_id=worker["unit_id"],
                             )
-                            stats.tried["build:" + unit_type_name(supply_type)] += 1
-                            print(f"[ai_v2] FIRE  build:{unit_type_name(supply_type)} "
-                                  f"@tile ({spot['tile_x']},{spot['tile_y']})")
+                            pending_workers.add(worker["unit_id"])
+                            stats.tried[
+                                "build:" + unit_type_name(supply_type)] += 1
+                            print(f"[ai_v2] FIRE  "
+                                  f"build:{unit_type_name(supply_type)} "
+                                  f"({pyl_total + 1}/{pylon_target})")
+                            fired = True
                     except Exception as e:
                         print(f"[ai_v2]  pylon fire error: {e}")
+                if not fired:
+                    # Refund reservation since we didn't actually spend.
+                    budget["min"] += 100
 
-        # Refresh the worker-busy set after supply build.
-        pending_workers = {p.worker_id for p in pending.values()
-                           if p.worker_id is not None}
+        # -- Priority 3: workers. Cap at worker_target.
+        if (n_workers < worker_target
+                and f"train:{worker_type}" not in pending):
+            if reserve(worker_train_min, 0):
+                p = await try_train_worker(c, obs, worker_type,
+                                           main_type, worker_train_min)
+                if p is not None:
+                    pending[f"train:{worker_type}"] = p
+                    stats.tried["train:" + unit_type_name(worker_type)] += 1
+                    print(f"[ai_v2] FIRE  "
+                          f"train:{unit_type_name(worker_type)} "
+                          f"({n_workers + 1}/{worker_target})")
+                else:
+                    budget["min"] += worker_train_min
 
-        # 3. Every building we don't have yet: try to build one.
+        # -- Priority 4: gas structure. One Assimilator/Refinery.
+        gas_bld_type = (UNIT_TYPES_BY_NAME["Protoss_Assimilator"]
+                        if race == "protoss"
+                        else UNIT_TYPES_BY_NAME["Terran_Refinery"])
+        gas_c, gas_ip = count_units(units, gas_bld_type)
+        if (gas_c + gas_ip == 0
+                and f"build:{gas_bld_type}" not in pending):
+            if reserve(100, 0):
+                p = await try_build(
+                    c, obs,
+                    BuildingSpec(gas_bld_type, 100, 0, "geyser"),
+                    worker_type, main_type, supply_type, pending_workers)
+                if p is not None:
+                    pending[f"build:{gas_bld_type}"] = p
+                    pending_workers.add(p.worker_id)  # type: ignore
+                    stats.tried[
+                        "build:" + unit_type_name(gas_bld_type)] += 1
+                    print(f"[ai_v2] FIRE  "
+                          f"build:{unit_type_name(gas_bld_type)}")
+                else:
+                    budget["min"] += 100
+
+        # (gas workers are already handled inside phase_mine above.)
+
+        # -- Priority 5: catalog buildings, in tech-tree order.
+        # Cap: one catalog build fired per tick. Otherwise we can yank
+        # all remaining probes off mining in a single tick when
+        # minerals briefly clear multiple costs.
+        catalog_build_this_tick = 0
         for spec in catalog_buildings:
             key = f"build:{spec.type_id}"
             if key in pending:
@@ -716,52 +853,26 @@ async def run(c: Client, interval_sec: float,
             completed, in_progress = count_units(units, spec.type_id)
             if completed + in_progress > 0:
                 continue
+            if catalog_build_this_tick >= 1:
+                break
+            if not reserve(spec.cost_min, spec.cost_gas):
+                continue
             p = await try_build(c, obs, spec, worker_type, main_type,
                                 supply_type, pending_workers)
             if p is not None:
                 pending[key] = p
                 pending_workers.add(p.worker_id)  # type: ignore
-                stats.tried["build:" + unit_type_name(spec.type_id)] += 1
+                stats.tried[
+                    "build:" + unit_type_name(spec.type_id)] += 1
                 print(f"[ai_v2] FIRE  build:{unit_type_name(spec.type_id)}")
+                catalog_build_this_tick += 1
+            else:
+                budget["min"] += spec.cost_min
+                budget["gas"] += spec.cost_gas
 
-        # 3b. Assimilator is the first "gas" building. Include it as a
-        # geyser-anchored build too. It's already in catalog_buildings
-        # for Terran; for Protoss the equivalent Assimilator wasn't in
-        # PROTOSS_BUILDINGS -- add explicitly.
-        if race == "protoss":
-            assim_type = UNIT_TYPES_BY_NAME["Protoss_Assimilator"]
-            key = f"build:{assim_type}"
-            if key not in pending:
-                completed, in_progress = count_units(units, assim_type)
-                if completed + in_progress == 0:
-                    p = await try_build(
-                        c, obs,
-                        BuildingSpec(assim_type, 100, 0, "geyser"),
-                        worker_type, main_type, supply_type,
-                        pending_workers)
-                    if p is not None:
-                        pending[key] = p
-                        pending_workers.add(p.worker_id)  # type: ignore
-                        stats.tried[f"build:{unit_type_name(assim_type)}"] += 1
-                        print(f"[ai_v2] FIRE  build:{unit_type_name(assim_type)}")
-        elif race == "terran":
-            ref_type = UNIT_TYPES_BY_NAME["Terran_Refinery"]
-            key = f"build:{ref_type}"
-            if key not in pending:
-                completed, in_progress = count_units(units, ref_type)
-                if completed + in_progress == 0:
-                    p = await try_build(
-                        c, obs,
-                        BuildingSpec(ref_type, 100, 0, "geyser"),
-                        worker_type, main_type, supply_type,
-                        pending_workers)
-                    if p is not None:
-                        pending[key] = p
-                        pending_workers.add(p.worker_id)  # type: ignore
-                        stats.tried[f"build:{unit_type_name(ref_type)}"] += 1
-                        print(f"[ai_v2] FIRE  build:{unit_type_name(ref_type)}")
-
-        # 4. Every unit we haven't trained yet.
+        # -- Priority 6: catalog units. Also 1-per-tick to keep
+        # verify-per-target unambiguous.
+        catalog_train_this_tick = 0
         for spec in catalog_units:
             key = f"train:{spec.type_id}"
             if key in pending:
@@ -769,42 +880,23 @@ async def run(c: Client, interval_sec: float,
             completed, in_progress = count_units(units, spec.type_id)
             if completed + in_progress > 0:
                 continue
+            if catalog_train_this_tick >= 1:
+                break
+            if not reserve(spec.cost_min, spec.cost_gas):
+                continue
             p = await try_train_unit(c, obs, spec)
             if p is not None:
                 pending[key] = p
-                stats.tried["train:" + unit_type_name(spec.type_id)] += 1
+                stats.tried[
+                    "train:" + unit_type_name(spec.type_id)] += 1
                 print(f"[ai_v2] FIRE  train:{unit_type_name(spec.type_id)}")
+                catalog_train_this_tick += 1
+            else:
+                budget["min"] += spec.cost_min
+                budget["gas"] += spec.cost_gas
 
-        # 5. Coverage: exercise move + stop once each.
-        if not move_done:
-            idle = [u for u in workers(units) if u["order"] in IDLE_ORDERS
-                    and u["unit_id"] not in pending_workers]
-            if idle and home_x is not None:
-                w = idle[0]
-                dst_x = home_x + random.randint(-200, 200)
-                dst_y = home_y + random.randint(-200, 200)
-                try:
-                    await c.move(unit_id=w["unit_id"], x=dst_x, y=dst_y)
-                    print(f"[ai_v2] FIRE  move worker {w['unit_id']} "
-                          f"-> ({dst_x},{dst_y})  [coverage]")
-                    move_done = True
-                except Exception as e:
-                    print(f"[ai_v2]  move error: {e}")
-        if move_done and not stop_done:
-            # Pick any idle unit, send stop.
-            cands = [u for u in units if u["order"] not in IDLE_ORDERS
-                     and not u.get("building")]
-            if cands:
-                w = cands[0]
-                try:
-                    await c.stop(unit_id=w["unit_id"])
-                    print(f"[ai_v2] FIRE  stop {unit_type_name(w['type'])} "
-                          f"{w['unit_id']}  [coverage]")
-                    stop_done = True
-                except Exception as e:
-                    print(f"[ai_v2]  stop error: {e}")
-
-        # 6. Attack: any combat unit not already attacking → attack-move.
+        # -- Priority 7: attack. Free. Idle combat -> enemy corner or
+        #    nearest visible enemy.
         for u in combat_units(units):
             if u["order"] not in IDLE_ORDERS:
                 continue
@@ -822,15 +914,43 @@ async def run(c: Client, interval_sec: float,
             except Exception as e:
                 print(f"[ai_v2]  attack error: {e}")
 
+        # -- Priority 8: API-coverage move + stop, once each.
+        if not move_done:
+            idle = [u for u in workers(units) if u["order"] in IDLE_ORDERS
+                    and u["unit_id"] not in pending_workers]
+            if idle and home_x is not None:
+                w = idle[0]
+                dst_x = home_x + random.randint(-200, 200)
+                dst_y = home_y + random.randint(-200, 200)
+                try:
+                    await c.move(unit_id=w["unit_id"], x=dst_x, y=dst_y)
+                    print(f"[ai_v2] FIRE  move worker {w['unit_id']} "
+                          f"-> ({dst_x},{dst_y})  [coverage]")
+                    move_done = True
+                except Exception as e:
+                    print(f"[ai_v2]  move error: {e}")
+        if move_done and not stop_done:
+            cands = [u for u in units if u["order"] not in IDLE_ORDERS
+                     and not u.get("building")]
+            if cands:
+                w = cands[0]
+                try:
+                    await c.stop(unit_id=w["unit_id"])
+                    print(f"[ai_v2] FIRE  stop {unit_type_name(w['type'])} "
+                          f"{w['unit_id']}  [coverage]")
+                    stop_done = True
+                except Exception as e:
+                    print(f"[ai_v2]  stop error: {e}")
+
         await asyncio.sleep(interval_sec)
 
 
 async def main(api_key: str, host: str, port: int, interval_sec: float,
                worker_target: int, supply_slack: int,
-               worker_train_min: int) -> None:
+               worker_train_min: int, pylon_target: int) -> None:
     async with Client(api_key=api_key, host=host, port=port) as c:
         await run(c, interval_sec, worker_target, supply_slack,
-                  worker_train_min)
+                  worker_train_min, pylon_target)
 
 
 def entrypoint() -> None:
@@ -848,11 +968,15 @@ def entrypoint() -> None:
                    help="build another supply structure when "
                         "(supply_max - supply_used) drops below this")
     p.add_argument("--worker-train-min", type=int, default=50)
+    p.add_argument("--pylon-target", type=int, default=20,
+                   help="target Pylon/Supply-Depot count (built + "
+                        "in-progress); higher priority than most goals")
     args = p.parse_args()
     try:
         asyncio.run(main(args.api_key, args.host, args.port,
                          args.interval_sec, args.worker_target,
-                         args.supply_slack, args.worker_train_min))
+                         args.supply_slack, args.worker_train_min,
+                         args.pylon_target))
     except KeyboardInterrupt:
         print("\n[ai_v2] stopped")
 
