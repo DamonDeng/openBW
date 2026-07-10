@@ -117,6 +117,25 @@ struct window_impl {
 				return true;
 			case SDL_TEXTINPUT:
 				break;
+			case SDL_MOUSEWHEEL:
+				e.type = event_t::type_mouse_wheel;
+				// Prefer high-resolution (fractional) values when
+				// available -- macOS two-finger trackpad emits many
+				// small preciseX/Y deltas per gesture, while a
+				// classic scroll wheel gives one integer tick.
+				e.wheel_x = sdl_e.wheel.preciseX;
+				e.wheel_y = sdl_e.wheel.preciseY;
+				// SDL emits wheel deltas that are already sign-natural
+				// on the platform (Y positive = user pushed the wheel /
+				// swiped fingers away from body). Our ui event loop
+				// treats that as "scroll UP", so no flip here. If SDL
+				// reports SDL_MOUSEWHEEL_FLIPPED we invert to keep
+				// consistent semantics.
+				if (sdl_e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
+					e.wheel_x = -e.wheel_x;
+					e.wheel_y = -e.wheel_y;
+				}
+				return true;
 			case SDL_QUIT:
 				e.type = event_t::type_quit;
 				return true;

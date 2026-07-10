@@ -15,7 +15,8 @@ namespace native_window {
 			type_resize,
 			type_mouse_button_down,
 			type_mouse_button_up,
-			type_mouse_motion
+			type_mouse_motion,
+			type_mouse_wheel
 		};
 		int type = type_none;
 		int sym = -1;
@@ -29,6 +30,15 @@ namespace native_window {
 		int mouse_xrel = -1;
 		int mouse_yrel = -1;
 		int clicks = -1;
+		// Mouse-wheel delta in fractional "lines" -- SDL provides int
+		// wheel.x/y (whole ticks) and preciseX/preciseY (fractional,
+		// non-zero on high-resolution wheels + trackpads). We forward
+		// preciseX/Y as float so a two-finger trackpad drag on macOS
+		// produces smooth scrolling. Sign: positive Y means the user
+		// scrolled UP (natural on macOS); the ui event loop decides
+		// how to interpret that.
+		float wheel_x = 0.0f;
+		float wheel_y = 0.0f;
 	};
 
 	struct window {

@@ -1282,23 +1282,181 @@ struct ui_functions: ui_util_functions {
 	void draw_fog(uint8_t* data, size_t data_pitch) {
 		if (viewing_slot < 0 || viewing_slot >= 8) return;
 		const uint8_t bit = (uint8_t)(1u << viewing_slot);
-		// BW's fog-of-war remap. dark_pcx is a 256x32 bank of 256-byte
-		// palette LUTs; row 7 is the canonical "fog" row (rows 0-6 are
-		// progressively dimmer daylight tints; light_pcx entries produced
-		// a green cast on jungle tilesets). Rows beyond 7 are for other
-		// effects (shadow=18, identity=31).
-		const uint8_t* dark_lut = nullptr;
+
+		// Fog rendering with soft edges.
+		//
+		// dark_pcx is a 256x32 palette-remap bank (32 rows of 256 bytes
+		// each; row N = "shade N of the input palette"). Retail BW used
+		// row 7 as the canonical fog LUT and applied it uniformly across
+		// every 32x32 tile flagged "not currently visible" -- which is
+		// why retail BW itself has visibly-blocky fog edges. Rows 0..6
+		// are progressively dimmer daylight tints (originally intended
+		// for lighting effects); row 18 = shadow; row 31 = identity.
+		//
+		// Our smoothing trick: instead of "one whole tile, one shade",
+		// for each pixel in a fogged tile we look at the 4 axis-
+		// neighbor tiles' visibility and interpolate the LUT row. A
+		// pixel one tile away from a fully-visible neighbor gets a
+		// lighter row (say row 3); further inside the fog we grade back
+		// to row 7. Unexplored tiles fade from row 7 near a fog edge
+		// to solid black at their far side.
+		//
+		// This is not BW-authentic (BW never smoothed), but it removes
+		// the 32-pixel-quantized "black boxes" the user complained
+		// about while still using only the palette LUTs already on
+		// disk, so it costs nothing at load time.
+		const uint8_t* dark_rows = nullptr;
 		if (tileset_img.dark_pcx.data.size() >= 256 * 8) {
-			dark_lut = &tileset_img.dark_pcx.data[256 * 7];
+			dark_rows = tileset_img.dark_pcx.data.data();
 		}
+		auto lut_row = [&](int row_idx) -> const uint8_t* {
+			// Clamp; only rows 0..7 are useful for fog fades.
+			if (row_idx < 0) row_idx = 0;
+			if (row_idx > 7) row_idx = 7;
+			return dark_rows + 256u * (size_t)row_idx;
+		};
+
+		auto tile_at = [&](int tx, int ty) -> const tile_t* {
+			if (tx < 0 || ty < 0) return nullptr;
+			if ((size_t)tx >= game_st.map_tile_width) return nullptr;
+			if ((size_t)ty >= game_st.map_tile_height) return nullptr;
+			return &st.tiles[(size_t)ty * game_st.map_tile_width + (size_t)tx];
+		};
+		auto is_visible = [&](const tile_t* t) {
+			return t && (t->visible & bit) == 0;
+		};
+		auto is_explored = [&](const tile_t* t) {
+			return t && (t->explored & bit) == 0;
+		};
+
+		// Result of picking a "how to shade this pixel" decision.
+		enum : int {
+			SHADE_LEAVE_ALONE = -2,   // don't touch the pixel; matches
+			                          //   the look of a fully-visible
+			                          //   tile (which we never overlay).
+			SHADE_BLACK       = -1,   // set pixel to 0 (unexplored).
+			// Otherwise 0..7 = LUT row index into dark_pcx.
+		};
+
+		// Pick a shading decision for pixel (lx, ly) inside a 32x32
+		// tile.
+		//
+		// Fogged tile (self_explored=true): row 7 EVERYWHERE by
+		//   default. If a visible neighbor is adjacent, ramp from
+		//   LEAVE_ALONE at the shared edge (d=0, so the fog looks
+		//   like the visible neighbor there) back to row 7 by d=8.
+		//   Fog interior stays uniform row 7. This is what the user
+		//   asked for: no shading at all right at the visible edge,
+		//   smoothly rising to full fog going inward.
+		//
+		// Unexplored tile (self_explored=false): black by default.
+		//   Bordering an explored (fogged) neighbor: fade black -> row 7
+		//   over ~8 pixels near that shared edge, so the unexplored side
+		//   fades into fog softly.
+		//   Bordering a visible neighbor (rare, but happens on newly
+		//   scouted corners): also use the visible-side ramp so the
+		//   transition is smooth.
+		auto pick_row = [&](int lx, int ly,
+		                    bool self_explored,
+		                    bool n_left_vis, bool n_right_vis,
+		                    bool n_up_vis,   bool n_down_vis,
+		                    bool n_left_exp, bool n_right_exp,
+		                    bool n_up_exp,   bool n_down_exp)
+		        -> int {
+			// Distance to each edge in pixels (0..31, larger = deeper
+			// inside the tile from that edge).
+			int d_left  = lx;
+			int d_right = 31 - lx;
+			int d_up    = ly;
+			int d_down  = 31 - ly;
+
+			// Band width for the fog↔visible ramp. Wider than 4 so the
+			// transition is visible and smooth, but far short of the
+			// full 32-pixel tile so fog interior stays uniform.
+			constexpr int VIS_RAMP = 8;
+
+			int chosen = self_explored ? 7 : SHADE_BLACK;
+
+			// Ramp near a visible neighbor: at edge d=0 leave pixel
+			// alone (matches C side exactly), rise to row 7 at
+			// d=VIS_RAMP. Values in between: interpolate through
+			// rows 1,2,3,4,5,6,7. row 0 is BW's brightest tint LUT
+			// (not identity), so we use LEAVE_ALONE for the truly-
+			// no-fog end.
+			auto blend_toward_visible = [&](int d) {
+				if (d >= VIS_RAMP) return;
+				int candidate;
+				if (d == 0) {
+					candidate = SHADE_LEAVE_ALONE;
+				} else {
+					// d in [1..VIS_RAMP-1] mapped to rows [1..7]
+					candidate = (d * 7 + VIS_RAMP / 2) / VIS_RAMP;
+					if (candidate < 1) candidate = 1;
+					if (candidate > 7) candidate = 7;
+				}
+				// "Lighter" wins. Ordering: LEAVE_ALONE (-2) < BLACK
+				// (-1) is NOT the semantic we want; a "lighter"
+				// candidate means less-fogged. Explicit compare:
+				auto lightness_rank = [](int c) {
+					// Lower rank = lighter (less fogged).
+					// LEAVE_ALONE is the lightest possible.
+					if (c == SHADE_LEAVE_ALONE) return -1;
+					if (c == SHADE_BLACK) return 100;
+					return c;   // 0..7 as-is
+				};
+				if (lightness_rank(candidate) < lightness_rank(chosen)) {
+					chosen = candidate;
+				}
+			};
+			if (n_left_vis)  blend_toward_visible(d_left);
+			if (n_right_vis) blend_toward_visible(d_right);
+			if (n_up_vis)    blend_toward_visible(d_up);
+			if (n_down_vis)  blend_toward_visible(d_down);
+
+			if (!self_explored) {
+				// Unexplored fading into fogged neighbor: at shared
+				// edge (d=0) use row 7, linear to black by d=8.
+				auto blend_toward_explored = [&](int d) {
+					if (d >= 8) return;
+					int candidate = 7 - d * 4 / 8;
+					if (candidate < 0) candidate = 0;
+					// Compare using rank helper: BLACK is darkest;
+					// row 0 is lightest fog shade.
+					auto lightness_rank = [](int c) {
+						if (c == SHADE_LEAVE_ALONE) return -1;
+						if (c == SHADE_BLACK) return 100;
+						return c;
+					};
+					if (lightness_rank(candidate) < lightness_rank(chosen)) {
+						chosen = candidate;
+					}
+				};
+				if (n_left_exp)  blend_toward_explored(d_left);
+				if (n_right_exp) blend_toward_explored(d_right);
+				if (n_up_exp)    blend_toward_explored(d_up);
+				if (n_down_exp)  blend_toward_explored(d_down);
+			}
+			return chosen;
+		};
 
 		auto screen_tile = screen_tile_bounds();
 		for (size_t ty = screen_tile.from.y; ty != screen_tile.to.y; ++ty) {
 			for (size_t tx = screen_tile.from.x; tx != screen_tile.to.x; ++tx) {
-				auto& tile = st.tiles[ty * game_st.map_tile_width + tx];
-				bool explored = (tile.explored & bit) == 0;
-				bool visible = (tile.visible & bit) == 0;
-				if (visible) continue;  // fully lit; no overlay
+				const tile_t* tile = tile_at((int)tx, (int)ty);
+				if (!tile) continue;
+				bool self_visible = is_visible(tile);
+				if (self_visible) continue;  // fully lit; no overlay
+				bool self_explored = is_explored(tile);
+
+				// Neighbor states, for edge blending.
+				const tile_t* tl = tile_at((int)tx - 1, (int)ty);
+				const tile_t* tr = tile_at((int)tx + 1, (int)ty);
+				const tile_t* tu = tile_at((int)tx,     (int)ty - 1);
+				const tile_t* td = tile_at((int)tx,     (int)ty + 1);
+				bool nlv = is_visible(tl),  nrv = is_visible(tr);
+				bool nuv = is_visible(tu),  ndv = is_visible(td);
+				bool nle = is_explored(tl), nre = is_explored(tr);
+				bool nue = is_explored(tu), nde = is_explored(td);
 
 				int screen_x = (int)(tx * 32) - screen_pos.x;
 				int screen_y = (int)(ty * 32) - screen_pos.y;
@@ -1310,24 +1468,61 @@ struct ui_functions: ui_util_functions {
 				w = std::min(w, (int)screen_width - screen_x);
 				h = std::min(h, (int)screen_height - screen_y);
 				if (w <= 0 || h <= 0) continue;
-				(void)ox; (void)oy;
 
-				uint8_t* row = data + (size_t)screen_y * data_pitch + (size_t)screen_x;
-				if (!explored || !dark_lut) {
-					// Unexplored: solid black. Also used as fallback for
-					// fogged tiles when the dark LUT isn't loaded.
-					for (int y = 0; y < h; ++y) {
-						std::memset(row, 0, (size_t)w);
-						row += data_pitch;
-					}
-				} else {
-					// Fogged: remap each pixel through the dark LUT.
-					for (int y = 0; y < h; ++y) {
-						for (int x = 0; x < w; ++x) {
-							row[x] = dark_lut[row[x]];
+				// Fast path: no edge-blend candidates. Slow path only
+				// needed when:
+				//   - any visible neighbor    (fog/unexplored fades in
+				//     toward the visible edge over a 4-pixel band)
+				//   - unexplored self + any explored neighbor
+				//     (unexplored fades from black to fog at the
+				//     shared edge over 8 pixels)
+				// Fog↔unexplored borders NO LONGER go through the slow
+				// path -- fog stays uniform row 7, unexplored handles
+				// its own fade in. Adding a black rim on the fog side
+				// created a visible line the user didn't want.
+				bool any_vis_neighbor = nlv || nrv || nuv || ndv;
+				bool any_exp_neighbor = nle || nre || nue || nde;
+				bool needs_slow_path =
+					any_vis_neighbor
+					|| (!self_explored && any_exp_neighbor);
+				if (!needs_slow_path) {
+					uint8_t* row = data + (size_t)screen_y * data_pitch + (size_t)screen_x;
+					if (!self_explored || !dark_rows) {
+						for (int y = 0; y < h; ++y) {
+							std::memset(row, 0, (size_t)w);
+							row += data_pitch;
 						}
-						row += data_pitch;
+					} else {
+						const uint8_t* lut = lut_row(7);
+						for (int y = 0; y < h; ++y) {
+							for (int x = 0; x < w; ++x) row[x] = lut[row[x]];
+							row += data_pitch;
+						}
 					}
+					continue;
+				}
+
+				// Slow path: per-pixel shading decision.
+				uint8_t* row_ptr = data + (size_t)screen_y * data_pitch + (size_t)screen_x;
+				for (int y = 0; y < h; ++y) {
+					int ly = oy + y;
+					for (int x = 0; x < w; ++x) {
+						int lx = ox + x;
+						int shade = pick_row(
+							lx, ly, self_explored,
+							nlv, nrv, nuv, ndv,
+							nle, nre, nue, nde);
+						if (shade == SHADE_LEAVE_ALONE) {
+							// Pixel matches the visible side exactly:
+							// no shading at all. This is the "no fog"
+							// end of the ramp near a visible edge.
+						} else if (shade == SHADE_BLACK || !dark_rows) {
+							row_ptr[x] = 0;
+						} else {
+							row_ptr[x] = lut_row(shade)[row_ptr[x]];
+						}
+					}
+					row_ptr += data_pitch;
 				}
 			}
 		}
@@ -1952,6 +2147,34 @@ struct ui_functions: ui_util_functions {
 						is_dragging_screen = false;
 					}
 					break;
+				case native_window::event_t::type_mouse_wheel: {
+					// Two-finger trackpad or scroll-wheel over the main
+					// window pans the camera.
+					// Horizontal: two fingers moving RIGHT scrolls the
+					//   view right (screen_pos.x decreases) -- matches
+					//   left/right feel of native document scrolling.
+					// Vertical: two fingers moving DOWN moves the view
+					//   DOWN so the map appears to scroll up under the
+					//   viewport (screen_pos.y increases with downward
+					//   scroll gesture). This is inverted from the
+					//   macOS "natural scrolling" convention because
+					//   for a MAP camera the user thinks of the wheel
+					//   as steering the camera, not the content.
+					constexpr float PIXELS_PER_LINE = 48.0f;
+					screen_pos.x -= (int)(e.wheel_x * PIXELS_PER_LINE);
+					screen_pos.y += (int)(e.wheel_y * PIXELS_PER_LINE);
+					// Clamp so we don't scroll off the map. Allow half a
+					// screen of overscan so the user can center a corner.
+					int max_x = (int)game_st.map_width  - (int)view_width  / 2;
+					int max_y = (int)game_st.map_height - (int)view_height / 2;
+					int min_x = -(int)view_width  / 2;
+					int min_y = -(int)view_height / 2;
+					if (screen_pos.x > max_x) screen_pos.x = max_x;
+					if (screen_pos.y > max_y) screen_pos.y = max_y;
+					if (screen_pos.x < min_x) screen_pos.x = min_x;
+					if (screen_pos.y < min_y) screen_pos.y = min_y;
+					break;
+				}
 				case native_window::event_t::type_key_down:
 					//if (e.sym == 'q') {
 					//	use_new_images = !use_new_images;
