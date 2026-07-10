@@ -32,6 +32,8 @@ enum : uint8_t {
 	ACT_TRAIN = 31,
 	ACT_DEFAULT_ORDER = 20,
 	ACT_ORDER = 21,
+	ACT_RESEARCH = 48,  // payload: TechTypes u8
+	ACT_UPGRADE = 50,   // payload: UpgradeTypes u8
 };
 
 // Encoded output: one command may produce multiple sequential action
@@ -197,6 +199,46 @@ inline std::optional<encode_error> encode_command(
 		return std::nullopt;
 	}
 
+	// --- Research (single-target tech) ---
+	// {"verb":"research","unit":<building_id>,"tech":<TechTypes int>}
+	// The sim looks up the tech on the currently-selected building and
+	// starts research if prereqs / cost / etc. are met. Silent reject
+	// otherwise.
+	if (verb == "research") {
+		auto* u = need("unit"); auto* t = need("tech");
+		if (!u || !t) return encode_error{"research: needs unit, tech"};
+		uint16_t unit_id = u->get<uint16_t>();
+		uint8_t tech_id = t->get<uint8_t>();
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, ACT_RESEARCH);
+		put_u8(b, tech_id);
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
+	// --- Upgrade (level-N stat upgrade) ---
+	// {"verb":"upgrade","unit":<building_id>,"upgrade":<UpgradeTypes int>}
+	// Same shape as research, different action code. The sim increments
+	// the player's upgrade level for this UpgradeTypes when done. Level
+	// is inferred from current progress; caller doesn't specify a level.
+	if (verb == "upgrade") {
+		auto* u = need("unit"); auto* ut = need("upgrade");
+		if (!u || !ut) return encode_error{"upgrade: needs unit, upgrade"};
+		uint16_t unit_id = u->get<uint16_t>();
+		uint8_t upg_id = ut->get<uint8_t>();
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, ACT_UPGRADE);
+		put_u8(b, upg_id);
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
 	// --- Build ---
 	// {"verb":"build","unit":<worker_id>,"unit_type":<UnitTypes int>,
 	//  "tile_x":<u16>,"tile_y":<u16>}
@@ -262,6 +304,8 @@ inline std::optional<encode_error> encode_command(
 //       {"verb":"train",  "unit":42, "unit_type":7}      // Terran_SCV
 //       {"verb":"build",  "unit":42, "unit_type":106,     // CC = 106
 //                          "tile_x":24, "tile_y":30}
+//       {"verb":"research", "unit":42, "tech":0}          // TechTypes int
+//       {"verb":"upgrade",  "unit":42, "upgrade":0}       // UpgradeTypes int
 //
 // Server -> client (sent per frame while any command is being executed):
 //   {"type":"welcome", "slot":N, "current_frame":F}    // sent on WS open

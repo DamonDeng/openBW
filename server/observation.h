@@ -125,6 +125,47 @@ inline std::string build_observation(
 		rr["supply_max"] = st.supply_available[slot][race_idx].integer_part();
 		rr["minerals_gathered"] = st.total_minerals_gathered[slot];
 		rr["gas_gathered"] = st.total_gas_gathered[slot];
+
+		// Upgrade levels: player-global (see bwgame.h::unit_armor,
+		// weapon_damage_amount). Every combat unit of the player uses
+		// the SAME level -- putting it per-unit would just duplicate
+		// this map for every Zealot on the field. Report as
+		// {upgrade_id: level}, level > 0 only. `upgrading` is the same
+		// map but for level values currently in progress on any of the
+		// player's buildings -- lets an agent see "we started but
+		// haven't finished the upgrade yet".
+		{
+			nlohmann::json upgrades = nlohmann::json::object();
+			nlohmann::json upgrading = nlohmann::json::object();
+			for (size_t i = 0; i < st.upgrade_levels[slot].size(); ++i) {
+				int lvl = st.upgrade_levels[slot].at((bwgame::UpgradeTypes)i);
+				if (lvl > 0) {
+					upgrades[std::to_string(i)] = lvl;
+				}
+				if (st.upgrade_upgrading[slot].at((bwgame::UpgradeTypes)i)) {
+					upgrading[std::to_string(i)] = true;
+				}
+			}
+			rr["upgrades"] = std::move(upgrades);
+			if (!upgrading.empty()) rr["upgrading"] = std::move(upgrading);
+		}
+
+		// Researched techs: same story, player-global.
+		{
+			nlohmann::json tech = nlohmann::json::array();
+			nlohmann::json researching = nlohmann::json::array();
+			for (size_t i = 0; i < st.tech_researched[slot].size(); ++i) {
+				if (st.tech_researched[slot].at((bwgame::TechTypes)i)) {
+					tech.push_back((int)i);
+				}
+				if (st.tech_researching[slot].at((bwgame::TechTypes)i)) {
+					researching.push_back((int)i);
+				}
+			}
+			rr["tech"] = std::move(tech);
+			if (!researching.empty()) rr["researching"] = std::move(researching);
+		}
+
 		j["resources"] = std::move(rr);
 	}
 

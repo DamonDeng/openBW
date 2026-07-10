@@ -82,9 +82,22 @@ inline std::string build_placement_response(
 	auto& st = funcs.st;
 	const auto& game_st = *st.game;
 
-	// Resolve center. If a worker_unit is given, use its position.
-	// Otherwise fall back to center_x / center_y in the request, or
-	// (as last resort) the slot's main structure.
+	// Resolve center and (separately) the worker pointer.
+	//
+	// Priority for the SEARCH CENTER:
+	//   1. explicit center_x / center_y in the request (agent knows
+	//      where it wants to build -- honor it)
+	//   2. worker_unit's current position (agent said "search near
+	//      this probe" without a specific point)
+	//   3. any owned building for this slot (fallback)
+	//   4. the slot's start location (last resort)
+	//
+	// The worker pointer is resolved INDEPENDENTLY of the center: an
+	// agent asking for a specific center still needs the worker
+	// pointer for can_place_building (which uses the worker's tile
+	// occupancy). So worker + center_x/y can coexist -- explicit
+	// center wins for search, worker still gets validated at that
+	// candidate spot.
 	int cx = 0, cy = 0;
 	bool have_center = false;
 
@@ -92,15 +105,15 @@ inline std::string build_placement_response(
 	if (req.contains("worker_unit") && req["worker_unit"].is_number_integer()) {
 		int wid = req["worker_unit"].get<int>();
 		worker = funcs.get_unit(bwgame::unit_id((uint16_t)wid));
-		if (worker) {
-			cx = worker->position.x;
-			cy = worker->position.y;
-			have_center = true;
-		}
 	}
-	if (!have_center && req.contains("center_x") && req.contains("center_y")) {
+	if (req.contains("center_x") && req.contains("center_y")) {
 		cx = req["center_x"].get<int>();
 		cy = req["center_y"].get<int>();
+		have_center = true;
+	}
+	if (!have_center && worker) {
+		cx = worker->position.x;
+		cy = worker->position.y;
 		have_center = true;
 	}
 	if (!have_center) {
