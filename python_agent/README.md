@@ -13,7 +13,9 @@ python_agent/
 ├── enums.py                 # unit-type / order name<->id lookups
 ├── helpers.py               # shared utilities: find workers, nearest, race, etc.
 ├── agents/
-│   ├── ai_v1_agent.py       # ⭐ integrated closed-loop agent (recommended)
+│   ├── ai_v3_agent.py       # ⭐ v2 + scouting + wider spread + upgrades
+│   ├── ai_v2_agent.py       # coverage-oriented (one of every building/unit)
+│   ├── ai_v1_agent.py       # early integrated agent (superseded by v2/v3)
 │   ├── random_walk.py       # move idle workers to random points
 │   ├── miner.py             # gather minerals; top up gas workers per refinery
 │   ├── trainer.py           # train workers + combat units when producers ready
@@ -25,12 +27,19 @@ python_agent/
 
 ## Which agent to run
 
-- **For actual gameplay: `ai_v1_agent`.** One process, one connection,
+- **For the fullest coverage: `ai_v3_agent`.** Everything v2 does
+  (one of every building + one of every unit) plus 2-3 probes on
+  radial-from-home scouting patrol, wider building distribution via
+  rotating anchor strategies, and the `research`/`upgrade` verbs
+  exercised via a small per-race upgrade catalog.
+- **For a simpler agent: `ai_v2_agent`.** Just build/train coverage.
+  No scouts, no upgrades. Good for isolating specific verb bugs.
+- **For historical / integrated single-loop agent: `ai_v1_agent`.** One process, one connection,
   one decision loop, one intent store. It verifies each build/gas
   assignment by observing outcomes (was a matching building placed?
   is `resources.gas` actually rising?) and retries when the sim
-  silently drops a command. This is what you want if you're testing
-  end-to-end play.
+  silently drops a command. Superseded by v2/v3 for coverage
+  testing, but a good compact reference for the closed-loop pattern.
 - **For learning / workshop demos: the split agents** (miner, trainer,
   builder, attacker). Each is <100 lines and focuses on one verb.
   They work fine in isolation and are easy to fork, but running all

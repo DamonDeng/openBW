@@ -10,6 +10,7 @@ returned by the server (see agent_integration.md). No wrapper types.
 
 from __future__ import annotations
 
+import math
 from typing import Iterable
 
 from python_agent.enums import (
@@ -26,6 +27,11 @@ def dist_sq(a: dict, b: dict) -> int:
     return dx * dx + dy * dy
 
 
+def dist_pixels(ax: int, ay: int, bx: int, by: int) -> float:
+    """Plain Euclidean distance in pixels between two (x,y) points."""
+    return math.hypot(ax - bx, ay - by)
+
+
 def pixel_to_tile(px: int, py: int) -> tuple[int, int]:
     """BW uses 32 pixels per tile."""
     return px // 32, py // 32
@@ -34,6 +40,63 @@ def pixel_to_tile(px: int, py: int) -> tuple[int, int]:
 def tile_to_pixel(tx: int, ty: int) -> tuple[int, int]:
     """Center of the tile."""
     return tx * 32 + 16, ty * 32 + 16
+
+
+def radial_waypoints(home_x: int, home_y: int,
+                     map_w: int, map_h: int,
+                     n: int = 8, radius: int | None = None) -> list[tuple[int, int]]:
+    """N points evenly-spaced on a circle around home, clipped to the map.
+
+    Used by scouts for "starburst outward from home" patrol. Radius
+    defaults to the smaller half-map dimension so the ring roughly
+    reaches the map edges. Points closer to the enemy corner are
+    equally likely as points behind us -- that's the point of
+    coverage-oriented scouting.
+    """
+    if radius is None:
+        radius = min(map_w, map_h) // 2 - 128  # 4-tile margin from edge
+    out: list[tuple[int, int]] = []
+    for i in range(n):
+        angle = (2 * math.pi * i) / n
+        x = int(home_x + radius * math.cos(angle))
+        y = int(home_y + radius * math.sin(angle))
+        # Clip inside the map with a small margin (unit size).
+        x = max(64, min(map_w - 64, x))
+        y = max(64, min(map_h - 64, y))
+        out.append((x, y))
+    return out
+
+
+def zscan_waypoints(map_w: int, map_h: int,
+                    sight_pixels: int = 224,
+                    margin_pixels: int = 128) -> list[tuple[int, int]]:
+    """Serpentine (Z-shape) waypoint list covering the whole map.
+
+    A single scout that visits every point in this list will pass
+    within `sight_pixels // 2` of any point on the map. Rows are
+    `sight_pixels` apart (default 7 tiles = 224 px, slightly less
+    than a probe's 8-tile sight range to give overlap and cover
+    diagonal gaps). Direction alternates each row to form a Z /
+    boustrophedon path.
+
+    For a 4096x4096 map at 224 px spacing that's ~18 rows and
+    ~36 waypoints total.
+    """
+    xs = [margin_pixels, map_w - margin_pixels]  # left / right ends
+    out: list[tuple[int, int]] = []
+    y = margin_pixels
+    direction = 0  # 0 = left->right, 1 = right->left
+    while y <= map_h - margin_pixels:
+        # Endpoints of this row in traversal order.
+        if direction == 0:
+            out.append((xs[0], y))
+            out.append((xs[1], y))
+        else:
+            out.append((xs[1], y))
+            out.append((xs[0], y))
+        y += sight_pixels
+        direction ^= 1
+    return out
 
 
 # ---- Unit lookups ----

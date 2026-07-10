@@ -216,3 +216,17 @@ class Client:
         return await self.cmd({"verb": "build", "unit": unit_id,
                                "unit_type": unit_type,
                                "tile_x": tile_x, "tile_y": tile_y})
+
+    async def research(self, unit_id: int, tech: int) -> dict:
+        """Research a tech (single-target ability) at a building.
+        `tech` is a TechTypes enum int (e.g. Psionic_Storm = 4)."""
+        return await self.cmd({"verb": "research", "unit": unit_id,
+                               "tech": tech})
+
+    async def upgrade(self, unit_id: int, upgrade: int) -> dict:
+        """Start a level-N upgrade at a building. `upgrade` is an
+        UpgradeTypes enum int (e.g. Protoss_Ground_Weapons = 1). Sim
+        infers the level from current progress -- caller doesn't pass
+        it."""
+        return await self.cmd({"verb": "upgrade", "unit": unit_id,
+                               "upgrade": upgrade})
