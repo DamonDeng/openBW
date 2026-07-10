@@ -165,6 +165,35 @@ inline std::optional<encode_error> encode_command(
 		return std::nullopt;
 	}
 
+	// --- Repair (SCV → damaged mechanical unit/building) ---
+	// {"verb":"repair","unit":<scv_id>,"target_unit":<friendly_id>}
+	// Dedicated verb because Orders::Repair is normally reached only
+	// via ACT_DEFAULT_ORDER's routing logic (see bwgame.h:3598
+	// get_default_order), which the agent protocol doesn't expose.
+	// The `attack` verb won't work here -- it forces AttackUnit.
+	// Silent-reject inside the sim on non-SCV workers, non-mech
+	// targets, undamaged targets, or non-friendly targets.
+	if (verb == "repair") {
+		auto* u = need("unit"); auto* t = need("target_unit");
+		if (!u || !t) return encode_error{"repair: needs unit, target_unit"};
+		uint16_t unit_id = u->get<uint16_t>();
+		uint16_t target_id = t->get<uint16_t>();
+		if (target_id == 0)
+			return encode_error{"repair: target_unit must not be 0"};
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, ACT_ORDER);
+		put_i16(b, 0); put_i16(b, 0);            // position ignored for repair
+		put_u16(b, target_id);
+		put_u16(b, (uint16_t)bwgame::UnitTypes::None);
+		put_u8(b, (uint8_t)bwgame::Orders::Repair);
+		put_u8(b, 0);                            // queue = false
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
 	// --- Stop ---
 	// {"verb":"stop","unit":<id>,"queue":false}
 	if (verb == "stop") {
@@ -321,6 +350,7 @@ inline std::optional<encode_error> encode_command(
 //       {"verb":"move",   "unit":123, "x":1024, "y":768, "queue":false}
 //       {"verb":"attack", "unit":123, "x":1024, "y":768, "target_unit":0}
 //       {"verb":"gather", "unit":42, "target_unit":800}   // mineral or geyser id
+//       {"verb":"repair", "unit":42, "target_unit":800}   // SCV -> damaged friendly mech
 //       {"verb":"stop",   "unit":123, "queue":false}
 //       {"verb":"train",  "unit":42, "unit_type":7}      // Terran_SCV
 //       {"verb":"build",  "unit":42, "unit_type":106,     // CC = 106

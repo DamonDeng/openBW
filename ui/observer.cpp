@@ -55,6 +55,12 @@ struct args_t {
 	int screen_height = 800;
 	std::string api_key;
 	std::string sync_log_path;
+	// -1 = "no override, use map default". Values 0/1/2 = zerg/terran/
+	// protoss (matches bwgame::race_t and server's --race parsing).
+	// The launcher script must pass the SAME --race args here as on
+	// the server, so both sides spawn matching-race starting units
+	// with matching unit_ids at map-load frame 0.
+	std::array<int, 8> race_overrides = {-1, -1, -1, -1, -1, -1, -1, -1};
 };
 
 args_t parse_args(int argc, char** argv) {
@@ -76,6 +82,40 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--height") && i + 1 < argc) a.screen_height = std::atoi(argv[++i]);
 		else if (eq("--api-key") && i + 1 < argc) a.api_key = argv[++i];
 		else if (eq("--sync-log") && i + 1 < argc) a.sync_log_path = argv[++i];
+		else if (eq("--race") && i + 1 < argc) {
+			// Format: N=zerg|terran|protoss. Server-side race
+			// (server/main.cpp:104 parse_race_override) uses the
+			// same format. Must be kept in sync with server's
+			// --race args or observer will show wrong-race
+			// starting units and unit_ids won't match the sim.
+			std::string v = argv[++i];
+			auto eq_pos = v.find('=');
+			if (eq_pos == std::string::npos || eq_pos == 0
+			    || eq_pos + 1 >= v.size()) {
+				fprintf(stderr,
+					"error: --race expects <slot>=<zerg|terran|protoss>, "
+					"got %s\n", v.c_str());
+				std::exit(1);
+			}
+			int slot = std::atoi(v.substr(0, eq_pos).c_str());
+			if (slot < 0 || slot > 7) {
+				fprintf(stderr,
+					"error: --race slot must be 0..7, got %d\n", slot);
+				std::exit(1);
+			}
+			std::string race = v.substr(eq_pos + 1);
+			int race_id = -1;
+			if (race == "zerg") race_id = 0;
+			else if (race == "terran") race_id = 1;
+			else if (race == "protoss") race_id = 2;
+			else {
+				fprintf(stderr,
+					"error: --race race must be zerg|terran|protoss, "
+					"got %s\n", race.c_str());
+				std::exit(1);
+			}
+			a.race_overrides[slot] = race_id;
+		}
 		else if (eq("--help") || eq("-h")) {
 			fprintf(stderr,
 				"usage: %s --map <path> [--server 127.0.0.1:6112] [--data-path .]\n"
@@ -85,6 +125,9 @@ args_t parse_args(int argc, char** argv) {
 				"  --width      window width (default: 1280)\n"
 				"  --height     window height (default: 800)\n"
 				"  --api-key    API key for auth (omit if server has --no-auth)\n"
+				"  --race N=R   race override for slot N (zerg|terran|protoss). MUST\n"
+				"               match the server's --race args or observer will show\n"
+				"               wrong-race starting units. Repeat per slot.\n"
 				"  --sync-log <path>  append per-frame agent-action events to <path>.\n"
 				"                     Diff against server's sync-log to find replay divergence.\n",
 				argv[0]);
@@ -109,16 +152,40 @@ int main(int argc, char** argv) {
 	ui::log("[obs] starting: map=%s server=%s:%d\n",
 		args.map_path.c_str(), args.server_host.c_str(), args.server_port);
 
-	// 1. Load MPQs + map. Same trick as the server -- drive game_load_functions
-	//    ourselves to set create_melee_units_for_player so units spawn at
-	//    frame 0. Both server and observer must load with matching setup or
-	//    they'll desync immediately.
+	// 1. Load MPQs + map. Same setup_f trick as the server:
+	//    create_melee_units_for_player[i] = true so the map's SIDE
+	//    chunk spawn code runs; setup_f applies the races the server
+	//    told us about BEFORE create_starting_units runs, so both
+	//    sides spawn matching-race units with matching unit_ids.
+	//
+	//    The races come from --race command-line args on both sides
+	//    -- launcher scripts need to pass the same --race flags to
+	//    server + observer. In the future we could hoist this
+	//    into a pre-map-load handshake that fetches races from the
+	//    server, but for now duplicating --race is fine.
 	auto load_data_file = data_loading::data_files_directory(a_string(args.data_path.c_str()));
 	game_player player(load_data_file);
 	{
 		game_load_functions loader(player.st());
 		for (size_t i = 0; i < 8; ++i) loader.setup_info.create_melee_units_for_player[i] = true;
-		loader.load_map_file(a_string(args.map_path.c_str()));
+		state& st = player.st();
+		auto setup_f = [&args, &st]() {
+			// Mirror server main.cpp:243 -- promote "open" and
+			// "computer" slot controllers, then apply --race.
+			for (size_t i = 0; i != 12; ++i) {
+				if (st.players[i].controller == bwgame::player_t::controller_open) {
+					st.players[i].controller = bwgame::player_t::controller_occupied;
+				}
+				if (st.players[i].controller == bwgame::player_t::controller_computer) {
+					st.players[i].controller = bwgame::player_t::controller_computer_game;
+				}
+			}
+			for (size_t i = 0; i < 8; ++i) {
+				if (args.race_overrides[i] < 0) continue;
+				st.players[i].race = (bwgame::race_t)args.race_overrides[i];
+			}
+		};
+		loader.load_map_file(a_string(args.map_path.c_str()), setup_f);
 	}
 
 	ui_functions ui(std::move(player));

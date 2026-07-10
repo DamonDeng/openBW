@@ -1,28 +1,31 @@
-"""ai_v4_agent: v3 + carrier/reaver fighter maintenance.
+"""p_agent_v3: v2 + scouting + wider building spread + upgrades.
 
-Adds one new capability on top of v3's already-comprehensive agent:
+Adds three capabilities on top of v2's coverage-oriented core:
 
-  * Fighter refill: for every own Protoss Carrier and Reaver, if the
-    unit's fighter count + queued < fighter max AND we can afford
-    another fighter, fire the new `train_fighter` verb. Interceptors
-    (Carrier's babies) cost 25 min each, Scarabs (Reaver's babies)
-    cost 15 min. Both cap at 8 (Carrier w/ Capacity upgrade) / 5
-    (Reaver w/o Reaver_Capacity) respectively.
+  1. Scouting: N probes assigned to a "scout" role walk a radial
+     waypoint list from home outward. Enemy buildings we see get
+     remembered in `known_enemies`; the attack target uses the
+     nearest known enemy base instead of the "opposite map corner"
+     guess v2 used. Mineral fields / geysers seen off-base get
+     logged for potential future expansion.
 
-    Uses the observation's new `fighter_count` / `fighter_queued` /
-    `fighter_max` fields (added on the server side alongside the
-    train_fighter verb) so we fire only when a specific parent needs
-    a refill -- no wasted commands.
+  2. Wider building distribution: pylon and catalog builds rotate
+     through three anchor strategies (nearest to Nexus, furthest
+     from Nexus, random ring-slot from home) instead of v2's single
+     "random own building" anchor. Stops buildings from clumping.
 
-Everything else is inherited from v3: scouting (radial + zscan),
-wider building spread (toward map center), upgrades/tech, expansions
-(up to 4 bases), verbose scout logs.
+  3. Upgrades: once a Forge / Cybernetics Core / Citadel of Adun /
+     Templar Archives is completed, fire the appropriate upgrade
+     or research verb at it. Uses the new server verbs added in
+     server/agent_protocol.h ACT_RESEARCH (48) / ACT_UPGRADE (50).
+     Fire-and-observe verification; the sim's silent-reject shows
+     up as a resource-debit failure and gets logged.
 
-Zerg still out of scope. Terran also has no fighter mechanics in
-this catalog -- train_fighter only applies to Protoss Carrier/Reaver.
+Zerg still out of scope (same reason as v2 -- drone-morph placement
+not wired). Terran works but has no upgrade catalog encoded here.
 
 Usage:
-    python3 -m python_agent.agents.ai_v4_agent <api_key>
+    python3 -m python_agent.agents.p_agent_v3 <api_key>
 """
 
 from __future__ import annotations
@@ -64,13 +67,6 @@ class UnitSpec:
     cost_min: int
     cost_gas: int = 0
     supply_each: int = 0
-    # How many of this unit type to maintain (completed + in-progress).
-    # Cheap ground units get big targets so an army actually forms;
-    # expensive/late-tier units (Carrier, Arbiter) stay low so we still
-    # try one or two for coverage without dumping all resources on
-    # them. Default 1 keeps original v2/v3 "one of each" semantics
-    # for any spec that doesn't override.
-    target_count: int = 1
 
 @dataclass
 class UpgradeSpec:
@@ -101,31 +97,28 @@ PROTOSS_BUILDINGS: list[BuildingSpec] = [
 ]
 
 PROTOSS_UNITS: list[UnitSpec] = [
-    # Cheap Gateway units -- large army targets.
     UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Zealot"],
-             UNIT_TYPES_BY_NAME["Protoss_Gateway"],       100,   0, 2, target_count=8),
+             UNIT_TYPES_BY_NAME["Protoss_Gateway"], 100, 0, 2),
     UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Dragoon"],
-             UNIT_TYPES_BY_NAME["Protoss_Gateway"],       125,  50, 2, target_count=8),
+             UNIT_TYPES_BY_NAME["Protoss_Gateway"], 125, 50, 2),
     UnitSpec(UNIT_TYPES_BY_NAME["Protoss_High_Templar"],
-             UNIT_TYPES_BY_NAME["Protoss_Gateway"],        50, 150, 2, target_count=2),
+             UNIT_TYPES_BY_NAME["Protoss_Gateway"], 50, 150, 2),
     UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Dark_Templar"],
-             UNIT_TYPES_BY_NAME["Protoss_Gateway"],       125, 100, 2, target_count=2),
-    # Robotics -- medium cost, medium count.
+             UNIT_TYPES_BY_NAME["Protoss_Gateway"], 125, 100, 2),
     UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Reaver"],
-             UNIT_TYPES_BY_NAME["Protoss_Robotics_Facility"], 200, 100, 4, target_count=2),
+             UNIT_TYPES_BY_NAME["Protoss_Robotics_Facility"], 200, 100, 4),
     UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Observer"],
-             UNIT_TYPES_BY_NAME["Protoss_Robotics_Facility"],  25,  75, 1, target_count=2),
+             UNIT_TYPES_BY_NAME["Protoss_Robotics_Facility"], 25, 75, 1),
     UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Shuttle"],
-             UNIT_TYPES_BY_NAME["Protoss_Robotics_Facility"], 200,   0, 2, target_count=1),
-    # Stargate -- expensive air, low counts.
+             UNIT_TYPES_BY_NAME["Protoss_Robotics_Facility"], 200, 0, 2),
     UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Scout"],
-             UNIT_TYPES_BY_NAME["Protoss_Stargate"],      275, 125, 3, target_count=2),
+             UNIT_TYPES_BY_NAME["Protoss_Stargate"], 275, 125, 3),
     UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Corsair"],
-             UNIT_TYPES_BY_NAME["Protoss_Stargate"],      150, 100, 2, target_count=2),
+             UNIT_TYPES_BY_NAME["Protoss_Stargate"], 150, 100, 2),
     UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Carrier"],
-             UNIT_TYPES_BY_NAME["Protoss_Stargate"],      350, 250, 6, target_count=2),
+             UNIT_TYPES_BY_NAME["Protoss_Stargate"], 350, 250, 6),
     UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Arbiter"],
-             UNIT_TYPES_BY_NAME["Protoss_Stargate"],      100, 350, 4, target_count=1),
+             UNIT_TYPES_BY_NAME["Protoss_Stargate"], 100, 350, 4),
 ]
 
 # Protoss upgrade catalog. Enum values from bwenums.h:
@@ -170,7 +163,7 @@ def race_catalogs(race: str):
                 UNIT_TYPES_BY_NAME["Protoss_Probe"],
                 UNIT_TYPES_BY_NAME["Protoss_Pylon"],
                 UNIT_TYPES_BY_NAME["Protoss_Nexus"])
-    raise SystemExit(f"[ai_v4] race={race} not supported yet")
+    raise SystemExit(f"[p_v3] race={race} not supported yet")
 
 
 # --------------------------------------------------------------------
@@ -245,7 +238,7 @@ def verify_pending(pending: dict, obs: dict, stats: Stats,
         age = frame - p.issued_frame
         if cur_count > p.pre_count:
             stats.took[p.label()] += 1
-            print(f"[ai_v4] TOOK  {p.label():48s} "
+            print(f"[p_v3] TOOK  {p.label():48s} "
                   f"(count {p.pre_count}->{cur_count} after {age}f)")
             to_drop.append(key)
             continue
@@ -253,7 +246,7 @@ def verify_pending(pending: dict, obs: dict, stats: Stats,
             stats.reject[p.label()] += 1
             n = stats.reject[p.label()]
             if n == 1 or n % 5 == 0:
-                print(f"[ai_v4] REJECT {p.label():48s} after {age}f. n={n}. "
+                print(f"[p_v3] REJECT {p.label():48s} after {age}f. n={n}. "
                       f"pre min={p.pre_min} gas={p.pre_gas} count={p.pre_count}; "
                       f"now min={r['minerals']} gas={r['gas']} count={cur_count}")
             to_drop.append(key)
@@ -292,7 +285,7 @@ async def phase_mine(c: Client, obs: dict, worker_type: int,
                                    target_unit=target["unit_id"])
                     just_assigned.add(w["unit_id"])
                 except Exception as e:
-                    print(f"[ai_v4]  gather-gas error: {e}")
+                    print(f"[p_v3]  gather-gas error: {e}")
 
     if mfs:
         for w in wu:
@@ -305,7 +298,7 @@ async def phase_mine(c: Client, obs: dict, worker_type: int,
                 await c.gather(unit_id=w["unit_id"], target_unit=m["unit_id"])
                 just_assigned.add(w["unit_id"])
             except Exception as e:
-                print(f"[ai_v4]  gather-min error: {e}")
+                print(f"[p_v3]  gather-min error: {e}")
 
     return just_assigned
 
@@ -392,7 +385,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
     live_ids = {u["unit_id"] for u in units}
     for wid in list(scouts.keys()):
         if wid not in live_ids:
-            print(f"[ai_v4]  SCOUT worker {wid} died; unassigning")
+            print(f"[p_v3]  SCOUT worker {wid} died; unassigning")
             scouts.pop(wid, None)
 
     # 2) Assign new scouts up to each mode's target.
@@ -424,7 +417,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
                 wp_started_frame=frame,
                 wp_start_dist=dist_pixels(w["x"], w["y"], tgt[0], tgt[1]),
             )
-            print(f"[ai_v4]  SCOUT worker {w['unit_id']} mode={mode} "
+            print(f"[p_v3]  SCOUT worker {w['unit_id']} mode={mode} "
                   f"-> wp {wp_idx} {tgt} from ({w['x']},{w['y']}) "
                   f"dist={dist_pixels(w['x'], w['y'], tgt[0], tgt[1]):.0f}")
 
@@ -436,7 +429,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
         # If everything is blacklisted, reset -- terrain may have
         # changed (enemy building destroyed, for example).
         if len(sc.blacklist) >= n:
-            print(f"[ai_v4]  SCOUT {sc.worker_id} [{sc.mode}] all "
+            print(f"[p_v3]  SCOUT {sc.worker_id} [{sc.mode}] all "
                   f"{n} waypoints blacklisted; resetting blacklist")
             sc.blacklist.clear()
         # Advance, skipping blacklisted.
@@ -484,7 +477,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
         dd_recent = ""
         if len(sc.dist_history) >= 2:
             dd_recent = f" dd={sc.dist_history[0] - sc.dist_history[-1]:+.0f}"
-        print(f"[ai_v4/SCOUT] {wid}[{sc.mode}] wp={sc.waypoint_idx} "
+        print(f"[p_v3/SCOUT] {wid}[{sc.mode}] wp={sc.waypoint_idx} "
               f"tgt={target} pos=({wx},{wy}) "
               f"d={d:.0f} start_d={sc.wp_start_dist:.0f}"
               f"{dd_recent} age={age}f "
@@ -495,13 +488,13 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             new_idx = next_wp_idx(sc, len(wps))
             reset_scout_wp(sc, new_idx, w, wps)
             sc.arrived_frame = frame
-            print(f"[ai_v4]  SCOUT {wid} [{sc.mode}] ARRIVED @{target}; "
+            print(f"[p_v3]  SCOUT {wid} [{sc.mode}] ARRIVED @{target}; "
                   f"next wp {new_idx} {wps[new_idx]}")
             try:
                 nxt = wps[new_idx]
                 await c.move(unit_id=wid, x=nxt[0], y=nxt[1])
             except Exception as e:
-                print(f"[ai_v4]  scout move error: {e}")
+                print(f"[p_v3]  scout move error: {e}")
             continue
 
         # Three independent stuck checks (any triggers a blacklist).
@@ -530,7 +523,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             stuck_reason = f"timeout={age}f>{STUCK_TIMEOUT_FRAMES}"
 
         if stuck_reason is not None:
-            print(f"[ai_v4]  SCOUT {wid} [{sc.mode}] STUCK near "
+            print(f"[p_v3]  SCOUT {wid} [{sc.mode}] STUCK near "
                   f"({wx},{wy}) wp {sc.waypoint_idx}={target}; "
                   f"reason={stuck_reason}; blacklisting.")
             sc.blacklist.add(sc.waypoint_idx)
@@ -539,10 +532,10 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             try:
                 nxt = wps[new_idx]
                 await c.move(unit_id=wid, x=nxt[0], y=nxt[1])
-                print(f"[ai_v4]  SCOUT {wid} [{sc.mode}] -> wp {new_idx} "
+                print(f"[p_v3]  SCOUT {wid} [{sc.mode}] -> wp {new_idx} "
                       f"{nxt} (blacklist size {len(sc.blacklist)})")
             except Exception as e:
-                print(f"[ai_v4]  scout skip-move error: {e}")
+                print(f"[p_v3]  scout skip-move error: {e}")
         else:
             # Re-issue move only if the probe isn't already moving.
             order_name_str = order_name(w["order"])
@@ -551,7 +544,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
                 try:
                     await c.move(unit_id=wid, x=target[0], y=target[1])
                 except Exception as e:
-                    print(f"[ai_v4]  scout re-move error: {e}")
+                    print(f"[p_v3]  scout re-move error: {e}")
 
     # 4) Harvest visibility -- remember enemies + off-base resources.
     for e in obs.get("enemies", []):
@@ -559,7 +552,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             known_enemies[e["unit_id"]] = KnownEnemy(
                 unit_id=e["unit_id"], type_id=e["type"],
                 x=e["x"], y=e["y"], first_seen_frame=frame)
-            print(f"[ai_v4]  SCOUT SPOTTED enemy building "
+            print(f"[p_v3]  SCOUT SPOTTED enemy building "
                   f"{unit_type_name(e['type'])} @({e['x']},{e['y']}) "
                   f"unit_id={e['unit_id']}")
 
@@ -577,7 +570,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             dist_home = dist_pixels(n["x"], n["y"], home_x, home_y)
             if dist_home > 1500:
                 kind = "geyser" if n["type"] == 188 else "mineral"
-                print(f"[ai_v4]  SCOUT SPOTTED {kind} @({n['x']},{n['y']}) "
+                print(f"[p_v3]  SCOUT SPOTTED {kind} @({n['x']},{n['y']}) "
                       f"tile=({n['x']//32},{n['y']//32}) "
                       f"dist_home={dist_home:.0f} unit_id={uid}")
 
@@ -778,11 +771,11 @@ async def try_expand(c: Client, obs: dict,
             center_x=cx, center_y=cy,
             radius_tiles=8, max_results=8)
     except Exception as e:
-        print(f"[ai_v4]  expand find_placement error: {e}")
+        print(f"[p_v3]  expand find_placement error: {e}")
         return None
     spots = resp.get("spots", [])
     if not spots:
-        print(f"[ai_v4]  EXPAND: no placement near cluster ({cx},{cy})")
+        print(f"[p_v3]  EXPAND: no placement near cluster ({cx},{cy})")
         return None
     spot = spots[0]
 
@@ -792,11 +785,11 @@ async def try_expand(c: Client, obs: dict,
                       unit_type=nexus_type,
                       tile_x=spot["tile_x"], tile_y=spot["tile_y"])
     except Exception as e:
-        print(f"[ai_v4]  expand build cmd error: {e}")
+        print(f"[p_v3]  expand build cmd error: {e}")
         return None
 
     pending_expansion_pts.add((cx, cy))
-    print(f"[ai_v4] FIRE  EXPAND Nexus @cluster ({cx},{cy}) "
+    print(f"[p_v3] FIRE  EXPAND Nexus @cluster ({cx},{cy}) "
           f"tile=({spot['tile_x']},{spot['tile_y']}) worker={worker['unit_id']}")
     return Pending(
         verb="build", target_type=nexus_type,
@@ -854,7 +847,7 @@ async def try_build(c: Client, obs: dict, spec: BuildingSpec,
     try:
         resp = await c.find_placement(**kwargs)
     except Exception as e:
-        print(f"[ai_v4]  find_placement error {unit_type_name(spec.type_id)}: {e}")
+        print(f"[p_v3]  find_placement error {unit_type_name(spec.type_id)}: {e}")
         return None
     spots = resp.get("spots", [])
     if not spots:
@@ -866,7 +859,7 @@ async def try_build(c: Client, obs: dict, spec: BuildingSpec,
         await c.build(unit_id=worker["unit_id"], unit_type=spec.type_id,
                       tile_x=spot["tile_x"], tile_y=spot["tile_y"])
     except Exception as e:
-        print(f"[ai_v4]  build cmd error {unit_type_name(spec.type_id)}: {e}")
+        print(f"[p_v3]  build cmd error {unit_type_name(spec.type_id)}: {e}")
         return None
     return Pending(
         verb="build", target_type=spec.type_id,
@@ -890,7 +883,7 @@ async def try_train_worker(c, obs, worker_type, main_type, cost_min):
     try:
         await c.train(unit_id=p["unit_id"], unit_type=worker_type)
     except Exception as e:
-        print(f"[ai_v4]  train worker error: {e}")
+        print(f"[p_v3]  train worker error: {e}")
         return None
     return Pending(verb="train", target_type=worker_type,
                    issued_frame=obs["current_frame"],
@@ -911,7 +904,7 @@ async def try_train_unit(c, obs, spec: UnitSpec) -> Pending | None:
     try:
         await c.train(unit_id=p["unit_id"], unit_type=spec.type_id)
     except Exception as e:
-        print(f"[ai_v4]  train unit error: {e}")
+        print(f"[p_v3]  train unit error: {e}")
         return None
     return Pending(verb="train", target_type=spec.type_id,
                    issued_frame=obs["current_frame"],
@@ -949,11 +942,11 @@ async def try_upgrade(c: Client, obs: dict,
         else:
             await c.research(unit_id=src["unit_id"], tech=spec.enum_id)
         fired_upgrades.add(key)
-        print(f"[ai_v4] FIRE  {spec.kind}:{spec.label} @{src['unit_id']} "
+        print(f"[p_v3] FIRE  {spec.kind}:{spec.label} @{src['unit_id']} "
               f"cost={spec.cost_min}/{spec.cost_gas}")
         return True
     except Exception as e:
-        print(f"[ai_v4]  {spec.kind} error: {e}")
+        print(f"[p_v3]  {spec.kind} error: {e}")
         return False
 
 
@@ -966,7 +959,7 @@ async def run(c: Client, interval_sec: float,
               worker_train_min: int, pylon_target: int,
               scout_radial: int, scout_zscan: int,
               base_target: int) -> None:
-    print(f"[ai_v4] connected slot={c.welcome.slot} "
+    print(f"[p_v3] connected slot={c.welcome.slot} "
           f"frame={c.welcome.current_frame}")
 
     map_info = (await c.observe(targets=["map_info"]))["map_info"]
@@ -1044,10 +1037,10 @@ async def run(c: Client, interval_sec: float,
             waypoints_by_mode["radial"] = radial_waypoints(
                 home_x, home_y, map_w, map_h, n=8)
             waypoints_by_mode["zscan"] = zscan_waypoints(map_w, map_h)
-            print(f"[ai_v4] race={race} home=({home_x},{home_y}) "
+            print(f"[p_v3] race={race} home=({home_x},{home_y}) "
                   f"map={map_w}x{map_h}")
-            print(f"[ai_v4] radial wps: {waypoints_by_mode['radial']}")
-            print(f"[ai_v4] zscan wps: {len(waypoints_by_mode['zscan'])} points "
+            print(f"[p_v3] radial wps: {waypoints_by_mode['radial']}")
+            print(f"[p_v3] zscan wps: {len(waypoints_by_mode['zscan'])} points "
                   f"({waypoints_by_mode['zscan'][:2]}...)")
 
         verify_pending(pending, obs, stats, grace_frames)
@@ -1066,12 +1059,12 @@ async def run(c: Client, interval_sec: float,
                 lvl = obs_upgrades.get(str(spec.enum_id), 0)
                 if lvl > 0:
                     completed_upgrades.add(key)
-                    print(f"[ai_v4] TOOK  upgrade:{spec.label} "
+                    print(f"[p_v3] TOOK  upgrade:{spec.label} "
                           f"(level {lvl})")
             else:  # research
                 if spec.enum_id in obs_tech:
                     completed_upgrades.add(key)
-                    print(f"[ai_v4] TOOK  research:{spec.label}")
+                    print(f"[p_v3] TOOK  research:{spec.label}")
 
         # Compute attack target: nearest known enemy building; else fall
         # back to opposite corner (v2 behavior).
@@ -1096,22 +1089,7 @@ async def run(c: Client, interval_sec: float,
         pyl_c, pyl_ip = count_units(units, supply_type)
         n_upg_inprog = len(r.get("upgrading", {})) + len(r.get("researching", []))
         nx_completed, nx_in_progress = count_units(units, main_type)
-        # Fighter-parent summary: for each own completed Carrier or
-        # Reaver, sum current fighter_count and fighter_max so the
-        # status line shows "carriers 3 fighters=17/24" -- 17 babies
-        # loaded, 24 possible if all carriers fully saturated.
-        _CARRIER = UNIT_TYPES_BY_NAME["Protoss_Carrier"]
-        _REAVER = UNIT_TYPES_BY_NAME["Protoss_Reaver"]
-        fpc_have = fpc_max = fpr_have = fpr_max = 0
-        for pu in units:
-            if not pu.get("completed"): continue
-            if pu["type"] == _CARRIER:
-                fpc_have += pu.get("fighter_count", 0) + pu.get("fighter_queued", 0)
-                fpc_max  += pu.get("fighter_max", 0)
-            elif pu["type"] == _REAVER:
-                fpr_have += pu.get("fighter_count", 0) + pu.get("fighter_queued", 0)
-                fpr_max  += pu.get("fighter_max", 0)
-        print(f"[ai_v4] f={frame} min={r['minerals']} gas={r['gas']} "
+        print(f"[p_v3] f={frame} min={r['minerals']} gas={r['gas']} "
               f"sup={r['supply_used']}/{r['supply_max']} "
               f"workers={n_workers}/{worker_target} "
               f"bases={nx_completed}(+{nx_in_progress})/{base_target} "
@@ -1120,7 +1098,6 @@ async def run(c: Client, interval_sec: float,
               f"btypes={b_types}/{len(catalog_buildings)} "
               f"utypes={u_types}/{len(catalog_units)} "
               f"upg={len(completed_upgrades)}(+{n_upg_inprog})/{len(catalog_upgrades)} "
-              f"intcp={fpc_have}/{fpc_max} scarab={fpr_have}/{fpr_max} "
               f"scouts=R{sum(1 for s in scouts.values() if s.mode == 'radial')}/"
               f"Z{sum(1 for s in scouts.values() if s.mode == 'zscan')} "
               f"enemies={len(known_enemies)} "
@@ -1195,13 +1172,13 @@ async def run(c: Client, interval_sec: float,
                                 cost_min=100, cost_gas=0,
                                 worker_id=worker["unit_id"])
                             pending_workers.add(worker["unit_id"])
-                            print(f"[ai_v4] FIRE  build:Pylon "
+                            print(f"[p_v3] FIRE  build:Pylon "
                                   f"({pyl_total2 + 1}/{pylon_target}) "
                                   f"anchor={anchor_pt}")
                         else:
                             budget["min"] += 100  # refund
                     except Exception as e:
-                        print(f"[ai_v4]  pylon fire error: {e}")
+                        print(f"[p_v3]  pylon fire error: {e}")
                         budget["min"] += 100
                 else:
                     budget["min"] += 100
@@ -1213,7 +1190,7 @@ async def run(c: Client, interval_sec: float,
                                            main_type, worker_train_min)
                 if p is not None:
                     pending[f"train:{worker_type}"] = p
-                    print(f"[ai_v4] FIRE  train:Probe ({n_workers + 1}/{worker_target})")
+                    print(f"[p_v3] FIRE  train:Probe ({n_workers + 1}/{worker_target})")
                 else:
                     budget["min"] += worker_train_min
 
@@ -1229,7 +1206,7 @@ async def run(c: Client, interval_sec: float,
                 if p is not None:
                     pending[f"build:{gas_bld}"] = p
                     pending_workers.add(p.worker_id)
-                    print(f"[ai_v4] FIRE  build:Assimilator")
+                    print(f"[p_v3] FIRE  build:Assimilator")
                 else:
                     budget["min"] += 100
 
@@ -1275,35 +1252,25 @@ async def run(c: Client, interval_sec: float,
             if p is not None:
                 pending[key] = p
                 pending_workers.add(p.worker_id)
-                print(f"[ai_v4] FIRE  build:{unit_type_name(spec.type_id)}")
+                print(f"[p_v3] FIRE  build:{unit_type_name(spec.type_id)}")
                 catalog_build_this_tick += 1
             else:
                 budget["min"] += spec.cost_min
                 budget["gas"] += spec.cost_gas
 
-        # ---- Priority 6: catalog units (up to 6 fires per tick,
-        #      throttled per-type by target_count and pending grace).
-        # Each UnitSpec carries target_count -- how many completed +
-        # in-progress copies to maintain. Cheap Gateway units get big
-        # targets (8) so an army actually forms; expensive Carrier /
-        # Arbiter stay low (2 / 1) so they don't monopolise gas.
-        # Pending grace keys per type_id so we don't refire the same
-        # type before the sim shows the new unit in ip; different
-        # types can fire concurrently up to the per-tick cap below.
+        # ---- Priority 6: catalog units (1 per tick).
         catalog_train_this_tick = 0
-        CATALOG_TRAIN_PER_TICK = 6
         for spec in catalog_units:
             key = f"train:{spec.type_id}"
             if key in pending: continue
             completed, ip = count_units(units, spec.type_id)
-            if completed + ip >= spec.target_count: continue
-            if catalog_train_this_tick >= CATALOG_TRAIN_PER_TICK: break
+            if completed + ip > 0: continue
+            if catalog_train_this_tick >= 1: break
             if not reserve(spec.cost_min, spec.cost_gas): continue
             p = await try_train_unit(c, obs, spec)
             if p is not None:
                 pending[key] = p
-                print(f"[ai_v4] FIRE  train:{unit_type_name(spec.type_id)} "
-                      f"({completed + ip + 1}/{spec.target_count})")
+                print(f"[p_v3] FIRE  train:{unit_type_name(spec.type_id)}")
                 catalog_train_this_tick += 1
             else:
                 budget["min"] += spec.cost_min
@@ -1322,44 +1289,6 @@ async def run(c: Client, interval_sec: float,
                 budget["min"] += spec.cost_min
                 budget["gas"] += spec.cost_gas
 
-        # ---- Priority 7.5: refill Carrier/Reaver fighters.
-        # Each Carrier holds up to 8 Interceptors (25 min each) and
-        # each Reaver up to 5 Scarabs (15 min each). The observation
-        # includes fighter_count/fighter_queued/fighter_max per parent
-        # so we fire train_fighter only when a specific parent needs
-        # a refill -- no wasted commands. Cap at 3 fires per tick so
-        # a mass of empty carriers doesn't yank all the minerals in
-        # one tick.
-        FIGHTER_COST_MIN = {
-            UNIT_TYPES_BY_NAME["Protoss_Carrier"]: 25,
-            UNIT_TYPES_BY_NAME["Protoss_Reaver"]: 15,
-        }
-        fighter_fires = 0
-        for pu in units:
-            if fighter_fires >= 3:
-                break
-            if not pu.get("completed"):
-                continue
-            cost = FIGHTER_COST_MIN.get(pu["type"])
-            if cost is None:
-                continue
-            fc = pu.get("fighter_count", 0)
-            fq = pu.get("fighter_queued", 0)
-            fm = pu.get("fighter_max", 0)
-            if fc + fq >= fm:
-                continue
-            if not reserve(cost, 0):
-                continue
-            try:
-                await c.train_fighter(unit_id=pu["unit_id"])
-                print(f"[ai_v4] FIRE  train_fighter "
-                      f"{unit_type_name(pu['type'])} {pu['unit_id']} "
-                      f"({fc}+{fq}/{fm})")
-                fighter_fires += 1
-            except Exception as e:
-                print(f"[ai_v4]  train_fighter error: {e}")
-                budget["min"] += cost
-
         # ---- Priority 8: attack (idle combat -> nearest known enemy).
         for u in combat_units(units):
             if u["order"] not in IDLE_ORDERS: continue
@@ -1377,7 +1306,7 @@ async def run(c: Client, interval_sec: float,
                     await c.attack(unit_id=u["unit_id"], target_unit=0,
                                    x=tgt_x, y=tgt_y)
             except Exception as e:
-                print(f"[ai_v4]  attack error: {e}")
+                print(f"[p_v3]  attack error: {e}")
 
         # ---- Priority 9: coverage verbs.
         if not move_done:
@@ -1392,7 +1321,7 @@ async def run(c: Client, interval_sec: float,
                     await c.move(unit_id=w["unit_id"], x=dst_x, y=dst_y)
                     move_done = True
                 except Exception as e:
-                    print(f"[ai_v4]  cover move error: {e}")
+                    print(f"[p_v3]  cover move error: {e}")
         if move_done and not stop_done:
             cands = [u for u in units if u["order"] not in IDLE_ORDERS
                      and not u.get("building")]
@@ -1401,7 +1330,7 @@ async def run(c: Client, interval_sec: float,
                     await c.stop(unit_id=cands[0]["unit_id"])
                     stop_done = True
                 except Exception as e:
-                    print(f"[ai_v4]  cover stop error: {e}")
+                    print(f"[p_v3]  cover stop error: {e}")
 
         await asyncio.sleep(interval_sec)
 
@@ -1417,7 +1346,7 @@ async def main(api_key, host, port, interval_sec, worker_target,
 
 def entrypoint() -> None:
     p = argparse.ArgumentParser(
-        prog="python3 -m python_agent.agents.ai_v4_agent",
+        prog="python3 -m python_agent.agents.p_agent_v3",
         description="v2 + patrol + wider building spread + upgrades + expansions.")
     p.add_argument("api_key")
     p.add_argument("--host", default="127.0.0.1")
@@ -1442,7 +1371,7 @@ def entrypoint() -> None:
                          args.scout_radial, args.scout_zscan,
                          args.base_target))
     except KeyboardInterrupt:
-        print("\n[ai_v4] stopped")
+        print("\n[p_v3] stopped")
 
 
 if __name__ == "__main__":

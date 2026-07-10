@@ -1,4 +1,4 @@
-"""ai_v1_agent: integrated closed-loop agent.
+"""p_agent_v1: integrated closed-loop agent.
 
 This is the "real" agent -- one connection, one decision loop, one
 intent store. It replaces running miner + trainer + builder + attacker
@@ -16,7 +16,7 @@ practice:
      don't map to "actually working". They need to verify from
      observable OUTCOMES (resources rising, buildings appearing).
 
-ai_v1_agent fixes both by:
+p_agent_v1 fixes both by:
 
   - Tracking intents in Python:
       build_intents[type_id] = BuildIntent(worker_id, tile, issued_frame, ...)
@@ -29,7 +29,7 @@ ai_v1_agent fixes both by:
     frame rate. Between decisions the sim advances ~35 frames.
 
 Usage:
-    python3 -m python_agent.agents.ai_v1_agent <api_key>
+    python3 -m python_agent.agents.p_agent_v1 <api_key>
 
 State on the wire is unchanged -- this is 100% client-side; the server
 sees the same 5 verbs it always saw.
@@ -212,7 +212,7 @@ async def phase_verify_intents(c: Client, s: AgentState, obs: dict) -> None:
             # keep the intent as a marker but no need to retry.
             # Once completed > 0, drop the intent so the queue moves on.
             if completed > 0:
-                print(f"[ai_v1]   VERIFY: {unit_type_name(type_id)} completed, "
+                print(f"[p_v1]   VERIFY: {unit_type_name(type_id)} completed, "
                       f"clearing intent")
                 to_drop.append(type_id)
             continue
@@ -223,7 +223,7 @@ async def phase_verify_intents(c: Client, s: AgentState, obs: dict) -> None:
             worker_status = ("alive"
                              if worker is not None
                              else "GONE (dead/lost)")
-            print(f"[ai_v1]   VERIFY: {unit_type_name(type_id)} intent "
+            print(f"[p_v1]   VERIFY: {unit_type_name(type_id)} intent "
                   f"aged {age} frames, no matching unit, worker={worker_status}. "
                   f"Retrying.")
             to_drop.append(type_id)
@@ -235,14 +235,14 @@ async def phase_verify_intents(c: Client, s: AgentState, obs: dict) -> None:
     for wid, gi in s.gas_intents.items():
         w = find_unit(units, wid)
         if w is None:
-            print(f"[ai_v1]   VERIFY: gas worker {wid} vanished; dropping")
+            print(f"[p_v1]   VERIFY: gas worker {wid} vanished; dropping")
             gas_to_drop.append(wid)
             continue
         # Check the refinery still exists AND is complete. If it's not
         # complete our probe is doing nothing useful.
         r = find_unit(units, gi.refinery_id)
         if r is None or r.get("completed") is not True:
-            print(f"[ai_v1]   VERIFY: refinery {gi.refinery_id} not ready; "
+            print(f"[p_v1]   VERIFY: refinery {gi.refinery_id} not ready; "
                   f"un-assigning worker {wid}")
             gas_to_drop.append(wid)
             continue
@@ -255,7 +255,7 @@ async def phase_verify_intents(c: Client, s: AgentState, obs: dict) -> None:
                       ORDERS_BY_NAME["Harvest1"], ORDERS_BY_NAME["Harvest2"]}
         age = frame - gi.issued_frame
         if wo not in gas_orders and age > GAS_GRACE_FRAMES:
-            print(f"[ai_v1]   VERIFY: worker {wid} not on any gas order "
+            print(f"[p_v1]   VERIFY: worker {wid} not on any gas order "
                   f"(order={order_name_map.get(wo,'?')}); un-assigning")
             gas_to_drop.append(wid)
     for wid in gas_to_drop:
@@ -267,7 +267,7 @@ async def phase_verify_intents(c: Client, s: AgentState, obs: dict) -> None:
     if s.gas_intents:
         dg = gas_delta(s.resource_history, GAS_GRACE_FRAMES)
         if dg is not None and dg < GAS_MIN_DELTA_TO_COUNT:
-            print(f"[ai_v1]   VERIFY: {len(s.gas_intents)} gas workers "
+            print(f"[p_v1]   VERIFY: {len(s.gas_intents)} gas workers "
                   f"assigned but gas rose by only {dg} in last "
                   f"{GAS_GRACE_FRAMES} frames; wiping gas intents")
             s.gas_intents.clear()
@@ -316,7 +316,7 @@ async def phase_build(c: Client, s: AgentState, obs: dict,
         candidates = [u for u in workers(units)
                       if u["unit_id"] not in busy_workers]
         if not candidates:
-            print(f"[ai_v1]   BUILD: no free worker for "
+            print(f"[p_v1]   BUILD: no free worker for "
                   f"{unit_type_name(step.type_id)}")
             return
         worker = candidates[0]
@@ -331,7 +331,7 @@ async def phase_build(c: Client, s: AgentState, obs: dict,
         if step.kind == "gas":
             geysers = vespene_geysers(obs.get("neutrals", []))
             if not geysers:
-                print(f"[ai_v1]   BUILD: no geyser visible for gas step")
+                print(f"[p_v1]   BUILD: no geyser visible for gas step")
                 return
             g = geysers[0]
             kwargs["center_x"] = g["x"]
@@ -341,11 +341,11 @@ async def phase_build(c: Client, s: AgentState, obs: dict,
         try:
             resp = await c.find_placement(**kwargs)
         except Exception as e:
-            print(f"[ai_v1]   BUILD: find_placement error: {e}")
+            print(f"[p_v1]   BUILD: find_placement error: {e}")
             return
         spots = resp.get("spots", [])
         if not spots:
-            print(f"[ai_v1]   BUILD: no placement for "
+            print(f"[p_v1]   BUILD: no placement for "
                   f"{unit_type_name(step.type_id)}")
             return
         spot = spots[0]
@@ -357,7 +357,7 @@ async def phase_build(c: Client, s: AgentState, obs: dict,
                                 tile_x=spot["tile_x"],
                                 tile_y=spot["tile_y"])
         except Exception as e:
-            print(f"[ai_v1]   BUILD: cmd error: {e}")
+            print(f"[p_v1]   BUILD: cmd error: {e}")
             return
         s.build_intents[step.type_id] = BuildIntent(
             type_id=step.type_id,
@@ -366,7 +366,7 @@ async def phase_build(c: Client, s: AgentState, obs: dict,
             tile_y=spot["tile_y"],
             issued_frame=frame,
         )
-        print(f"[ai_v1]   BUILD: {unit_type_name(step.type_id)} @ "
+        print(f"[p_v1]   BUILD: {unit_type_name(step.type_id)} @ "
               f"tile ({spot['tile_x']},{spot['tile_y']}) "
               f"by worker {worker['unit_id']} frame={frame}")
         return   # one build per tick
@@ -406,13 +406,13 @@ async def phase_train(c: Client, s: AgentState, obs: dict,
             if p["type"] == tp.worker_producer and idle(p):
                 try:
                     await c.train(unit_id=p["unit_id"], unit_type=tp.worker)
-                    print(f"[ai_v1]   TRAIN: {unit_type_name(tp.worker)} "
+                    print(f"[p_v1]   TRAIN: {unit_type_name(tp.worker)} "
                           f"from {p['unit_id']}")
                     r_local["minerals"] -= tp.worker_cost_min
                     r_local["supply_used"] += tp.supply_each
                     p["order"] = -1
                 except Exception as e:
-                    print(f"[ai_v1]   TRAIN: cmd error: {e}")
+                    print(f"[p_v1]   TRAIN: cmd error: {e}")
                 break
 
     if want_combat and r_local["minerals"] >= tp.combat_cost_min and supply_ok():
@@ -420,13 +420,13 @@ async def phase_train(c: Client, s: AgentState, obs: dict,
             if p["type"] == tp.combat_producer and idle(p):
                 try:
                     await c.train(unit_id=p["unit_id"], unit_type=tp.combat)
-                    print(f"[ai_v1]   TRAIN: {unit_type_name(tp.combat)} "
+                    print(f"[p_v1]   TRAIN: {unit_type_name(tp.combat)} "
                           f"from {p['unit_id']}")
                     r_local["minerals"] -= tp.combat_cost_min
                     r_local["supply_used"] += tp.supply_each
                     p["order"] = -1
                 except Exception as e:
-                    print(f"[ai_v1]   TRAIN: cmd error: {e}")
+                    print(f"[p_v1]   TRAIN: cmd error: {e}")
                 break
 
 
@@ -461,10 +461,10 @@ async def phase_mine(c: Client, s: AgentState, obs: dict,
                         refinery_id=target["unit_id"],
                         issued_frame=obs["current_frame"],
                     )
-                    print(f"[ai_v1]   MINE: worker {w['unit_id']} -> "
+                    print(f"[p_v1]   MINE: worker {w['unit_id']} -> "
                           f"gas at refinery {target['unit_id']}")
                 except Exception as e:
-                    print(f"[ai_v1]   MINE: gas cmd error: {e}")
+                    print(f"[p_v1]   MINE: gas cmd error: {e}")
 
     # ---- 2. Send genuinely-idle workers to minerals. ----
     if mfs:
@@ -481,10 +481,10 @@ async def phase_mine(c: Client, s: AgentState, obs: dict,
                 break
             try:
                 await c.gather(unit_id=w["unit_id"], target_unit=m["unit_id"])
-                print(f"[ai_v1]   MINE: worker {w['unit_id']} -> "
+                print(f"[p_v1]   MINE: worker {w['unit_id']} -> "
                       f"mineral {m['unit_id']}")
             except Exception as e:
-                print(f"[ai_v1]   MINE: mineral cmd error: {e}")
+                print(f"[p_v1]   MINE: mineral cmd error: {e}")
 
 
 async def phase_attack(c: Client, s: AgentState, obs: dict,
@@ -502,18 +502,18 @@ async def phase_attack(c: Client, s: AgentState, obs: dict,
                 continue
             try:
                 await c.attack(unit_id=u["unit_id"], target_unit=t["unit_id"])
-                print(f"[ai_v1]   ATTACK: {unit_type_name(u['type'])} "
+                print(f"[p_v1]   ATTACK: {unit_type_name(u['type'])} "
                       f"{u['unit_id']} -> enemy {t['unit_id']}")
             except Exception as e:
-                print(f"[ai_v1]   ATTACK: cmd error: {e}")
+                print(f"[p_v1]   ATTACK: cmd error: {e}")
         else:
             try:
                 await c.attack(unit_id=u["unit_id"], target_unit=0,
                                x=target_x, y=target_y)
-                print(f"[ai_v1]   ATTACK: {unit_type_name(u['type'])} "
+                print(f"[p_v1]   ATTACK: {unit_type_name(u['type'])} "
                       f"{u['unit_id']} -> ({target_x},{target_y})")
             except Exception as e:
-                print(f"[ai_v1]   ATTACK: cmd error: {e}")
+                print(f"[p_v1]   ATTACK: cmd error: {e}")
 
 
 # --------------------------------------------------------------------
@@ -522,7 +522,7 @@ async def phase_attack(c: Client, s: AgentState, obs: dict,
 
 async def run(c: Client, interval_sec: float, worker_cap: int,
               gas_workers: int, supply_gap: int) -> None:
-    print(f"[ai_v1] connected as slot={c.welcome.slot} "
+    print(f"[p_v1] connected as slot={c.welcome.slot} "
           f"at frame={c.welcome.current_frame}")
 
     # Fetch map dimensions once (for attack fallback).
@@ -540,18 +540,18 @@ async def run(c: Client, interval_sec: float, worker_cap: int,
         # First-tick initialization.
         if s.race is None:
             s.race = guess_race(obs["units"])
-            print(f"[ai_v1] inferred race={s.race}")
+            print(f"[p_v1] inferred race={s.race}")
             s.build_plan = RACE_BUILD_ORDER.get(s.race, [])
             s.train_plan = RACE_TRAIN.get(s.race)
             if not s.build_plan or s.train_plan is None:
-                print(f"[ai_v1] no plan for race={s.race}; exiting")
+                print(f"[p_v1] no plan for race={s.race}; exiting")
                 return
             if obs["units"]:
                 home_x = sum(u["x"] for u in obs["units"]) // len(obs["units"])
                 home_y = sum(u["y"] for u in obs["units"]) // len(obs["units"])
                 target_x = map_w - home_x
                 target_y = map_h - home_y
-                print(f"[ai_v1] home~({home_x},{home_y}) "
+                print(f"[p_v1] home~({home_x},{home_y}) "
                       f"attack toward ({target_x},{target_y})")
 
         # Update resource history for gas-delta checks.
@@ -567,7 +567,7 @@ async def run(c: Client, interval_sec: float, worker_cap: int,
             c1, c2 = count_units(obs["units"], step.type_id)
             types_summary.append(
                 f"{unit_type_name(step.type_id)[:14]}={c1}(+{c2})")
-        print(f"[ai_v1] frame={obs['current_frame']} race={s.race} "
+        print(f"[p_v1] frame={obs['current_frame']} race={s.race} "
               f"min={r['minerals']} gas={r['gas']} "
               f"supply={r['supply_used']}/{r['supply_max']} "
               f"workers={len(workers(obs['units']))} "
@@ -603,7 +603,7 @@ async def main(api_key: str, host: str, port: int, interval_sec: float,
 
 def entrypoint() -> None:
     p = argparse.ArgumentParser(
-        prog="python3 -m python_agent.agents.ai_v1_agent",
+        prog="python3 -m python_agent.agents.p_agent_v1",
         description="Integrated closed-loop agent (miner+trainer+builder+attacker).")
     p.add_argument("api_key")
     p.add_argument("--host", default="127.0.0.1")
@@ -618,7 +618,7 @@ def entrypoint() -> None:
         asyncio.run(main(args.api_key, args.host, args.port, args.interval_sec,
                          args.worker_cap, args.gas_workers, args.supply_gap))
     except KeyboardInterrupt:
-        print("\n[ai_v1] stopped")
+        print("\n[p_v1] stopped")
 
 
 if __name__ == "__main__":

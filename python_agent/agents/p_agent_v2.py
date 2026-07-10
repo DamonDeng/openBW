@@ -1,4 +1,4 @@
-"""ai_v2_agent: exploratory, coverage-oriented agent.
+"""p_agent_v2: exploratory, coverage-oriented agent.
 
 The point of this agent is NOT to play well. It's to hit every
 train/build verb combination for a given race so we can:
@@ -33,7 +33,7 @@ comparing the next observation's count / resource-delta and log the
 reject. Rate-limited: every 5th failure per (verb, target).
 
 Usage:
-    python3 -m python_agent.agents.ai_v2_agent <api_key>
+    python3 -m python_agent.agents.p_agent_v2 <api_key>
 """
 
 from __future__ import annotations
@@ -172,7 +172,7 @@ def race_catalogs(race: str) -> tuple[list[BuildingSpec], list[UnitSpec],
                 UNIT_TYPES_BY_NAME["Terran_Supply_Depot"],
                 UNIT_TYPES_BY_NAME["Terran_Command_Center"])
     # Zerg is out of scope for v2 (drone-morph placement isn't wired).
-    raise SystemExit(f"[ai_v2] race={race} not supported by this agent yet")
+    raise SystemExit(f"[p_v2] race={race} not supported by this agent yet")
 
 
 # --------------------------------------------------------------------
@@ -273,7 +273,7 @@ def verify_pending(pending: dict, obs: dict, stats: Stats,
 
         if cur_count > p.pre_count:
             stats.took[p.label()] += 1
-            print(f"[ai_v2] TOOK  {p.label():48s} "
+            print(f"[p_v2] TOOK  {p.label():48s} "
                   f"(count {p.pre_count}->{cur_count} after {age}f)")
             to_drop.append(key)
             continue
@@ -283,7 +283,7 @@ def verify_pending(pending: dict, obs: dict, stats: Stats,
             n = stats.reject[p.label()]
             # Log first occurrence + every 5th.
             if n == 1 or n % 5 == 0:
-                print(f"[ai_v2] REJECT {p.label():48s} "
+                print(f"[p_v2] REJECT {p.label():48s} "
                       f"after {age}f (grace={grace_frames}). n={n}. "
                       f"pre: min={p.pre_min} gas={p.pre_gas} "
                       f"count={p.pre_count}. "
@@ -382,7 +382,7 @@ async def try_train_worker(c: Client, obs: dict, worker_type: int,
     try:
         await c.train(unit_id=p["unit_id"], unit_type=worker_type)
     except Exception as e:
-        print(f"[ai_v2]  cmd error train worker: {e}")
+        print(f"[p_v2]  cmd error train worker: {e}")
         return None
     return Pending(
         verb="train", target_type=worker_type,
@@ -442,7 +442,7 @@ async def try_build(c: Client, obs: dict, spec: BuildingSpec,
     try:
         resp = await c.find_placement(**kwargs)
     except Exception as e:
-        print(f"[ai_v2]  find_placement error for "
+        print(f"[p_v2]  find_placement error for "
               f"{unit_type_name(spec.type_id)}: {e}")
         return None
     spots = resp.get("spots", [])
@@ -457,7 +457,7 @@ async def try_build(c: Client, obs: dict, spec: BuildingSpec,
         await c.build(unit_id=worker["unit_id"], unit_type=spec.type_id,
                       tile_x=spot["tile_x"], tile_y=spot["tile_y"])
     except Exception as e:
-        print(f"[ai_v2]  build cmd error {unit_type_name(spec.type_id)}: {e}")
+        print(f"[p_v2]  build cmd error {unit_type_name(spec.type_id)}: {e}")
         return None
     return Pending(
         verb="build", target_type=spec.type_id,
@@ -484,7 +484,7 @@ async def try_train_unit(c: Client, obs: dict, spec: UnitSpec) -> Pending | None
     try:
         await c.train(unit_id=p["unit_id"], unit_type=spec.type_id)
     except Exception as e:
-        print(f"[ai_v2]  train cmd error {unit_type_name(spec.type_id)}: {e}")
+        print(f"[p_v2]  train cmd error {unit_type_name(spec.type_id)}: {e}")
         return None
     return Pending(
         verb="train", target_type=spec.type_id,
@@ -542,13 +542,13 @@ async def phase_mine(c: Client, obs: dict, worker_type: int,
     idle_count = sum(1 for u in all_workers
                      if u["order"] in IDLE_ORDERS
                      and u["unit_id"] not in busy_workers)
-    print(f"[ai_v2/MINE] probes={len(all_workers)} idle_free={idle_count} "
+    print(f"[p_v2/MINE] probes={len(all_workers)} idle_free={idle_count} "
           f"mfs={len(mfs)} refineries={len(refineries)} "
           f"busy={sorted(busy_workers)}")
     if idle_count > 0 or len(all_workers) <= 8:
         # Only dump per-worker when there's an idle one to explain, or
         # while the base is small enough that the output stays readable.
-        print(f"[ai_v2/MINE]  " +
+        print(f"[p_v2/MINE]  " +
               ", ".join(f"{uid}:{ord_}:{tag}"
                         for uid, ord_, tag in breakdown))
 
@@ -573,16 +573,16 @@ async def phase_mine(c: Client, obs: dict, worker_type: int,
                     await c.gather(unit_id=w["unit_id"],
                                    target_unit=target["unit_id"])
                     just_assigned.add(w["unit_id"])
-                    print(f"[ai_v2]  MINE worker {w['unit_id']} -> "
+                    print(f"[p_v2]  MINE worker {w['unit_id']} -> "
                           f"gas at refinery {target['unit_id']}")
                 except Exception as e:
-                    print(f"[ai_v2]  gather-gas error: {e}")
+                    print(f"[p_v2]  gather-gas error: {e}")
 
     # ---- 2. Idle -> minerals. Also poach probes still in Guard-ish
     #        states from the "just finished building" transition.
     if not mfs:
         if idle_count > 0:
-            print(f"[ai_v2/MINE]  {idle_count} idle probes but no minerals "
+            print(f"[p_v2/MINE]  {idle_count} idle probes but no minerals "
                   f"visible -- neutrals list is empty!")
         return just_assigned
     for w in wu:
@@ -590,16 +590,16 @@ async def phase_mine(c: Client, obs: dict, worker_type: int,
             continue
         m = nearest(w, mfs)
         if m is None:
-            print(f"[ai_v2/MINE]  worker {w['unit_id']} idle but "
+            print(f"[p_v2/MINE]  worker {w['unit_id']} idle but "
                   f"nearest(minerals) returned None?!")
             break
         try:
             await c.gather(unit_id=w["unit_id"], target_unit=m["unit_id"])
             just_assigned.add(w["unit_id"])
-            print(f"[ai_v2]  MINE worker {w['unit_id']} -> "
+            print(f"[p_v2]  MINE worker {w['unit_id']} -> "
                   f"mineral {m['unit_id']} (order was {_order_of(w)})")
         except Exception as e:
-            print(f"[ai_v2]  gather-min error: {e}")
+            print(f"[p_v2]  gather-min error: {e}")
 
     return just_assigned
 
@@ -611,7 +611,7 @@ async def phase_mine(c: Client, obs: dict, worker_type: int,
 async def run(c: Client, interval_sec: float,
               worker_target: int, supply_slack: int,
               worker_train_min: int, pylon_target: int) -> None:
-    print(f"[ai_v2] connected as slot={c.welcome.slot} "
+    print(f"[p_v2] connected as slot={c.welcome.slot} "
           f"at frame={c.welcome.current_frame}")
 
     map_info = (await c.observe(targets=["map_info"]))["map_info"]
@@ -680,7 +680,7 @@ async def run(c: Client, interval_sec: float,
                 home_y = sum(u["y"] for u in units) // len(units)
                 tgt_x = map_w - home_x
                 tgt_y = map_h - home_y
-            print(f"[ai_v2] race={race} worker_type={worker_type} "
+            print(f"[p_v2] race={race} worker_type={worker_type} "
                   f"home=({home_x},{home_y}) target=({tgt_x},{tgt_y})")
 
         # ---- Verify pending commands from previous ticks. ----
@@ -703,7 +703,7 @@ async def run(c: Client, interval_sec: float,
             f"(w={p.worker_id}, age={frame - p.issued_frame})"
             for p in pending.values()
         ) if pending else "-"
-        print(f"[ai_v2] frame={frame} race={race} "
+        print(f"[p_v2] frame={frame} race={race} "
               f"min={r['minerals']} gas={r['gas']} "
               f"supply={r['supply_used']}/{r['supply_max']} "
               f"workers={n_workers}/{worker_target} "
@@ -792,12 +792,12 @@ async def run(c: Client, interval_sec: float,
                             pending_workers.add(worker["unit_id"])
                             stats.tried[
                                 "build:" + unit_type_name(supply_type)] += 1
-                            print(f"[ai_v2] FIRE  "
+                            print(f"[p_v2] FIRE  "
                                   f"build:{unit_type_name(supply_type)} "
                                   f"({pyl_total + 1}/{pylon_target})")
                             fired = True
                     except Exception as e:
-                        print(f"[ai_v2]  pylon fire error: {e}")
+                        print(f"[p_v2]  pylon fire error: {e}")
                 if not fired:
                     # Refund reservation since we didn't actually spend.
                     budget["min"] += 100
@@ -811,7 +811,7 @@ async def run(c: Client, interval_sec: float,
                 if p is not None:
                     pending[f"train:{worker_type}"] = p
                     stats.tried["train:" + unit_type_name(worker_type)] += 1
-                    print(f"[ai_v2] FIRE  "
+                    print(f"[p_v2] FIRE  "
                           f"train:{unit_type_name(worker_type)} "
                           f"({n_workers + 1}/{worker_target})")
                 else:
@@ -834,7 +834,7 @@ async def run(c: Client, interval_sec: float,
                     pending_workers.add(p.worker_id)  # type: ignore
                     stats.tried[
                         "build:" + unit_type_name(gas_bld_type)] += 1
-                    print(f"[ai_v2] FIRE  "
+                    print(f"[p_v2] FIRE  "
                           f"build:{unit_type_name(gas_bld_type)}")
                 else:
                     budget["min"] += 100
@@ -864,7 +864,7 @@ async def run(c: Client, interval_sec: float,
                 pending_workers.add(p.worker_id)  # type: ignore
                 stats.tried[
                     "build:" + unit_type_name(spec.type_id)] += 1
-                print(f"[ai_v2] FIRE  build:{unit_type_name(spec.type_id)}")
+                print(f"[p_v2] FIRE  build:{unit_type_name(spec.type_id)}")
                 catalog_build_this_tick += 1
             else:
                 budget["min"] += spec.cost_min
@@ -889,7 +889,7 @@ async def run(c: Client, interval_sec: float,
                 pending[key] = p
                 stats.tried[
                     "train:" + unit_type_name(spec.type_id)] += 1
-                print(f"[ai_v2] FIRE  train:{unit_type_name(spec.type_id)}")
+                print(f"[p_v2] FIRE  train:{unit_type_name(spec.type_id)}")
                 catalog_train_this_tick += 1
             else:
                 budget["min"] += spec.cost_min
@@ -912,7 +912,7 @@ async def run(c: Client, interval_sec: float,
                     await c.attack(unit_id=u["unit_id"], target_unit=0,
                                    x=tgt_x, y=tgt_y)
             except Exception as e:
-                print(f"[ai_v2]  attack error: {e}")
+                print(f"[p_v2]  attack error: {e}")
 
         # -- Priority 8: API-coverage move + stop, once each.
         if not move_done:
@@ -924,11 +924,11 @@ async def run(c: Client, interval_sec: float,
                 dst_y = home_y + random.randint(-200, 200)
                 try:
                     await c.move(unit_id=w["unit_id"], x=dst_x, y=dst_y)
-                    print(f"[ai_v2] FIRE  move worker {w['unit_id']} "
+                    print(f"[p_v2] FIRE  move worker {w['unit_id']} "
                           f"-> ({dst_x},{dst_y})  [coverage]")
                     move_done = True
                 except Exception as e:
-                    print(f"[ai_v2]  move error: {e}")
+                    print(f"[p_v2]  move error: {e}")
         if move_done and not stop_done:
             cands = [u for u in units if u["order"] not in IDLE_ORDERS
                      and not u.get("building")]
@@ -936,11 +936,11 @@ async def run(c: Client, interval_sec: float,
                 w = cands[0]
                 try:
                     await c.stop(unit_id=w["unit_id"])
-                    print(f"[ai_v2] FIRE  stop {unit_type_name(w['type'])} "
+                    print(f"[p_v2] FIRE  stop {unit_type_name(w['type'])} "
                           f"{w['unit_id']}  [coverage]")
                     stop_done = True
                 except Exception as e:
-                    print(f"[ai_v2]  stop error: {e}")
+                    print(f"[p_v2]  stop error: {e}")
 
         await asyncio.sleep(interval_sec)
 
@@ -955,7 +955,7 @@ async def main(api_key: str, host: str, port: int, interval_sec: float,
 
 def entrypoint() -> None:
     p = argparse.ArgumentParser(
-        prog="python3 -m python_agent.agents.ai_v2_agent",
+        prog="python3 -m python_agent.agents.p_agent_v2",
         description="Coverage-oriented agent that tries to build/train "
                     "one of every race-appropriate thing.")
     p.add_argument("api_key")
@@ -978,7 +978,7 @@ def entrypoint() -> None:
                          args.supply_slack, args.worker_train_min,
                          args.pylon_target))
     except KeyboardInterrupt:
-        print("\n[ai_v2] stopped")
+        print("\n[p_v2] stopped")
 
 
 if __name__ == "__main__":

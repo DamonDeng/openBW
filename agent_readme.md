@@ -131,6 +131,20 @@ These are correctness guarantees the code must enforce:
    `lcg_rand(144)` calls in `start_game_impl`. See
    `[[project_multi_observer_desync]]` for the debugging trail.
 
+   **`--race` still needs to be duplicated on both sides today.**
+   The `slot_races` catchup-bundle field fixes the RNG-symmetry
+   inside `start_game_impl`, but the observer's map load happens
+   BEFORE it receives the catchup bundle -- so its starting units
+   spawn with the map's default races (usually Protoss) and get
+   unit_ids that don't match the server's Terran/Zerg units.
+   Consequence: agent commands (which reference unit_ids) fire
+   into the void on the observer, and the observer freezes at the
+   initial state visually. Workaround: launcher scripts pass the
+   SAME `--race N=race` args to both `openbw_server` and
+   `openbw_observer`. Long-term fix would be a pre-map-load
+   race-config handshake or making the observer re-spawn units
+   with correct race + matching unit_ids after catchup.
+
 ## Why this over alternatives
 
 Three architectures were considered:

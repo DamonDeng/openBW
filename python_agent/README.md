@@ -13,10 +13,12 @@ python_agent/
 ├── enums.py                 # unit-type / order name<->id lookups
 ├── helpers.py               # shared utilities: find workers, nearest, race, etc.
 ├── agents/
-│   ├── ai_v4_agent.py       # ⭐ v3 + Carrier/Reaver fighter refill
-│   ├── ai_v3_agent.py       # v2 + scouting + wider spread + upgrades
-│   ├── ai_v2_agent.py       # coverage-oriented (one of every building/unit)
-│   ├── ai_v1_agent.py       # early integrated agent (superseded by v2+)
+│   ├── p_agent_v4.py        # ⭐ Protoss: v3 + Carrier/Reaver fighter refill
+│   ├── p_agent_v3.py        # Protoss: v2 + scouting + wider spread + upgrades
+│   ├── p_agent_v2.py        # Protoss: coverage-oriented (one of every building/unit)
+│   ├── p_agent_v1.py        # Protoss: early integrated agent (superseded by v2+)
+│   ├── t_agent_v4.py        # ⭐ Terran: v3 + SCV repair (mirrors p_agent_v4)
+│   ├── ai_debug_agent.py    # minimal bisection tool for sync-divergence hunts
 │   ├── random_walk.py       # move idle workers to random points
 │   ├── miner.py             # gather minerals; top up gas workers per refinery
 │   ├── trainer.py           # train workers + combat units when producers ready
@@ -26,30 +28,60 @@ python_agent/
 └── README.md                # this file
 ```
 
+The full-race agents follow a `<race>_agent_v<n>.py` naming scheme:
+`p_` for Protoss, `t_` for Terran (in progress), `z_` for Zerg
+(not yet implemented). Version numbers escalate capability: v1 is a
+single closed loop, v2 adds coverage, v3 adds scouting/upgrades, v4
+adds race-specific "maintenance" features (Carrier/Reaver fighter
+refill for Protoss, SCV repair for Terran, etc).
+
 ## Which agent to run
 
-- **For the fullest coverage: `ai_v4_agent`.** Everything v3 does
+**Protoss agents:**
+
+- **For the fullest coverage: `p_agent_v4`.** Everything v3 does
   plus the `train_fighter` verb: maintains a full complement of
   Interceptors in each Carrier and Scarabs in each Reaver using
-  the observation's new `fighter_count` / `fighter_max` fields.
-- **For a slightly simpler agent: `ai_v3_agent`.** Everything v2 does
+  the observation's `fighter_count` / `fighter_max` fields.
+- **For a slightly simpler agent: `p_agent_v3`.** Everything v2 does
   (one of every building + one of every unit) plus 2-3 probes on
   radial-from-home scouting patrol, wider building distribution via
   rotating anchor strategies, and the `research`/`upgrade` verbs
   exercised via a small per-race upgrade catalog.
-- **For a simpler agent: `ai_v2_agent`.** Just build/train coverage.
+- **For a simpler agent: `p_agent_v2`.** Just build/train coverage.
   No scouts, no upgrades. Good for isolating specific verb bugs.
-- **For historical / integrated single-loop agent: `ai_v1_agent`.** One process, one connection,
+- **For historical / integrated single-loop agent: `p_agent_v1`.** One process, one connection,
   one decision loop, one intent store. It verifies each build/gas
   assignment by observing outcomes (was a matching building placed?
   is `resources.gas` actually rising?) and retries when the sim
   silently drops a command. Superseded by v2/v3 for coverage
   testing, but a good compact reference for the closed-loop pattern.
+**Terran agents:**
+
+- **For the fullest coverage: `t_agent_v4`.** Terran counterpart of
+  p_agent_v4. Everything the Protoss version does (scouting,
+  expansion, catalog-driven build/train/upgrade) but adapted for
+  Terran's Barracks/Factory/Starport tech tree. Flagship feature:
+  **SCV repair** via the new `repair` verb. For every own damaged
+  mechanical unit (vehicle, air, or building), pulls the nearest
+  idle SCV to repair it -- keeps late-game investments (Siege Tanks,
+  Battlecruisers, Science Vessels) alive through firefights
+  instead of just watching them die. Addons (Machine Shop, Comsat,
+  Control Tower) are deferred to a later revision.
+
+**Launching a Terran run:** BOTH the server AND the observer need
+`--race N=terran` args -- observer's map load runs before it gets
+race info from server, so if you skip the flag on the observer
+you'll see Protoss starting units even though the server sim is
+Terran (agent still plays correctly, just visually wrong).
+
+**Zerg agent (`z_agent_v*`):** not yet implemented.
+
 - **For learning / workshop demos: the split agents** (miner, trainer,
   builder, attacker). Each is <100 lines and focuses on one verb.
   They work fine in isolation and are easy to fork, but running all
   four together on the same slot has known open-loop issues — see
-  `ai_v1_agent.py`'s docstring for the failure modes it fixes.
+  `p_agent_v1.py`'s docstring for the failure modes it fixes.
 
 The five split agents cover the core BW verbs and, together, form a
 minimal opening:
@@ -107,11 +139,14 @@ Start the server in one terminal:
 Then in another terminal:
 
 ```bash
-# Recommended: latest integrated agent:
-python3 -m python_agent.agents.ai_v4_agent KEY                    # v3 + fighter refill
-python3 -m python_agent.agents.ai_v3_agent KEY                    # v2 + scouting/upgrades
-python3 -m python_agent.agents.ai_v2_agent KEY                    # coverage-only
-python3 -m python_agent.agents.ai_v1_agent KEY                    # historical
+# Recommended: latest integrated agent (Protoss):
+python3 -m python_agent.agents.p_agent_v4 KEY                    # Protoss: v3 + fighter refill
+python3 -m python_agent.agents.p_agent_v3 KEY                    # Protoss: v2 + scouting/upgrades
+python3 -m python_agent.agents.p_agent_v2 KEY                    # Protoss: coverage-only
+python3 -m python_agent.agents.p_agent_v1 KEY                    # Protoss: historical
+python3 -m python_agent.agents.t_agent_v4 KEY                    # Terran: v3 + SCV repair
+                                                                 #   Needs matching --race N=terran on both
+                                                                 #   server and observer.
 
 # Or run the individual demos:
 python3 -m python_agent.agents.random_walk KEY

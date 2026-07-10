@@ -237,3 +237,12 @@ class Client:
         The parent picks the correct type based on its own type_id.
         Sim rejects silently at capacity."""
         return await self.cmd({"verb": "train_fighter", "unit": unit_id})
+
+    async def repair(self, unit_id: int, target_unit: int) -> dict:
+        """Terran SCV repair: order the SCV to repair a friendly
+        damaged mechanical unit or building. Sim rejects silently on
+        non-SCV workers, bio targets, undamaged targets, or non-
+        friendly targets. The SCV consumes minerals + gas (matching
+        the target's costs, prorated by damage) while repairing."""
+        return await self.cmd({"verb": "repair", "unit": unit_id,
+                               "target_unit": target_unit})
