@@ -378,7 +378,46 @@ struct sync_functions: action_functions {
 				}
 
 				data_loading::data_reader_le r(data + act.data_begin, data + act.data_end);
-				if (!action_f(c, r)) break;
+				// Guard the action-decode step: if actions.h's read_action*
+				// throws (e.g. "invalid selection of N units", or unknown
+				// opcode), catch it, log the offending frame with full
+				// context, then SKIP this action and keep the observer
+				// alive. Without the guard the process terminates and we
+				// lose the ability to observe subsequent state. This is
+                // ONLY on observers (auth_check == null) -- server-side
+                // authoritative decode should still hard-fail loudly.
+				//
+				// On resume, the observer's sim state is one action behind
+				// server's from this point forward, so subsequent
+				// INVENTORY diverges. That's fine -- we want the diagnostic
+				// bytes more than we want the observer to stay in sync.
+				bool is_observer_side = (sync_st.auth_check == nullptr);
+				if (is_observer_side) {
+					try {
+						if (!action_f(c, r)) break;
+					} catch (bwgame::exception& e) {
+						size_t n = act.data_end - act.data_begin;
+						if (sync_st.sync_log) {
+							char buf[256];
+							snprintf(buf, sizeof(buf),
+								"BAD_ACTION\tslot=%d\tvc_frame=%u\ttarget_frame=%u"
+								"\tsync_frame=%d\tn_bytes=%zu\terror=%.100s\tbytes=",
+								c->player_slot, c->frame, act.frame,
+								sync_st.sync_frame, n, e.what());
+							a_string body = buf;
+							body += sync_log_bytes(data + act.data_begin, n);
+							sync_log_line(sync_st, 'O', body);
+						}
+						// Also print to stderr for immediate visibility.
+						fprintf(stderr,
+							"[obs] BAD_ACTION slot=%d frame=%u/%u n=%zu: %s\n",
+							c->player_slot, c->frame, act.frame, n, e.what());
+						fflush(stderr);
+						// Continue the loop -- try the next scheduled action.
+					}
+				} else {
+					if (!action_f(c, r)) break;
+				}
 			}
 		}
 	}
