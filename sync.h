@@ -411,9 +411,16 @@ struct sync_functions: action_functions {
 		}
 		a_string body = "INVENTORY";
 		char buf[64];
-		snprintf(buf, sizeof(buf), "\tslot=%d\tmin=%d\tgas=%d",
+		// lcg=<hex> is the sim's current lcg_rand_state at dump time.
+		// Emit it once per slot (redundant, since it's per-state not
+		// per-slot, but keeps the row self-contained for easy diff).
+		// If two sync-logs disagree on lcg at a given frame, the sims
+		// are running different code paths since the last matching
+		// point -- root cause is nondeterminism, not action drop.
+		snprintf(buf, sizeof(buf), "\tslot=%d\tmin=%d\tgas=%d\tlcg=%08x",
 			slot, this->st.current_minerals[slot],
-			this->st.current_gas[slot]);
+			this->st.current_gas[slot],
+			(unsigned)this->st.lcg_rand_state);
 		body += buf;
 		body += "\tcompleted=";
 		bool first = true;
