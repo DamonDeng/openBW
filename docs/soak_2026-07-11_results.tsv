@@ -1,0 +1,11 @@
+round	start_ts	race0	race1	launch_order	verdict	alice_shared	alice_min_only	alice_real	bob_shared	bob_min_only	bob_real	server_frames	notes
+1	2026-07-11T12:44:41Z	protoss	terran	[O:bob A:0 O:alice A:1]	PASS	214	0	0	240	0	0	36005	
+2	2026-07-11T12:50:44Z	protoss	terran	[O:bob A:1 A:0 O:alice]	PASS	200	0	0	240	0	0	35997	
+3	2026-07-11T12:56:48Z	protoss	terran	[A:0 O:alice O:bob A:1]	PASS	226	0	0	214	0	0	35912	
+4	2026-07-11T13:02:52Z	protoss	protoss	[O:bob A:1 O:alice A:0]	PASS	214	0	0	240	0	0	36011	
+5	2026-07-11T13:08:56Z	terran	terran	[O:alice A:0 O:bob A:1]	PASS	240	0	0	212	0	0	35919	
+6	2026-07-11T13:15:00Z	protoss	protoss	[A:1 A:0 O:alice O:bob]	PASS	214	0	0	200	0	0	36001	
+7	2026-07-11T13:21:04Z	protoss	zerg	[A:0 A:1 O:alice O:bob]	PASS	214	0	0	200	0	0	35988	
+8	2026-07-11T13:27:08Z	protoss	terran	[A:1 O:alice A:0 O:bob]	PASS	226	0	0	200	0	0	35915	
+9	2026-07-11T13:33:12Z	terran	zerg	[A:0 A:1 O:alice O:bob]	PASS	214	0	0	200	0	0	36000	
+10	2026-07-11T13:39:16Z	zerg	terran	[O:bob A:1 A:0 O:alice]	PASS	200	0	0	240	0	0	35920	
