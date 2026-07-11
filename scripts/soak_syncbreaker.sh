@@ -33,11 +33,15 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ALICE=${ALICE:-sk-LYvXIzRDaDEe8GTlPgyf8eMxAyamUJt_Ig2413DbEjw}
 BOB=${BOB:-sk-anYTfuY-QL9szAzIlvtv44RxpgJlJPC1ocqIA26qpf0}
-SPEC1=${SPEC1:-sk-nd1eLrQ4yEMcQM3nBcf1c34fK8xXQvPaxlUr5rgdjLE7}
-# Observer #2 also uses the alice or bob key (players are allowed to
-# observe their own game via the same key). This works because auth
-# allows player-role users to open observer connections too.
-SPEC2=${SPEC2:-$ALICE}
+# Both observers use PLAYER keys so we get two per-slot fog-of-war
+# views (one from alice's perspective, one from bob's). Server assigns
+# viewing_slot from the user's player_slot on auth. If we used the
+# observer-role SPEC key here, that observer would get god view
+# (viewing_slot=-1), which is a different rendering mode -- fine for
+# manual watching but confusing for A/B comparisons because it lights
+# up the whole map instead of one side's fog. The SyncBreaker check
+# itself doesn't care (INVENTORY logs are fog-agnostic), but the two
+# windows should feel symmetric to a human watching the soak.
 MAP=${MAP:-"$REPO/original_resources/(2)Bottleneck.scm"}
 
 # 5-min play per round; user asked for this specifically.
@@ -46,6 +50,11 @@ PLAY_SECS=${PLAY_SECS:-300}
 STAGGER=${STAGGER:-20}
 # Total wallclock target. Default 1 hour; pass TOTAL_SECS=7200 for 2h.
 TOTAL_SECS=${TOTAL_SECS:-3600}
+# Game speed in ms/frame. 42 = "fastest" (retail BW default), 10 = about
+# 4x faster wallclock, so a 5-min soak round covers ~7000 sim frames
+# instead of ~1700. Lower = more sim events per real-time second, more
+# opportunities to hit SyncBreaker paths.
+GAME_SPEED=${GAME_SPEED:-10}
 PORT=${PORT:-6114}
 OUT=${OUT:-/tmp/soak_syncbreaker}
 
@@ -113,7 +122,7 @@ while true; do
     RACE0=$(pick_race)
     RACE1=$(pick_race)
     # macOS doesn't ship `shuf` -- use python for portable shuffling.
-    ORDER=$(python3 -c "import random; xs=['A:0','A:1','O:alice','O:spec']; random.shuffle(xs); print(' '.join(xs))")
+    ORDER=$(python3 -c "import random; xs=['A:0','A:1','O:alice','O:bob']; random.shuffle(xs); print(' '.join(xs))")
     echo ""
     echo "==== round $round  race0=$RACE0 race1=$RACE1 order=[$ORDER]  elapsed=${now}s ===="
     echo "  round dir: $rdir"
@@ -124,7 +133,7 @@ while true; do
         --map "$MAP" --data-path original_resources \
         --users test_resources/users.json \
         --race "0=$RACE0" --race "1=$RACE1" \
-        --game-speed 42 \
+        --game-speed "$GAME_SPEED" \
         --sync-log "$rdir/server.sync" \
         > "$rdir/server.log" 2>&1 & )
 
@@ -180,15 +189,21 @@ while true; do
                     > "$rdir/obs_alice.log" 2>&1 & )
                 echo "  [+${launch_idx}] observer (alice key -> perspective slot 0)"
                 ;;
-            O:spec)
+            O:bob)
+                # Use bob's PLAYER key -> observer gets bob's slot (1)
+                # as its viewing_slot, i.e. fog-of-war from slot 1's
+                # perspective. Alice's viewing_slot ends up 0.
+                # Whether an entity is a "player" (agent) or an
+                # "observer" (SDL client) is entirely about which
+                # binary connects; auth uses the same user record.
                 ( cd "$REPO" && \
                   nohup ./build_srv/ui/openbw_observer \
                     --map "$MAP" --data-path original_resources \
-                    --server 127.0.0.1:$PORT --api-key "$SPEC1" \
+                    --server 127.0.0.1:$PORT --api-key "$BOB" \
                     --race "0=$RACE0" --race "1=$RACE1" \
-                    --sync-log "$rdir/obs_spec.sync" \
-                    > "$rdir/obs_spec.log" 2>&1 & )
-                echo "  [+${launch_idx}] observer (spec key -> full vision)"
+                    --sync-log "$rdir/obs_bob.sync" \
+                    > "$rdir/obs_bob.log" 2>&1 & )
+                echo "  [+${launch_idx}] observer (bob key -> perspective slot 1)"
                 ;;
         esac
         # Interval between launches, EXCEPT after the last one -- go
@@ -240,7 +255,7 @@ def load(p):
 
 srv = load("$rdir/server.sync")
 oa  = load("$rdir/obs_alice.sync")
-ob  = load("$rdir/obs_spec.sync")
+ob  = load("$rdir/obs_bob.sync")
 
 def classify(server, obs):
     # Server logs INVENTORY on frame N==300k; observer's sync_frame
