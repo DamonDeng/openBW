@@ -12,7 +12,7 @@
 
 #include "bwgame.h"
 #include "sync.h"
-#include "sync_server_asio_tcp.h"
+#include "sync_server_asio_ws.h"
 #include "replay_saver.h"
 
 #include "auth.h"
@@ -58,7 +58,12 @@ namespace {
 struct args_t {
 	std::string data_path = ".";
 	std::string map_path;
-	int port = 6112;
+	// Observer sync WebSocket port. Speaks ws://host:PORT/observer with
+	// RFC 6455 binary frames. Was raw TCP on 6112 pre-2026-07 -- we swap
+	// to WS so observer traffic uses a firewall-friendlier protocol.
+	int port = 6114;
+	// Agent JSON WebSocket port. Speaks ws://host:PORT/agent with text
+	// frames carrying the JSON agent protocol.
 	int ws_port = 6113;
 	uint32_t seed = 42;
 	// Default 0: server starts the sim immediately and late-joining
@@ -126,7 +131,7 @@ args_t parse_args(int argc, char** argv) {
 		auto eq = [&](const char* s) { return std::strcmp(argv[i], s) == 0; };
 		if (eq("--data-path") && i + 1 < argc) a.data_path = argv[++i];
 		else if (eq("--map") && i + 1 < argc) a.map_path = argv[++i];
-		else if (eq("--port") && i + 1 < argc) a.port = std::atoi(argv[++i]);
+		else if ((eq("--port") || eq("--obs-port")) && i + 1 < argc) a.port = std::atoi(argv[++i]);
 		else if (eq("--seed") && i + 1 < argc) a.seed = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
 		else if (eq("--wait-observers") && i + 1 < argc) a.wait_observers = std::atoi(argv[++i]);
 		else if (eq("--users") && i + 1 < argc) a.users_path = argv[++i];
@@ -168,7 +173,10 @@ args_t parse_args(int argc, char** argv) {
 				"usage: %s --map <path> (--users <path> | --no-auth) [options]\n"
 				"  --map              path to .scm/.scx map file\n"
 				"  --data-path        dir containing StarDat.mpq et al (default: .)\n"
-				"  --port             TCP port to bind (default: 6112)\n"
+				"  --obs-port         Observer WebSocket port (default: 6114).\n"
+				"                     Observers connect to ws://host:PORT/observer\n"
+				"                     ?key=API_KEY and speak sync.h via WS binary\n"
+				"                     frames. --port is a deprecated alias.\n"
 				"  --seed             RNG seed (default: 42)\n"
 				"  --wait-observers N wait for N observers to connect before\n"
 				"                     starting the game (default: 0). With 0,\n"
@@ -221,8 +229,9 @@ args_t parse_args(int argc, char** argv) {
 int main(int argc, char** argv) {
 	auto args = parse_args(argc, argv);
 
-	fprintf(stderr, "[srv] starting: map=%s data=%s port=%d seed=%u\n",
-		args.map_path.c_str(), args.data_path.c_str(), args.port, args.seed);
+	fprintf(stderr, "[srv] starting: map=%s data=%s obs-port=%d agent-port=%d seed=%u\n",
+		args.map_path.c_str(), args.data_path.c_str(),
+		args.port, args.ws_port, args.seed);
 
 	// 1. Load game data + map. We can't use game_player::load_map_file
 	//    directly because it constructs its own game_load_functions with
@@ -360,10 +369,29 @@ int main(int argc, char** argv) {
 		fprintf(stderr, "[srv] WARNING: running with --no-auth\n");
 	}
 
-	// 2. Bind TCP acceptor.
-	sync_server_asio_tcp server;
+	// 2. Bind WebSocket acceptor for observer sync-transport traffic.
+	//    Speaks ws://host:PORT/observer with WS binary frames carrying
+	//    the sync.h wire protocol. Auth uses the SAME user_registry
+	//    as the agent WS -- key comes in via ?key=API_KEY query param,
+	//    validated at HTTP upgrade time before we send 101.
+	//
+	//    Was raw TCP with u16-length framing on 6112 before 2026-07;
+	//    migrated to WS so observer traffic passes corporate firewalls
+	//    that block non-standard ports and non-HTTP protocols. The old
+	//    sync_server_asio_tcp transport is retired -- its .h stays in
+	//    tree for now as a reference but is no longer wired.
+	sync_server_asio_ws server;
+	server.server_path = "/observer";
+	if (!args.no_auth) {
+		server.auth_fn = [&registry](const std::string& api_key) {
+			if (api_key.empty()) return false;
+			const auto* u = registry.verify(api_key);
+			return u != nullptr;
+		};
+	}
 	server.bind("0.0.0.0", args.port);
-	fprintf(stderr, "[srv] listening on 0.0.0.0:%d\n", args.port);
+	fprintf(stderr, "[srv] observer WS listening on ws://0.0.0.0:%d/observer\n",
+		args.port);
 
 	// 3. Optionally hold pre-game until N observers have connected. With
 	//    N == 0 (default), the sim starts right away and late joiners

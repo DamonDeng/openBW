@@ -11,7 +11,7 @@
 #include "common.h"
 #include "../bwgame.h"
 #include "../sync.h"
-#include "../sync_server_asio_tcp.h"
+#include "../sync_server_asio_ws.h"
 
 #include <chrono>
 #include <cstdio>
@@ -50,7 +50,11 @@ struct args_t {
 	std::string data_path = ".";
 	std::string map_path;
 	std::string server_host = "127.0.0.1";
-	int server_port = 6112;
+	// Observer WebSocket port on the server. Speaks ws://host:PORT/observer
+	// with WS binary frames carrying the sync.h wire protocol. Was 6112
+	// (raw TCP) before 2026-07 -- see server main.cpp for the migration
+	// rationale (firewall-friendlier WS, single-port pattern).
+	int server_port = 6114;
 	int screen_width = 1280;
 	int screen_height = 800;
 	std::string api_key;
@@ -118,9 +122,12 @@ args_t parse_args(int argc, char** argv) {
 		}
 		else if (eq("--help") || eq("-h")) {
 			fprintf(stderr,
-				"usage: %s --map <path> [--server 127.0.0.1:6112] [--data-path .]\n"
+				"usage: %s --map <path> [--server 127.0.0.1:6114] [--data-path .]\n"
 				"  --map        map file (must match the server's map)\n"
-				"  --server     host:port to connect to (default 127.0.0.1:6112)\n"
+				"  --server     host:port to connect to (default 127.0.0.1:6114).\n"
+				"               Speaks ws://HOST:PORT/observer?key=<api_key> --\n"
+				"               the WebSocket sync-transport that replaced raw\n"
+				"               TCP on 6112.\n"
 				"  --data-path  MPQ dir (default: .)\n"
 				"  --width      window width (default: 1280)\n"
 				"  --height     window height (default: 800)\n"
@@ -229,9 +236,17 @@ int main(int argc, char** argv) {
 		};
 	}
 
-	sync_server_asio_tcp server;
+	// Speaks WS to the server's /observer endpoint. api_key is passed in
+	// two places: (a) ?key= in the URL for the HTTP-upgrade auth check
+	// (rejected with 401 if wrong), and (b) sync.h's own id_auth message
+	// after the WS handshake completes (matches the pre-WS raw-TCP flow).
+	// Both look up the same user_registry entry server-side.
+	sync_server_asio_ws server;
+	server.client_url_path = "/observer";
+	server.client_api_key  = args.api_key; // safe if empty
 	server.connect(a_string(args.server_host.c_str()), args.server_port);
-	ui::log("[obs] connecting to %s:%d ...\n", args.server_host.c_str(), args.server_port);
+	ui::log("[obs] connecting to ws://%s:%d/observer ...\n",
+		args.server_host.c_str(), args.server_port);
 
 	// 3. Now create the window. Pump the io_service a few times while we
 	//    wait for the window to open, so the async_connect callback fires
