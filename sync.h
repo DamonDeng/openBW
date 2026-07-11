@@ -775,6 +775,62 @@ struct sync_functions: action_functions {
 								cw.put<uint32_t>((uint32_t)bundle.action_bytes.size());
 								cw.put_bytes(bundle.action_bytes.data(), bundle.action_bytes.size());
 								send(cw, client->h);
+
+								// Late-join broadcast race fix: the
+								// catchup bundle above is built from
+								// replay_saver.history, which records
+								// actions at APPLY time (inside
+								// execute_scheduled_actions, latency
+								// frames after schedule). But agent
+								// commands broadcast via id_agent_action
+								// go out to peers at SCHEDULE time, not
+								// apply time. If an agent command was
+								// scheduled at server_frame T and this
+								// late-joiner's greeting arrives before
+								// server_frame T+latency (when the
+								// action lands in history), the observer
+								// gets: (a) nothing via live broadcast
+								// -- the broadcast fired before it was
+								// in sync_st.clients, and (b) nothing
+								// via catchup -- history doesn't have
+								// the action yet. Result: observer's
+								// sim silently misses the action and
+								// diverges by one morph forever.
+								//
+								// Fix: replay every server-side virtual
+								// client's pending scheduled_actions to
+								// this new peer as synthesized
+								// id_agent_action messages. The observer
+								// receives them, schedules them locally
+								// at the same target_frame the server
+								// uses, and applies them at the correct
+								// sim frame -- byte-identical to what a
+								// peer connected before the schedule
+								// would have processed.
+								for (auto* vc : ptr(sync_st.clients)) {
+									if (vc->player_slot < 0) continue;
+									if (vc->h != nullptr) continue;  // real peer, not virtual
+									for (auto& sa : vc->scheduled_actions) {
+										size_t n = sa.data_end - sa.data_begin;
+										if (n == 0) continue;
+										// Reconstruct the server_frame that was
+										// used when this action was broadcast.
+										// schedule_action set target_frame =
+										// client->frame + latency, and at
+										// broadcast time client->frame was
+										// sync_st.sync_frame. So the recorded
+										// sa.frame == server_frame + latency,
+										// meaning server_frame_at_broadcast =
+										// sa.frame - latency.
+										uint32_t server_frame = sa.frame - (uint32_t)sync_st.latency;
+										dynamic_writer<> aw;
+										aw.put<uint8_t>(sync_messages::id_agent_action);
+										aw.put<uint8_t>((uint8_t)vc->player_slot);
+										aw.put<uint32_t>(server_frame);
+										aw.put_bytes(vc->buffer.data() + sa.data_begin, n);
+										send(aw, client->h);
+									}
+								}
 							}
 						}
 
