@@ -1,0 +1,5 @@
+dist_hello/
+dist/
+build/
+*.o
+*.a
