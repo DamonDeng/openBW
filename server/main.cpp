@@ -299,15 +299,23 @@ int main(int argc, char** argv) {
 		sync_state::catchup_bundle_t b;
 		b.current_frame = (uint32_t)st.current_frame;
 		b.seed = sync_st.initial_rand_state;
-		// Ship the server's authoritative races for the observer to
-		// apply BEFORE it runs start_game_local. Without this, if the
-		// server used --race override (or, later, an agent-selected
-		// race), the observer's map-loaded race values differ, and
-		// start_game_impl's "race > 2 -> lcg_rand(144)" branch fires
-		// on one side but not the other. Downstream lcg_rand_state
-		// diverges silently for the whole game.
+		// Ship the server's PRE-random-pick races (initial_slot_races,
+		// captured at first sync_next_frame from st.players[i].race
+		// AFTER setup_f applied any --race overrides). Observer will
+		// install these into st.players[i].race BEFORE start_game_local
+		// so its start_game_impl runs the identical lcg_rand(144) calls
+		// for "any race" slots (race==5) that the server did. That
+		// keeps the RNG stream synchronized through the randomize_slots
+		// pass at the bottom of start_game_impl -- otherwise on 4+
+		// player melee maps the observer picks a different slot
+		// permutation and its whole game is slot-swapped from the
+		// server's (SyncBreaker #3, 2026-07-11).
+		//
+		// We intentionally do NOT ship the post-randomize st.players[i]
+		// .race here. If we did, observer would see race<=2 and skip
+		// the lcg_rand(144) call that server made, desyncing the RNG.
 		for (int i = 0; i < 12; ++i) {
-			b.slot_races[i] = (uint8_t)st.players[i].race;
+			b.slot_races[i] = (uint8_t)sync_st.initial_slot_races[i];
 		}
 		size_t total = 0;
 		for (auto& chunk : replay_saver.history) total += chunk.size();

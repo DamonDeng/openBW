@@ -929,15 +929,26 @@ struct sync_functions: action_functions {
 			uint32_t target_frame = r.template get<uint32_t>();
 			uint32_t rand_state = r.template get<uint32_t>();
 
-			// Read the server's authoritative slot races. This MUST run
-			// BEFORE start_game_local because start_game_impl reads
-			// st.players[i].race to decide whether to consume an
-			// lcg_rand(144) call for "any race -> random pick". If we
-			// let the observer use its map-loaded race values, they'll
-			// almost certainly differ from what the server settled on
-			// (--race override, agent-selected race), and the rand
-			// stream diverges silently. See catchup_bundle_t::slot_races
-			// for the full story.
+			// Read the server's PRE-random-pick slot races. The server
+			// captures sync_st.initial_slot_races at first sync_next_frame
+			// (post setup_f, so --race overrides + map defaults are
+			// baked in) and ships those here. That means "any race"
+			// slots (map race==5) arrive as 5 on the observer, NOT as
+			// the post-pick 0/1/2 the server ended up with. We install
+			// them into st.players[i].race and start_game_impl runs
+			// identically on both sides: same lcg_rand(144) calls for
+			// race==5 slots, same lcg_rand(33) calls in randomize_slots,
+			// same permutation. Post-catchup RNG state is byte-identical
+			// to the server's post-start_game_impl state.
+			//
+			// SyncBreaker #3 (2026-07-11): before this fix, the server
+			// shipped POST-pick races so observer's line-1370 saw
+			// race<=2 and skipped the lcg_rand(144) call. On 4+ player
+			// melee maps the resulting RNG desync fed into
+			// randomize_slots and observer saw a slot-swapped view of
+			// the game. 2-player maps happened to end up identical
+			// even with different rand state (only 1 shuffle iteration
+			// and swaps between two identical layouts).
 			std::array<uint8_t, 12> slot_races{};
 			for (int i = 0; i < 12; ++i) {
 				slot_races[i] = r.template get<uint8_t>();
