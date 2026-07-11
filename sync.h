@@ -428,6 +428,25 @@ struct sync_functions: action_functions {
 	void next_frame(server_T& server) {
 		sync(server);
 		action_functions::next_frame();
+		// Periodic lcg snapshot to bisect where server/observer diverge.
+		// Every 30 sim frames both sides emit one line with (current_frame,
+		// lcg_rand_state). Server and observer at the same current_frame
+		// should have identical lcg iff their sims took identical code
+		// paths since the last matching point. Diff of the two logs
+		// pinpoints the frame where they first split.
+		//
+		// Only when sync-log is wired (i.e. --sync-log passed). Cost is
+		// one snprintf every 30 frames -- irrelevant.
+		if (sync_st.sync_log && sync_st.game_started
+		    && this->st.current_frame > 0
+		    && this->st.current_frame % 30 == 0)
+		{
+			char side = sync_st.auth_check ? 'S' : 'O';
+			char buf[64];
+			snprintf(buf, sizeof(buf), "LCG_TICK\tlcg=%08x",
+				(unsigned)this->st.lcg_rand_state);
+			bwgame::sync_log_line(sync_st, side, bwgame::a_string(buf));
+		}
 	}
 
 	// Diagnostic: dump a per-slot unit-type inventory to the sync-log.
