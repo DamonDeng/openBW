@@ -362,16 +362,27 @@ struct sync_functions: action_functions {
 
 				// Log the apply BEFORE action_f runs so we see it even if
 				// action_f throws.
+				//
+				// Includes: sim_frame (st.current_frame at apply time),
+				// target_frame (from scheduled_action -- was set to
+				// vc->frame + latency at schedule time). If server and
+				// observer disagree on either value for the same action
+				// bytes, we've caught the sim-frame drift that causes
+				// downstream lcg divergence (SyncBreaker #5 hypothesis).
 				if (sync_st.sync_log
 				    && c->h == nullptr
 				    && c->player_slot >= 0)
 				{
 					char side = sync_st.auth_check ? 'S' : 'O';
 					size_t n = act.data_end - act.data_begin;
-					char buf[128];
+					char buf[192];
 					snprintf(buf, sizeof(buf),
-						"AGENT_APPLY\tslot=%d\tn_bytes=%zu\tbytes=",
-						c->player_slot, n);
+						"AGENT_APPLY\tslot=%d\tsim_frame=%d"
+						"\ttarget_frame=%u\tvc_frame=%u"
+						"\tlcg=%08x\tn_bytes=%zu\tbytes=",
+						c->player_slot, (int)st.current_frame,
+						act.frame, c->frame,
+						(unsigned)st.lcg_rand_state, n);
 					a_string body = buf;
 					body += sync_log_bytes(data + act.data_begin, n);
 					sync_log_line(sync_st, side, body);
