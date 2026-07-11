@@ -86,6 +86,26 @@ args_wasm read_args_from_js() {
 	a.server_host = js_string_or("(typeof OPENBW_HOST === 'string') ? OPENBW_HOST : ''",       a.server_host.c_str());
 	a.server_port = js_int_or   ("(typeof OPENBW_PORT === 'number') ? String(OPENBW_PORT) : ''", a.server_port);
 	a.api_key     = js_string_or("(typeof OPENBW_KEY === 'string') ? OPENBW_KEY : ''",         "");
+	// Per-slot race overrides. window.OPENBW_RACES is a comma-separated
+	// list of "zerg"/"terran"/"protoss"/"" applied to slots 0..7. Must
+	// match what the server launched with (--race N=<race>). Without
+	// this the observer loads the map with whatever race the map file
+	// specified for each slot -- usually Protoss for both -- and the
+	// starting units on the WASM canvas won't match the actual game.
+	// Catchup fixes st.players[i].race but NOT the units that were
+	// already spawned in load_map_file's create_starting_units call.
+	// (bwgame::race_t: 0=zerg 1=terran 2=protoss)
+	for (int i = 0; i < 8; ++i) {
+		char expr[256];
+		snprintf(expr, sizeof(expr),
+			"(typeof OPENBW_RACES === 'string' && OPENBW_RACES.split(',')[%d]) "
+			"? OPENBW_RACES.split(',')[%d].trim() : ''", i, i);
+		std::string r = js_string_or(expr, "");
+		if (r.empty()) continue;
+		if      (r == "zerg")    a.race_overrides[i] = 0;
+		else if (r == "terran")  a.race_overrides[i] = 1;
+		else if (r == "protoss") a.race_overrides[i] = 2;
+	}
 	return a;
 }
 
@@ -270,6 +290,15 @@ int main() {
 		args.data_path.c_str(), args.map_path.c_str(),
 		args.server_host.c_str(), args.server_port,
 		args.api_key.empty() ? "(none)" : "(set)");
+	// Log races so we can tell at a glance whether the shell passed them.
+	static const char* race_names[3] = {"zerg", "terran", "protoss"};
+	char rbuf[128]; int rn = 0;
+	for (int i = 0; i < 8; ++i) {
+		if (args.race_overrides[i] < 0) continue;
+		rn += snprintf(rbuf + rn, sizeof(rbuf) - rn, " %d=%s",
+			i, race_names[args.race_overrides[i]]);
+	}
+	ui::log("[wasm] race overrides:%s\n", rn ? rbuf : " (none)");
 
 	// 1. Load MPQ + map -- identical to native observer.cpp.
 	auto load_data_file = data_loading::data_files_directory(

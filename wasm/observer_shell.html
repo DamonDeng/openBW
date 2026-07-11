@@ -28,6 +28,7 @@
   <label>port   <input id="port" size="6"  value="6114" /></label>
   <label>key    <input id="key"  size="24" value="" placeholder="(optional)" /></label>
   <label>map    <input id="map"  size="34" value="original_resources/(2)Bottleneck.scm" /></label>
+  <label>races  <input id="races" size="26" value="" placeholder="e.g. protoss,terran" title="Comma-separated per-slot races; must match server --race args" /></label>
   <button id="connect">connect</button>
 </div>
 
@@ -56,10 +57,11 @@
   // immediately without waiting for a click. Handy for embedding in the
   // future portal.
   const params = new URLSearchParams(location.search);
-  if (params.has('host')) document.getElementById('host').value = params.get('host');
-  if (params.has('port')) document.getElementById('port').value = params.get('port');
-  if (params.has('key'))  document.getElementById('key').value  = params.get('key');
-  if (params.has('map'))  document.getElementById('map').value  = params.get('map');
+  if (params.has('host'))  document.getElementById('host').value  = params.get('host');
+  if (params.has('port'))  document.getElementById('port').value  = params.get('port');
+  if (params.has('key'))   document.getElementById('key').value   = params.get('key');
+  if (params.has('map'))   document.getElementById('map').value   = params.get('map');
+  if (params.has('races')) document.getElementById('races').value = params.get('races');
 
   // Mirror emscripten stdout/stderr into #console-box so users can see
   // [wasm] log lines without opening devtools.
@@ -72,10 +74,11 @@
   // Module object is what emscripten reads for config. Must be set
   // BEFORE the generated .js runs. We defer loading the .js until
   // "connect" is clicked so main() sees the user's chosen args.
-  window.OPENBW_MAP  = document.getElementById('map').value;
-  window.OPENBW_HOST = document.getElementById('host').value;
-  window.OPENBW_PORT = parseInt(document.getElementById('port').value, 10);
-  window.OPENBW_KEY  = document.getElementById('key').value;
+  window.OPENBW_MAP   = document.getElementById('map').value;
+  window.OPENBW_HOST  = document.getElementById('host').value;
+  window.OPENBW_PORT  = parseInt(document.getElementById('port').value, 10);
+  window.OPENBW_KEY   = document.getElementById('key').value;
+  window.OPENBW_RACES = document.getElementById('races').value;
 
   // Debug harness state. Read by observer_wasm.cpp's frame callback.
   //   OPENBW_PAUSED: bool -- freeze sim advance
@@ -159,10 +162,11 @@
 
   function launch() {
     // Snapshot form values into the globals main() reads.
-    window.OPENBW_MAP  = document.getElementById('map').value;
-    window.OPENBW_HOST = document.getElementById('host').value;
-    window.OPENBW_PORT = parseInt(document.getElementById('port').value, 10);
-    window.OPENBW_KEY  = document.getElementById('key').value;
+    window.OPENBW_MAP   = document.getElementById('map').value;
+    window.OPENBW_HOST  = document.getElementById('host').value;
+    window.OPENBW_PORT  = parseInt(document.getElementById('port').value, 10);
+    window.OPENBW_KEY   = document.getElementById('key').value;
+    window.OPENBW_RACES = document.getElementById('races').value;
     document.getElementById('status').textContent = 'launching…';
     // Load the emscripten glue -- this triggers .wasm + .data fetch
     // and eventually calls main(). Guard against double-launch.

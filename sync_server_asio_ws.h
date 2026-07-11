@@ -331,7 +331,23 @@ struct sync_server_asio_ws {
 		a_vector<uint8_t> current_message;
 
 		// Outgoing send queue -- each entry is one WS frame already framed.
-		a_deque<message_buffer_handle> send_queue;
+		// Each entry owns its byte buffer via shared_ptr so the buffer
+		// outlives partial writes (asio may complete a write_some with
+		// bytes_transferred < size, and we resubmit for the remainder).
+		//
+		// Was a_deque<message_buffer_handle> that pointed into fixed 8 KB
+		// slabs; that structure silently corrupted memory for any WS
+		// frame > 8 KB (header + payload combined). See the 2026-07-11
+		// "message_t: too much data" incident. The vector-per-frame design
+		// scales to any single-message size the game will ever emit
+		// (catchup bundles, insync-check payloads, agent-action bursts).
+		struct outgoing_frame_t {
+			std::shared_ptr<a_vector<uint8_t>> bytes;
+			size_t offset = 0;  // advanced by partial writes
+			size_t remaining() const { return bytes->size() - offset; }
+			const uint8_t* data() const { return bytes->data() + offset; }
+		};
+		a_deque<outgoing_frame_t> send_queue;
 
 		bool is_dead = false;
 		std::function<void()> on_kill;
@@ -407,15 +423,10 @@ struct sync_server_asio_ws {
 	}
 
 	// Serialize `msg` into a fully-framed WS binary frame, then push the
-	// frame bytes onto the client's send_queue as a single message_buffer_
-	// handle. Server-role frames are unmasked; client-role frames are
+	// frame bytes onto the client's send_queue as a fresh vector-owning
+	// entry. Server-role frames are unmasked; client-role frames are
 	// masked (per RFC 6455 §5.1).
 	void enqueue_ws_frame(const message_t& msg, client_t* client) {
-		// Build the WS frame header out-of-band, then splice payload
-		// bytes in-place from the message's slab handles. To avoid an
-		// extra data copy we allocate one fresh output slab per frame,
-		// write the header + copied payload into it, and push that slab
-		// as a single message_buffer_handle.
 		size_t payload_len = msg.total_size;
 		size_t header_len =
 			2 +
@@ -423,10 +434,12 @@ struct sync_server_asio_ws {
 			(client->is_client_side ? 4 : 0);
 		size_t total = header_len + payload_len;
 
-		auto slab_it = get_send_buffer_with_space(total);
-		message_buffer_handle out(*this, slab_it);
-		out.offset = slab_it->pos;
-		uint8_t* p = slab_it->buffer.data() + slab_it->pos;
+		// One a_vector per outgoing frame; sized exactly to fit. shared_ptr
+		// so it survives partial writes (write_handler resubmits until
+		// remaining()==0). Grows with payload — no static caps.
+		auto buf = std::make_shared<a_vector<uint8_t>>();
+		buf->resize(total);
+		uint8_t* p = buf->data();
 
 		// FIN + binary opcode
 		p[0] = 0x82;
@@ -460,9 +473,10 @@ struct sync_server_asio_ws {
 		}
 
 		// Copy the payload out of the message's slab handles, applying
-		// the mask if we're the client. Total payload can straddle up
-		// to message_t::buffers.max_size() slabs (16 after 2026-07-11
-		// bump; see comment on message_t::buffers).
+		// the mask if we're the client. Message body can span up to
+		// message_t::buffers.max_size() input slabs; that path is
+		// well-behaved because message_t::put() emplaces new slabs on
+		// overflow.
 		size_t written = 0;
 		for (auto& b : msg.buffers) {
 			const uint8_t* src = b.buffer->buffer.data() + b.offset;
@@ -474,8 +488,9 @@ struct sync_server_asio_ws {
 			}
 		}
 
-		out.size = total;
-		slab_it->pos += total;
+		client_t::outgoing_frame_t out;
+		out.bytes = std::move(buf);
+		out.offset = 0;
 
 		client->send_queue.push_back(std::move(out));
 		if (client->send_queue.size() == 1) send_send_queue(client);
@@ -486,10 +501,9 @@ struct sync_server_asio_ws {
 			if (c->on_kill) c->on_kill();
 		} else {
 			auto& v = c->send_queue.front();
-			if (bytes_transferred > v.size) error("write_handler: bytes_transferred > v.size");
+			if (bytes_transferred > v.remaining()) error("write_handler: bytes_transferred > remaining");
 			v.offset += bytes_transferred;
-			v.size -= bytes_transferred;
-			if (v.size == 0) c->send_queue.pop_front();
+			if (v.remaining() == 0) c->send_queue.pop_front();
 			if (!c->send_queue.empty()) send_send_queue(c);
 		}
 	}
@@ -497,7 +511,7 @@ struct sync_server_asio_ws {
 	void send_send_queue(client_t* client) {
 		auto& v = client->send_queue.front();
 		client->socket.async_write_some(
-			asio::buffer(v.buffer->buffer.data() + v.offset, v.size),
+			asio::buffer(v.data(), v.remaining()),
 			std::bind(&sync_server_asio_ws::write_handler, this,
 				async_handle(client, std::bind(&sync_server_asio_ws::async_release, this, std::placeholders::_1)),
 				std::placeholders::_1, std::placeholders::_2));
@@ -842,16 +856,17 @@ struct sync_server_asio_ws {
 	}
 
 	// Send a WS control frame (close/ping/pong). Payload capped at 125
-	// bytes per spec.
+	// bytes per spec. Same vector-per-frame ownership as
+	// enqueue_ws_frame; the old slab path silently corrupted memory
+	// for oversized data frames (see the 2026-07-11 message_t bug).
 	void send_ws_control(client_t* c, uint8_t opcode,
 	                     const uint8_t* payload, size_t n) {
 		if (n > 125) n = 125;
 		size_t hi = 2 + (c->is_client_side ? 4 : 0);
 		size_t total = hi + n;
-		auto slab_it = get_send_buffer_with_space(total);
-		message_buffer_handle out(*this, slab_it);
-		out.offset = slab_it->pos;
-		uint8_t* p = slab_it->buffer.data() + slab_it->pos;
+		auto buf = std::make_shared<a_vector<uint8_t>>();
+		buf->resize(total);
+		uint8_t* p = buf->data();
 		p[0] = (uint8_t)(0x80 | (opcode & 0x0f));
 		p[1] = (uint8_t)n;
 		if (c->is_client_side) {
@@ -863,8 +878,9 @@ struct sync_server_asio_ws {
 		} else {
 			for (size_t i = 0; i < n; ++i) p[2 + i] = payload[i];
 		}
-		out.size = total;
-		slab_it->pos += total;
+		client_t::outgoing_frame_t out;
+		out.bytes = std::move(buf);
+		out.offset = 0;
 		c->send_queue.push_back(std::move(out));
 		if (c->send_queue.size() == 1) send_send_queue(c);
 	}
