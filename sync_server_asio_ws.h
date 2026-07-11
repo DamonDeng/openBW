@@ -355,7 +355,15 @@ struct sync_server_asio_ws {
 
 	struct message_t {
 		sync_server_asio_ws& server;
-		static_vector<message_buffer_handle, 2> buffers;
+		// Was 2 (16 KB max per message). Late-join catchup bundles carry
+		// the full replay-action history and grow linearly with game
+		// length; at ~15 min of play they routinely cross 16 KB and the
+		// server crashes with "message_t: too much data". 16 slabs =
+		// 128 KB max message, enough for ~2 hours of gameplay before we
+		// need to think harder (paginate the catchup bundle across
+		// frames, ship deltas, etc.). See the "message_t: too much
+		// data :(" incident 2026-07-11.
+		static_vector<message_buffer_handle, 16> buffers;
 		size_t total_size = 0;
 		template<typename T>
 		void put(T v) {
@@ -453,7 +461,8 @@ struct sync_server_asio_ws {
 
 		// Copy the payload out of the message's slab handles, applying
 		// the mask if we're the client. Total payload can straddle up
-		// to 2 slabs (message_t::buffers.max_size() == 2).
+		// to message_t::buffers.max_size() slabs (16 after 2026-07-11
+		// bump; see comment on message_t::buffers).
 		size_t written = 0;
 		for (auto& b : msg.buffers) {
 			const uint8_t* src = b.buffer->buffer.data() + b.offset;

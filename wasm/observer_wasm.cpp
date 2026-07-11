@@ -1,22 +1,29 @@
-// Phase 3 WASM observer: loads MPQ + a map, renders the initial frame to
-// an HTML5 canvas via SDL2. No networking, no sim advance -- just prove
-// the rendering pipeline works in the browser.
+// Phase 4 WASM observer: loads MPQ + map (as in Phase 3), then opens a
+// WebSocket to openbw_server and drives sync.h in a browser main-loop
+// callback. Renders the live sim to an HTML5 canvas.
 //
-// Deliberately kept parallel to ui/observer.cpp:
-//   - Same log_str / fatal_error_str hooks (writes to stdout, which
-//     emscripten routes to the browser console).
+// Deliberately parallel to ui/observer.cpp:
+//   - Same log_str / fatal_error_str hooks.
 //   - Same map-load ceremony (game_load_functions + setup_f).
-//   - ui.init() + ui.update() from the same ui_functions class as native.
+//   - ui.init() + ui.update() from the same ui_functions class.
+//   - sync_state / sync_functions wired to a transport, same as native.
 //
 // Divergences from native observer.cpp:
-//   - No argv parsing. All parameters hardcoded for PoC. See args_wasm
-//     struct below.
-//   - No sync_state / sync_server_asio_ws. Phase 4 adds them.
+//   - No argv. Params come from URL-embedded globals set by JS before
+//     main() runs (see observer_shell.html). Defaults fall back to
+//     something usable in dev: (2)Bottleneck, ws://127.0.0.1:6114.
+//   - sync_server_emscripten_ws instead of sync_server_asio_ws.
 //   - No while(true). emscripten_set_main_loop drives each frame.
+//   - No blocking pre-loop connect wait -- browsers can't block. The
+//     main-loop callback pumps funcs.next_frame(); render happens even
+//     while the WebSocket is still handshaking, and the fog-off/god
+//     view of the map is visible immediately.
 
 #include "ui.h"
 #include "common.h"
 #include "../bwgame.h"
+#include "../sync.h"
+#include "../sync_server_emscripten_ws.h"
 
 #include <emscripten.h>
 #include <emscripten/html5.h>
@@ -31,17 +38,12 @@ using namespace bwgame;
 
 namespace bwgame {
 namespace ui {
-// Same log sink as native observer.cpp -- fwrite to stdout. Emscripten
-// routes stdout to console.log by default, which is exactly what we
-// want for a browser build.
 void log_str(a_string str) {
 	fwrite(str.data(), str.size(), 1, stdout);
 	fflush(stdout);
 }
 void fatal_error_str(a_string str) {
 	log("fatal error: %s\n", str);
-	// std::terminate in wasm produces an uncatchable trap; call abort
-	// explicitly so the browser console shows the log line above first.
 	std::fflush(stdout);
 	std::abort();
 }
@@ -50,65 +52,138 @@ void fatal_error_str(a_string str) {
 
 namespace {
 
-// Same shape as native observer.cpp args, but populated from constants
-// (Phase 3) or JS ccall'd setters (Phase 4+). All paths are relative to
-// the preloaded emscripten VFS root -- matches --preload-file target
-// in build_observer_wasm.sh.
 struct args_wasm {
 	std::string data_path = "original_resources";
 	std::string map_path  = "original_resources/(2)Bottleneck.scm";
+	std::string server_host = "127.0.0.1";
+	int server_port = 6114;
 	int screen_width  = 1280;
 	int screen_height = 800;
-	// One entry per player slot 0..7. -1 = "use map default". Same
-	// semantics as observer.cpp's race_overrides. For PoC we run
-	// map-default (no override); Phase 4 will accept these from JS.
+	std::string api_key;  // matches native --api-key; both HTTP-upgrade and id_auth
 	std::array<int, 8> race_overrides = {-1, -1, -1, -1, -1, -1, -1, -1};
 };
 
-// Everything the main-loop callback needs. Heap-allocated once in main()
-// and captured via a raw pointer -- emscripten_set_main_loop_arg accepts
-// a void* userdata slot for this exact purpose, but the simplest thing
-// here is a file-scope pointer.
+// Read a JS-side string global. Returns default_ if the global is
+// undefined or empty. Uses emscripten_run_script_string, which lifetime-
+// pins the returned char* for the duration of this call frame.
+std::string js_string_or(const char* js_expr, const char* default_) {
+	const char* got = emscripten_run_script_string(js_expr);
+	if (!got || !*got) return default_;
+	return got;
+}
+int js_int_or(const char* js_expr, int default_) {
+	auto s = js_string_or(js_expr, "");
+	if (s.empty()) return default_;
+	return std::atoi(s.c_str());
+}
+
+args_wasm read_args_from_js() {
+	args_wasm a;
+	// Reads window.OPENBW_* if present. observer_shell.html sets these
+	// from URL params before the module boots. Fall back to hardcoded
+	// defaults if the shell didn't set anything.
+	a.map_path    = js_string_or("(typeof OPENBW_MAP === 'string') ? OPENBW_MAP : ''",         a.map_path.c_str());
+	a.server_host = js_string_or("(typeof OPENBW_HOST === 'string') ? OPENBW_HOST : ''",       a.server_host.c_str());
+	a.server_port = js_int_or   ("(typeof OPENBW_PORT === 'number') ? String(OPENBW_PORT) : ''", a.server_port);
+	a.api_key     = js_string_or("(typeof OPENBW_KEY === 'string') ? OPENBW_KEY : ''",         "");
+	return a;
+}
+
+// Global state captured by the emscripten main-loop callback. Contains
+// everything the frame function needs to advance sync + render.
 struct wasm_state {
 	std::unique_ptr<ui_functions> ui;
-	// Non-empty after the first ui.update() -- used to log "first frame
-	// rendered" once so the JS side can hide any loading spinner.
+	std::unique_ptr<action_state> action_st;
+	std::unique_ptr<sync_state>   sync_st;
+	std::unique_ptr<sync_functions> funcs;
+	std::unique_ptr<sync_server_emscripten_ws> server;
+	int last_logged_slot = -2;
 	bool first_frame_logged = false;
+	bool connect_logged = false;
 	int frame_count = 0;
 };
 static wasm_state* g_state = nullptr;
 
 extern "C" void wasm_frame() {
 	if (!g_state) return;
-	auto& ui = *g_state->ui;
-	// SDL_PollEvent is pumped inside ui.update() (it consumes mouse +
-	// keyboard). We do NOT advance the sim here in Phase 3 -- the same
-	// frame renders every callback, which is fine: the map + starting
-	// units are visible and interactive-panning works.
-	ui.update();
+	auto& st = *g_state;
 
-	if (!g_state->first_frame_logged) {
-		ui::log("[wasm] first frame rendered\n");
-		g_state->first_frame_logged = true;
+	// Drive sync -> sim. Same call the native observer makes in its
+	// while(true). Internally: server.poll() delivers WS messages,
+	// sync.h ingests, advances sim if it's this frame's turn.
+	st.funcs->next_frame(*st.server);
+
+	// Log connection state once, when the sync layer first shows us
+	// clients (server-side peer registered) so the browser console
+	// clearly signals "we're actually talking to the server now".
+	if (!st.connect_logged && st.sync_st->clients.size() >= 2) {
+		ui::log("[wasm] connected to server (clients=%d)\n",
+			(int)st.sync_st->clients.size());
+		st.connect_logged = true;
 	}
-	g_state->frame_count++;
-	if (g_state->frame_count % 60 == 0) {
-		ui::log("[wasm] frames=%d (steady-state render)\n",
-			g_state->frame_count);
+
+	// Pick up perspective assignment (server-assigned player-slot view)
+	// exactly like native observer.cpp does.
+	if (st.ui->viewing_slot != st.sync_st->viewing_slot) {
+		st.ui->viewing_slot = st.sync_st->viewing_slot;
+	}
+	if (st.sync_st->viewing_slot != st.last_logged_slot) {
+		ui::log("[wasm] viewing perspective: slot=%d\n",
+			(int)st.sync_st->viewing_slot);
+		st.last_logged_slot = st.sync_st->viewing_slot;
+	}
+
+	st.ui->update();
+
+	if (!st.first_frame_logged) {
+		ui::log("[wasm] first frame rendered\n");
+		st.first_frame_logged = true;
+	}
+	st.frame_count++;
+	if (st.frame_count % 300 == 0) {
+		int rx = 0, dl = 0, tx = 0;
+		uint64_t rb = 0;
+		// Assume 1 peer (the observer connects to a single server).
+		// Report its per-msg-id histogram so we can see which sync.h
+		// messages are dominant vs missing.
+		int per_id[256]{};
+		for (auto& c : st.server->clients) {
+			rx += c->msgs_received;
+			dl += c->msgs_delivered;
+			tx += c->msgs_sent;
+			rb += c->bytes_received;
+			for (int i = 0; i < 256; ++i) per_id[i] += c->msg_id_hist[i];
+		}
+		ui::log("[wasm] frames=%d sim_frame=%d sync_frame=%d clients=%d "
+		        "ws:rx=%d(%d B) delivered=%d tx=%d\n",
+			st.frame_count, (int)st.ui->st.current_frame,
+			(int)st.sync_st->sync_frame,
+			(int)st.sync_st->clients.size(),
+			rx, (int)rb, dl, tx);
+		// Histogram: print only nonzero ids so the line stays readable.
+		// Legend: 0=client_uid 1=client_frame 3=start_game 6=game_started
+		// 13=auth 14=assign_perspective 15=catchup_data 16=agent_action.
+		char buf[512];
+		int n = snprintf(buf, sizeof(buf), "[wasm] msg-ids:");
+		for (int i = 0; i < 256 && n < (int)sizeof(buf) - 20; ++i) {
+			if (per_id[i] == 0) continue;
+			n += snprintf(buf + n, sizeof(buf) - n,
+				" 0x%02x=%d", i, per_id[i]);
+		}
+		ui::log("%s\n", buf);
 	}
 }
 
 } // anonymous namespace
 
 int main() {
-	args_wasm args;
-	ui::log("[wasm] starting: data=%s map=%s\n",
-		args.data_path.c_str(), args.map_path.c_str());
+	auto args = read_args_from_js();
+	ui::log("[wasm] starting: data=%s map=%s server=%s:%d key=%s\n",
+		args.data_path.c_str(), args.map_path.c_str(),
+		args.server_host.c_str(), args.server_port,
+		args.api_key.empty() ? "(none)" : "(set)");
 
-	// 1. Load MPQs + map. Same setup_f dance as native observer:
-	//    promote map's "open" and "computer" slots to occupied so
-	//    create_starting_units actually spawns them, then apply any
-	//    race overrides before the SIDE chunk runs.
+	// 1. Load MPQ + map -- identical to native observer.cpp.
 	auto load_data_file = data_loading::data_files_directory(
 		a_string(args.data_path.c_str()));
 	game_player player(load_data_file);
@@ -135,7 +210,8 @@ int main() {
 	}
 	ui::log("[wasm] map loaded\n");
 
-	// 2. Init ui_functions -- same wiring as native observer.
+	// 2. Build ui_functions + sync_state + transport. Same shape as
+	//    ui/observer.cpp:211..250, but with the emscripten transport.
 	g_state = new wasm_state();
 	g_state->ui = std::unique_ptr<ui_functions>(
 		new ui_functions(std::move(player)));
@@ -145,9 +221,37 @@ int main() {
 		load_data_file(data, std::move(filename));
 	};
 	ui.init();
-	ui::log("[wasm] ui initialized\n");
 
-	// 3. Create the SDL2 window -> emscripten binds it to the HTML canvas.
+	g_state->action_st = std::unique_ptr<action_state>(new action_state());
+	g_state->sync_st   = std::unique_ptr<sync_state>(new sync_state());
+	g_state->funcs = std::unique_ptr<sync_functions>(
+		new sync_functions(ui.st, *g_state->action_st, *g_state->sync_st));
+
+	// setup_info + latency + local client name -- mirror native.
+	static game_load_functions::setup_info_t setup_info;
+	g_state->sync_st->setup_info = &setup_info;
+	g_state->sync_st->latency = 2;
+	g_state->sync_st->local_client->name = "openbw_wasm_observer";
+	if (!args.api_key.empty()) {
+		g_state->sync_st->outgoing_api_key = a_string(args.api_key.c_str());
+	}
+
+	// Sync-log intentionally not wired: at steady state it's thousands
+	// of lines per second. Transport-level [ws-rx] logging inside
+	// sync_server_emscripten_ws.h is enough to diagnose Phase 4 issues.
+
+	// Transport. Same URL contract as native ws observer:
+	//   ws://host:port/observer?key=<api-key>
+	g_state->server = std::unique_ptr<sync_server_emscripten_ws>(
+		new sync_server_emscripten_ws());
+	g_state->server->client_url_path = "/observer";
+	g_state->server->client_api_key  = args.api_key;
+	g_state->server->connect(a_string(args.server_host.c_str()),
+	                          args.server_port);
+	ui::log("[wasm] connecting to ws://%s:%d/observer ...\n",
+		args.server_host.c_str(), args.server_port);
+
+	// 3. Create the SDL2 window -> HTML canvas, same as Phase 3.
 	auto& wnd = ui.wnd;
 	wnd.create("openbw_wasm_observer", 0, 0,
 		args.screen_width, args.screen_height);
@@ -160,9 +264,10 @@ int main() {
 	ui::log("[wasm] canvas ready %dx%d\n",
 		args.screen_width, args.screen_height);
 
-	// 4. emscripten main loop. fps=0 means "use requestAnimationFrame"
-	//    (~60fps). simulate_infinite_loop=1 makes main() effectively
-	//    never return, which is what SDL_main wants.
+	// 4. Enter the main loop. next_frame internally polls the
+	//    transport, so the connect handshake completes over the first
+	//    few frames while the map is already rendering (nice: user
+	//    sees the map immediately, sim starts as soon as server ready).
 	emscripten_set_main_loop(wasm_frame, 0, 1);
 	return 0;
 }

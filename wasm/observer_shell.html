@@ -1,0 +1,109 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>openBW WASM observer</title>
+<style>
+  body { margin: 0; background: #111; color: #eee;
+         font-family: system-ui, sans-serif; }
+  #ui   { padding: 8px 12px; background: #1a1a1a; border-bottom: 1px solid #333; }
+  #ui label { margin-right: 8px; }
+  #ui input { background: #222; color: #eee; border: 1px solid #444;
+              padding: 3px 6px; margin-right: 12px; }
+  #ui button { background: #2c6; color: #000; border: 0; padding: 6px 14px;
+               cursor: pointer; font-weight: 600; }
+  #canvas-wrap { padding: 0; }
+  canvas { display: block; margin: 0 auto; background: #000; }
+  #status { padding: 4px 12px; font-family: monospace; font-size: 12px;
+            color: #9d9; background: #151515; }
+  #console-box { padding: 6px 12px; font-family: monospace; font-size: 11px;
+                 color: #bbb; background: #0d0d0d; max-height: 160px;
+                 overflow-y: auto; white-space: pre-wrap; border-top: 1px solid #333; }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <label>server <input id="host" size="14" value="127.0.0.1" /></label>
+  <label>port   <input id="port" size="6"  value="6114" /></label>
+  <label>key    <input id="key"  size="24" value="" placeholder="(optional)" /></label>
+  <label>map    <input id="map"  size="34" value="original_resources/(2)Bottleneck.scm" /></label>
+  <button id="connect">connect</button>
+</div>
+
+<div id="status">idle. Fill in host/port/key/map and click connect.</div>
+
+<div id="canvas-wrap">
+  <!-- SDL2 draws here. Emscripten looks for #canvas by default. -->
+  <canvas id="canvas" width="1280" height="800" tabindex="1"></canvas>
+</div>
+
+<div id="console-box"></div>
+
+<script>
+  // URL-driven auto-connect: ?host=...&port=...&key=...&map=... connects
+  // immediately without waiting for a click. Handy for embedding in the
+  // future portal.
+  const params = new URLSearchParams(location.search);
+  if (params.has('host')) document.getElementById('host').value = params.get('host');
+  if (params.has('port')) document.getElementById('port').value = params.get('port');
+  if (params.has('key'))  document.getElementById('key').value  = params.get('key');
+  if (params.has('map'))  document.getElementById('map').value  = params.get('map');
+
+  // Mirror emscripten stdout/stderr into #console-box so users can see
+  // [wasm] log lines without opening devtools.
+  const consoleBox = document.getElementById('console-box');
+  function appendLog(text) {
+    consoleBox.textContent += text + '\n';
+    consoleBox.scrollTop = consoleBox.scrollHeight;
+  }
+
+  // Module object is what emscripten reads for config. Must be set
+  // BEFORE the generated .js runs. We defer loading the .js until
+  // "connect" is clicked so main() sees the user's chosen args.
+  window.OPENBW_MAP  = document.getElementById('map').value;
+  window.OPENBW_HOST = document.getElementById('host').value;
+  window.OPENBW_PORT = parseInt(document.getElementById('port').value, 10);
+  window.OPENBW_KEY  = document.getElementById('key').value;
+
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    print:    (t) => { console.log(t);   appendLog(t); },
+    printErr: (t) => { console.warn(t);  appendLog(t); },
+    onRuntimeInitialized: function() {
+      document.getElementById('status').textContent = 'wasm running';
+    },
+    // Progress hook -- shown while the .data blob downloads.
+    setStatus: function(t) {
+      const s = document.getElementById('status');
+      if (t) s.textContent = t;
+    },
+    monitorRunDependencies: function(left) {
+      const s = document.getElementById('status');
+      s.textContent = left > 0 ? ('loading assets ('+left+' remaining)…') : 'assets loaded';
+    },
+  };
+
+  function launch() {
+    // Snapshot form values into the globals main() reads.
+    window.OPENBW_MAP  = document.getElementById('map').value;
+    window.OPENBW_HOST = document.getElementById('host').value;
+    window.OPENBW_PORT = parseInt(document.getElementById('port').value, 10);
+    window.OPENBW_KEY  = document.getElementById('key').value;
+    document.getElementById('status').textContent = 'launching…';
+    // Load the emscripten glue -- this triggers .wasm + .data fetch
+    // and eventually calls main(). Guard against double-launch.
+    if (window.__openbwLaunched) return;
+    window.__openbwLaunched = true;
+    const s = document.createElement('script');
+    s.src = 'observer_wasm.js';
+    document.body.appendChild(s);
+  }
+  document.getElementById('connect').addEventListener('click', launch);
+
+  // If URL had params, auto-launch. Makes it easy to embed later.
+  if (params.has('host')) launch();
+</script>
+
+</body>
+</html>

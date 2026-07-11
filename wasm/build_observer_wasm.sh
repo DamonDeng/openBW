@@ -44,12 +44,33 @@ EMSCRIPTEN_FLAGS=(
     -sINITIAL_MEMORY=268435456
     # File API + module-runtime exports so JS can call in later.
     -sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','FS']
+    # Link emscripten's WebSocket runtime -- provides
+    # emscripten_websocket_new / _send_binary / callback setters used
+    # by sync_server_emscripten_ws.h. Without this the linker errors
+    # on those symbols.
+    -lwebsocket.js
+    # ASYNCIFY: lets C++ code call emscripten_sleep() to yield to the JS
+    # event loop mid-function. sync_server_emscripten_ws.h uses this in
+    # run_one/run_until so sync.h's "block until server heartbeat" pattern
+    # actually blocks (yielding to JS) instead of racing ahead. Without
+    # this the local sim runs at 60fps regardless of server pace and all
+    # agent-actions apply to the wrong (future) frames -- see the
+    # 2026-07-11 pacing bug.
+    -sASYNCIFY=1
+    # ASYNCIFY inflates code size + adds a ~10-20% runtime overhead;
+    # for a PoC that's fine. Later optimizations: pin a subset via
+    # -sASYNCIFY_ADD or migrate to jspi.
+    -sASYNCIFY_STACK_SIZE=32768
     # Bake all of original_resources/ into a .data blob at the same
     # path in the emscripten VFS. observer_wasm.cpp reads relative
     # paths like "original_resources/(2)Bottleneck.scm".
     --preload-file original_resources
-    # Emscripten's default HTML shell is fine for the PoC; we'll swap
-    # in a custom shell in Phase 4 (form for host/port + api key).
+    # We do NOT use --shell-file. Instead we ship a plain
+    # observer_shell.html that manually loads observer_wasm.js
+    # via a script tag. That way we don't have to deal with
+    # emscripten's shell-substitution markers ({{{SCRIPT}}} etc)
+    # and the shell can define window.OPENBW_* globals BEFORE
+    # the module loads.
 )
 
 echo "==> emcc compiling ${SOURCES[*]}"
@@ -60,9 +81,13 @@ emcc "${SOURCES[@]}" \
     "${EMSCRIPTEN_FLAGS[@]}" \
     -o wasm/dist/observer_wasm.html
 
-echo "==> Built wasm/dist/observer_wasm.{html,js,wasm,data}"
-echo "    ls -la wasm/dist"
+# Copy our custom shell into dist/ so http.server serves it side-by-side
+# with the generated .js/.wasm/.data. Emscripten's own observer_wasm.html
+# also lands there but we don't use it.
+cp wasm/observer_shell.html wasm/dist/index.html
+
+echo "==> Built wasm/dist/observer_wasm.{html,js,wasm,data} + index.html"
 ls -la wasm/dist
 echo "==> To serve:"
 echo "    cd wasm/dist && python3 -m http.server 8123"
-echo "    open http://localhost:8123/observer_wasm.html"
+echo "    open http://localhost:8123/"
