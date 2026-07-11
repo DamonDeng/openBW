@@ -101,17 +101,105 @@ struct wasm_state {
 	bool first_frame_logged = false;
 	bool connect_logged = false;
 	int frame_count = 0;
+
+	// Debug harness: track sim advance history so a snapshot can show
+	// e.g. "sim advanced 240 times in the last 300 render frames".
+	int sim_advances = 0;
+	int last_snapshot_sim = 0;
 };
 static wasm_state* g_state = nullptr;
+
+// Debug snapshot -- called from a JS button (see observer_shell.html).
+// Dumps the state of both the transport and sync_state to stdout so we
+// can see exactly where the observer is stuck. Cheap; safe to call
+// any time.
+extern "C" EMSCRIPTEN_KEEPALIVE void openbw_snapshot() {
+	if (!g_state) { printf("[snap] not initialized\n"); return; }
+	auto& st = *g_state;
+	printf("[snap] --- observer snapshot ---\n");
+	printf("[snap] render_frames=%d sim_advances=%d "
+	       "current_frame=%d sync_frame=%d\n",
+	       st.frame_count, st.sim_advances,
+	       (int)st.ui->st.current_frame,
+	       (int)st.sync_st->sync_frame);
+	printf("[snap] latency=%d viewing_slot=%d game_started=%d "
+	       "catching_up=%d\n",
+	       (int)st.sync_st->latency,
+	       (int)st.sync_st->viewing_slot,
+	       (int)st.sync_st->game_started,
+	       (int)st.sync_st->catching_up);
+	// Sync-state clients: h==nullptr => virtual (server-side agent
+	// slot placeholder); &c == local_client => ourselves.
+	int idx = 0;
+	for (auto& c : st.sync_st->clients) {
+		const char* kind = "peer";
+		if (&c == st.sync_st->local_client) kind = "local";
+		else if (c.h == nullptr) kind = "virtual";
+		int32_t lag = (int32_t)((uint32_t)st.sync_st->sync_frame - c.frame);
+		printf("[snap] client[%d] %s slot=%d frame=%u lag=%d "
+		       "has_uid=%d has_auth=%d has_greeted=%d "
+		       "scheduled=%zu name='%s'\n",
+		       idx++, kind, c.player_slot,
+		       (unsigned)c.frame, (int)lag,
+		       (int)c.has_uid, (int)c.has_auth, (int)c.has_greeted,
+		       c.scheduled_actions.size(), c.name.c_str());
+	}
+	// Transport state: per-client rx/tx counters + backlog.
+	int tidx = 0;
+	for (auto& c : st.server->clients) {
+		printf("[snap] ws-client[%d] socket=%d open=%d dead=%d "
+		       "allow_send=%d rx=%d(%d B) delivered=%d tx=%d "
+		       "queued=%zu pending_sends=%zu\n",
+		       tidx++,
+		       (int)c->socket, (int)c->is_open, (int)c->is_dead,
+		       (int)c->allow_send_flag,
+		       c->msgs_received, (int)c->bytes_received,
+		       c->msgs_delivered, c->msgs_sent,
+		       c->incoming.size(), c->pending_sends.size());
+	}
+	printf("[snap] --- end snapshot ---\n");
+	fflush(stdout);
+}
+
+// Read a JS int global, defaulting when undefined. Used to poll
+// pause/step flags each frame.
+static int js_bool(const char* expr) {
+	// Returns the numeric string "0" or "1"; atoi handles both.
+	const char* s = emscripten_run_script_string(expr);
+	if (!s || !*s) return 0;
+	return std::atoi(s);
+}
 
 extern "C" void wasm_frame() {
 	if (!g_state) return;
 	auto& st = *g_state;
 
-	// Drive sync -> sim. Same call the native observer makes in its
-	// while(true). Internally: server.poll() delivers WS messages,
-	// sync.h ingests, advances sim if it's this frame's turn.
-	st.funcs->next_frame(*st.server);
+	// Pause/step harness. Read two JS globals each frame:
+	//   window.OPENBW_PAUSED  -- if true, skip next_frame.
+	//   window.OPENBW_STEP    -- integer; if >0, decrement and advance
+	//                            ONE frame even when paused.
+	// The shell HTML exposes buttons that flip these. When paused we
+	// still poll the transport (so WS messages queue up and we can
+	// snapshot the queue depth) and still render.
+	bool paused = js_bool("(typeof OPENBW_PAUSED === 'boolean' && OPENBW_PAUSED) ? 1 : 0");
+	bool step   = js_bool("(typeof OPENBW_STEP === 'number' && OPENBW_STEP > 0) ? "
+	                       "(OPENBW_STEP -= 1, 1) : 0");
+	bool advance = !paused || step;
+
+	if (advance) {
+		// Drive sync -> sim. Same call the native observer makes in its
+		// while(true). Internally: server.poll() delivers WS messages,
+		// sync.h ingests, advances sim if it's this frame's turn.
+		st.funcs->next_frame(*st.server);
+		st.sim_advances++;
+	} else {
+		// Still poll the transport so WS messages accumulate; the
+		// snapshot can then show the backlog. No sim advance.
+		st.server->poll([&](const void* h){
+			// Should not fire post-init, but obey the interface.
+			(void)h;
+		});
+	}
 
 	// Log connection state once, when the sync layer first shows us
 	// clients (server-side peer registered) so the browser console
