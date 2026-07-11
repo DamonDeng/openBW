@@ -390,6 +390,15 @@ it from an `observe()` response, not by counting.
   (`current_frame + 1`). Every observer's local sim, whether live or
   fast-forwarding via id_catchup_data, sees the same action stream in
   the same order.
+- **SyncBreaker**: a class of bugs where a late-joining observer
+  silently misses actions that were broadcast to earlier peers,
+  desyncing their local sim without any error. See
+  [docs/syncbreaker.md](docs/syncbreaker.md) for the canonical
+  reference (mechanism, detection playbook, repro harness at
+  `scripts/repro_syncbreaker.sh`, prevention rules). The first
+  instance was fixed 2026-07 in commit 0baaef9 — read it before
+  refactoring anything in the cmd_queue → broadcast → history →
+  catchup path.
 
 ## Open questions to revisit later
 
