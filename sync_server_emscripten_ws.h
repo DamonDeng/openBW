@@ -197,23 +197,17 @@ struct sync_server_emscripten_ws {
 	static void mark_dead(client_t* c) { c->is_dead = true; }
 
 	// ------------------------------------------------------------------
-	// connect(host, port) -- observer-side entry point. Builds the URL
-	//   ws://host:port<client_url_path>?key=<client_api_key>
-	// and opens the WebSocket. Callbacks are installed synchronously;
-	// they fire later (async) as JS delivers events.
+	// connect_url(url) -- observer-side entry point. Opens the WebSocket
+	// at the given URL (ws:// or wss://). Callbacks are installed
+	// synchronously; they fire later (async) as JS delivers events.
+	//
+	// When the observer runs under HTTPS (browser tab loaded via https://),
+	// mixed-content rules forbid ws:// — the URL must be wss://. The
+	// caller assembles the URL (typically from the simsc /api/games/{id}
+	// response, which already carries observer_url with ?key= embedded).
 	// ------------------------------------------------------------------
-	void connect(const a_string& hostname, int port) {
+	void connect_url(const std::string& url) {
 		auto c = std::unique_ptr<client_t>(new client_t());
-
-		std::string url = "ws://";
-		url += hostname.c_str();
-		url += ':';
-		url += std::to_string(port);
-		url += client_url_path;
-		if (!client_api_key.empty()) {
-			url += "?key=";
-			url += client_api_key;
-		}
 
 		EmscriptenWebSocketCreateAttributes attrs{};
 		attrs.url = url.c_str();

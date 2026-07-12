@@ -6,3 +6,11 @@ deploy/*.yaml
 __pycache__/
 *.pyc
 .venv/
+
+# WASM observer build products — copied in from wasm/dist at image
+# build time. Large (>100 MB .data), architecture-independent, and
+# re-generatable from wasm/observer_wasm.cpp. Not committed to git;
+# regenerate with wasm/build_observer_wasm.sh + cp into simscapp/.
+app/static/simscapp/observer_wasm.data
+app/static/simscapp/observer_wasm.wasm
+app/static/simscapp/observer_wasm.js

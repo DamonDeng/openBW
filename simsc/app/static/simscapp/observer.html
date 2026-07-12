@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>simsc observer</title>
+  <link rel="stylesheet" href="/simscapp/styles.css" />
+  <style>
+    /* observer-only overrides. The chrome is minimal: one header row
+       and the canvas fills the rest. */
+    body { margin: 0; }
+    #topbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 6px 12px; background: #1a1a1a;
+      border-bottom: 1px solid #262c36;
+      font-size: 12px;
+    }
+    #topbar .meta { opacity: .75; }
+    #topbar button {
+      background: #1c2430; color: #e6e6e6; border: 1px solid #384253;
+      border-radius: 4px; padding: 4px 10px; font-size: 12px;
+    }
+    #topbar button:hover { background: #263042; }
+    #pause-status { color: #f2c064; margin-left: 8px; }
+    #canvas-wrap {
+      display: flex; align-items: center; justify-content: center;
+      background: #000;
+    }
+    canvas { display: block; background: #000; }
+    #status { padding: 4px 12px; font-family: ui-monospace, Menlo, monospace;
+              font-size: 11px; color: #6bd58a; background: #0d0d0d; }
+    #console-box {
+      padding: 6px 12px; font-family: ui-monospace, Menlo, monospace;
+      font-size: 11px; color: #bbb; background: #0d0d0d;
+      max-height: 140px; overflow-y: auto; white-space: pre-wrap;
+      border-top: 1px solid #262c36;
+    }
+    .fatal {
+      padding: 24px; text-align: center; color: #f26464;
+      font-size: 14px;
+    }
+    .fatal a { color: #9ec4ff; }
+  </style>
+</head>
+<body>
+
+<div id="fatal-holder"></div>
+
+<div id="shell" style="display:none">
+  <div id="topbar">
+    <strong>simsc observer</strong>
+    <span class="meta" id="game-info"></span>
+    <span style="flex:1"></span>
+    <button id="btn-pause" title="freeze the sim">pause</button>
+    <button id="btn-step"  title="advance 1 frame">step</button>
+    <button id="btn-step10">step 10</button>
+    <button id="btn-play">play</button>
+    <button id="btn-log"   title="download sync log">download log</button>
+    <span id="pause-status"></span>
+  </div>
+
+  <div id="canvas-wrap">
+    <canvas id="canvas" width="1280" height="800" tabindex="1"></canvas>
+  </div>
+
+  <div id="status">initializing…</div>
+  <div id="console-box"></div>
+</div>
+
+<script>
+// M5.a observer shell — popup at /simscapp/observer.html?game=<id>
+//
+// Boot sequence:
+//   1. Read `?game=<id>` from URL. If missing → show fatal.
+//   2. Read API key from localStorage.simsc_api_key. If missing →
+//      fatal with a "sign in from /simscapp/" link.
+//   3. Fetch /api/games/{id} with X-API-Key header. If the game is
+//      not running → fatal.
+//   4. From the response, take `observer_url` (already includes
+//      `?key=` per M3), `map`, `player_aliases`, `races`.
+//   5. Compute the local `.scm` filename the WASM data blob holds:
+//      it lives under `original_resources/<map>` in the WASM VFS.
+//   6. Set window.OPENBW_URL / OPENBW_MAP / OPENBW_RACES.
+//   7. Inject observer_wasm.js — that's when the emscripten runtime
+//      picks up the globals and main() runs.
+//
+// The API key never appears in this page's URL. The WSS URL that
+// goes to the ALB does carry ?key= — same trade-off as M3.
+
+(async function () {
+  const KEY_STORAGE = 'simsc_api_key';
+  const fatalHolder = document.getElementById('fatal-holder');
+  const shell = document.getElementById('shell');
+
+  function fatal(msg, showSignInLink) {
+    const p = document.createElement('div');
+    p.className = 'fatal';
+    p.innerHTML = msg;
+    if (showSignInLink) {
+      const a = document.createElement('a');
+      a.href = '/simscapp/';
+      a.textContent = 'Sign in from /simscapp/';
+      p.appendChild(document.createElement('br'));
+      p.appendChild(a);
+    }
+    fatalHolder.appendChild(p);
+  }
+
+  const params = new URLSearchParams(location.search);
+  const gameId = params.get('game');
+  if (!gameId) {
+    fatal('No game specified. Usage: /simscapp/observer.html?game=&lt;game_id&gt;', false);
+    return;
+  }
+  const key = localStorage.getItem(KEY_STORAGE);
+  if (!key) {
+    fatal('No API key in this browser.', true);
+    return;
+  }
+
+  // 1. Fetch game detail.
+  let game;
+  try {
+    const resp = await fetch(`/api/games/${encodeURIComponent(gameId)}`, {
+      headers: { 'X-API-Key': key },
+    });
+    if (resp.status === 401) {
+      localStorage.removeItem(KEY_STORAGE);
+      fatal('API key rejected.', true);
+      return;
+    }
+    if (resp.status === 404) {
+      fatal(`Game <code>${gameId}</code> not found.`, false);
+      return;
+    }
+    if (!resp.ok) {
+      fatal(`Failed to load game: HTTP ${resp.status}`, false);
+      return;
+    }
+    game = await resp.json();
+  } catch (e) {
+    fatal(`Failed to load game: ${e.message}`, false);
+    return;
+  }
+
+  if (!game.observer_url) {
+    fatal(`Game is <code>${game.state}</code>, no observer URL yet.`, false);
+    return;
+  }
+
+  // 2. Reveal the shell and hand params to the wasm module.
+  shell.style.display = '';
+  document.title = `simsc observer — ${game.game_id}`;
+  document.getElementById('game-info').textContent =
+    `${game.map} — ${(game.player_aliases || []).map(a => a || '—').join(' vs ')}`;
+
+  // The WASM data blob bundles maps under `original_resources/`. See
+  // wasm/build_observer_wasm.sh (--preload-file). We just have to
+  // point OPENBW_MAP at the right filename inside that VFS.
+  window.OPENBW_URL   = game.observer_url;
+  window.OPENBW_MAP   = `original_resources/${game.map}`;
+  // Comma-separated per-slot races; "random" -> empty (use map default).
+  window.OPENBW_RACES = (game.races || [])
+    .map(r => (r === 'random' ? '' : r)).join(',');
+
+  // Console mirror.
+  const consoleBox = document.getElementById('console-box');
+  function appendLog(t) {
+    consoleBox.textContent += t + '\n';
+    consoleBox.scrollTop = consoleBox.scrollHeight;
+  }
+
+  // Debug harness — same shape as wasm/observer_shell.html.
+  window.OPENBW_PAUSED = false;
+  window.OPENBW_STEP = 0;
+  const pauseStatus = document.getElementById('pause-status');
+  function refreshPauseStatus() {
+    pauseStatus.textContent = window.OPENBW_PAUSED
+      ? '⏸ paused  (STEP=' + window.OPENBW_STEP + ')' : '';
+  }
+  document.getElementById('btn-pause').onclick = () => {
+    window.OPENBW_PAUSED = true; refreshPauseStatus();
+  };
+  document.getElementById('btn-play').onclick = () => {
+    window.OPENBW_PAUSED = false; window.OPENBW_STEP = 0; refreshPauseStatus();
+  };
+  document.getElementById('btn-step').onclick = () => {
+    window.OPENBW_PAUSED = true; window.OPENBW_STEP += 1; refreshPauseStatus();
+  };
+  document.getElementById('btn-step10').onclick = () => {
+    window.OPENBW_PAUSED = true; window.OPENBW_STEP += 10; refreshPauseStatus();
+  };
+  document.getElementById('btn-log').onclick = () => {
+    if (!window.Module || !window.Module.ccall || !window.Module.HEAPU8) {
+      appendLog('[shell] sync-log: wasm module not ready yet'); return;
+    }
+    const size = window.Module.ccall('openbw_sync_log_size', 'number', [], []);
+    if (size === 0) {
+      appendLog('[shell] sync-log is empty (game may not have started)'); return;
+    }
+    const ptr = window.Module.ccall('openbw_sync_log_ptr', 'number', [], []);
+    const bytes = new Uint8Array(window.Module.HEAPU8.buffer, ptr, size).slice();
+    const blob = new Blob([bytes], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    a.href = url;
+    a.download = `simsc-obs-${gameId}-${stamp}.log`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    appendLog('[shell] downloaded sync-log (' + size + ' bytes)');
+  };
+  // Space toggles pause, right-arrow single steps.
+  document.getElementById('canvas').addEventListener('keydown', (e) => {
+    if (e.code === 'Space') {
+      window.OPENBW_PAUSED = !window.OPENBW_PAUSED;
+      window.OPENBW_STEP = 0; refreshPauseStatus(); e.preventDefault();
+    } else if (e.code === 'ArrowRight') {
+      window.OPENBW_PAUSED = true;
+      window.OPENBW_STEP += e.shiftKey ? 10 : 1;
+      refreshPauseStatus(); e.preventDefault();
+    }
+  });
+  document.getElementById('canvas').addEventListener('click', () => {
+    if (window.OPENBW_PAUSED) {
+      window.OPENBW_STEP += 1; refreshPauseStatus();
+    }
+  });
+
+  // 3. Emscripten module hook. Must be set before observer_wasm.js runs.
+  window.Module = {
+    canvas: document.getElementById('canvas'),
+    print:    (t) => { console.log(t); appendLog(t); },
+    printErr: (t) => { console.warn(t); appendLog(t); },
+    onRuntimeInitialized: () => {
+      document.getElementById('status').textContent = 'wasm running';
+    },
+    setStatus: (t) => {
+      if (t) document.getElementById('status').textContent = t;
+    },
+    monitorRunDependencies: (left) => {
+      const s = document.getElementById('status');
+      s.textContent = left > 0
+        ? 'loading assets (' + left + ' remaining)…'
+        : 'assets loaded';
+    },
+  };
+
+  // 4. Kick it off. observer_wasm.js will fetch the .wasm + .data (~85 MB
+  // MPQ blob) and eventually call main(), which reads the OPENBW_* globals.
+  const s = document.createElement('script');
+  s.src = '/simscapp/observer_wasm.js';
+  document.body.appendChild(s);
+})();
+</script>
+
+</body>
+</html>

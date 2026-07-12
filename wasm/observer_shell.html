@@ -39,6 +39,7 @@
   <button id="btn-step10"  title="advance 10 sim frames">step 10</button>
   <button id="btn-play"    title="resume normal playback">play</button>
   <button id="btn-snap"    title="dump observer state to console">snapshot</button>
+  <button id="btn-log"     title="download the wasm sync-log for diffing against server_sync.log">download sync log</button>
   <span id="pause-status" style="margin-left:12px;color:#f96;"></span>
 </div>
 
@@ -114,6 +115,35 @@
     } else {
       appendLog('[shell] snapshot: wasm module not ready yet');
     }
+  });
+  document.getElementById('btn-log').addEventListener('click', () => {
+    if (!window.Module || !window.Module.ccall || !window.Module.HEAPU8) {
+      appendLog('[shell] sync-log: wasm module not ready yet');
+      return;
+    }
+    // Pull the buffer out via a ptr+size pair. Emscripten's HEAPU8 is
+    // a Uint8Array view over the entire wasm memory, so we slice a
+    // fresh copy at the requested offset. Slice detaches from HEAPU8
+    // so any subsequent memory growth doesn't invalidate the Blob.
+    const size = window.Module.ccall('openbw_sync_log_size', 'number', [], []);
+    if (size === 0) {
+      appendLog('[shell] sync-log is empty (game may not have started)');
+      return;
+    }
+    const ptr = window.Module.ccall('openbw_sync_log_ptr', 'number', [], []);
+    const bytes = new Uint8Array(window.Module.HEAPU8.buffer, ptr, size).slice();
+    const blob = new Blob([bytes], {type: 'text/plain'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    // Timestamp so multiple downloads don't collide.
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    a.href = url;
+    a.download = 'wasm_obs_sync_' + stamp + '.log';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    appendLog('[shell] downloaded sync-log (' + size + ' bytes)');
   });
   // Clicking on the canvas single-steps -- matches the "mouse click to
   // advance one frame" workflow. Only wires the handler once; harmless

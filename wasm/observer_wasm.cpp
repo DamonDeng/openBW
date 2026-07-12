@@ -55,6 +55,10 @@ namespace {
 struct args_wasm {
 	std::string data_path = "original_resources";
 	std::string map_path  = "original_resources/(2)Bottleneck.scm";
+	// Full WebSocket URL to connect to. If empty, fall back to host+port.
+	// Set by the shell page as window.OPENBW_URL — typically
+	// wss://simsc.agentnumber47.com/game/{id}/observer?key=...
+	std::string server_url;
 	std::string server_host = "127.0.0.1";
 	int server_port = 6114;
 	int screen_width  = 1280;
@@ -83,6 +87,7 @@ args_wasm read_args_from_js() {
 	// from URL params before the module boots. Fall back to hardcoded
 	// defaults if the shell didn't set anything.
 	a.map_path    = js_string_or("(typeof OPENBW_MAP === 'string') ? OPENBW_MAP : ''",         a.map_path.c_str());
+	a.server_url  = js_string_or("(typeof OPENBW_URL === 'string') ? OPENBW_URL : ''",         "");
 	a.server_host = js_string_or("(typeof OPENBW_HOST === 'string') ? OPENBW_HOST : ''",       a.server_host.c_str());
 	a.server_port = js_int_or   ("(typeof OPENBW_PORT === 'number') ? String(OPENBW_PORT) : ''", a.server_port);
 	a.api_key     = js_string_or("(typeof OPENBW_KEY === 'string') ? OPENBW_KEY : ''",         "");
@@ -126,8 +131,30 @@ struct wasm_state {
 	// e.g. "sim advanced 240 times in the last 300 render frames".
 	int sim_advances = 0;
 	int last_snapshot_sim = 0;
+
+	// Sync-log buffer. sync.h calls sync_state::sync_log(a_string) for
+	// every AGENT_APPLY / AGENT_RECV / INVENTORY / GAME_START etc. We
+	// append to this string so a Download button can hand the browser
+	// a Blob (see openbw_sync_log_get). Grows to whatever the game
+	// produces; a full Z-v-Z at speed=42 is on the order of a few
+	// hundred KB per minute.
+	std::string sync_log_buffer;
 };
 static wasm_state* g_state = nullptr;
+
+// Sync-log accessors -- JS calls these from the Download button.
+// _size: current buffer length. _get: base64-encoded blob (via Module.HEAPU8
+// slice + TextDecoder in JS is more direct, so we just return the pointer
+// and length in a struct-of-two via two calls).
+extern "C" EMSCRIPTEN_KEEPALIVE size_t openbw_sync_log_size() {
+	return g_state ? g_state->sync_log_buffer.size() : 0;
+}
+extern "C" EMSCRIPTEN_KEEPALIVE const char* openbw_sync_log_ptr() {
+	return g_state ? g_state->sync_log_buffer.data() : nullptr;
+}
+extern "C" EMSCRIPTEN_KEEPALIVE void openbw_sync_log_clear() {
+	if (g_state) g_state->sync_log_buffer.clear();
+}
 
 // Debug snapshot -- called from a JS button (see observer_shell.html).
 // Dumps the state of both the transport and sync_state to stdout so we
@@ -228,6 +255,30 @@ extern "C" void wasm_frame() {
 		ui::log("[wasm] connected to server (clients=%d)\n",
 			(int)st.sync_st->clients.size());
 		st.connect_logged = true;
+	}
+
+	// Emit GAME_START into the sync-log once game_started flips true --
+	// matches native observer.cpp:287-294 so a diff of the two logs
+	// lines up from frame 0. The server's log includes the same line
+	// (with S tag); diff should show identical initial_rand.
+	static bool rand_logged = false;
+	if (!rand_logged && st.sync_st->game_started && st.sync_st->sync_log) {
+		char buf[64];
+		snprintf(buf, sizeof(buf), "GAME_START\tinitial_rand=%08x",
+			st.sync_st->initial_rand_state);
+		bwgame::sync_log_line(*st.sync_st, 'O', bwgame::a_string(buf));
+		rand_logged = true;
+	}
+
+	// Periodic INVENTORY dump for slots 0..1 every 300 frames, matching
+	// the server's cadence. Diffing server_sync.log against wasm sync
+	// log at the same frame numbers should show identical unit counts
+	// per slot if the wasm replay is exact.
+	static int last_inv_frame = -1;
+	int cf = (int)st.ui->st.current_frame;
+	if (st.sync_st->sync_log && cf > 0 && cf != last_inv_frame && cf % 300 == 0) {
+		for (int s = 0; s < 2; ++s) st.funcs->log_inventory('O', s);
+		last_inv_frame = cf;
 	}
 
 	// Pick up perspective assignment (server-assigned player-slot view)
@@ -353,20 +404,44 @@ int main() {
 		g_state->sync_st->outgoing_api_key = a_string(args.api_key.c_str());
 	}
 
-	// Sync-log intentionally not wired: at steady state it's thousands
-	// of lines per second. Transport-level [ws-rx] logging inside
-	// sync_server_emscripten_ws.h is enough to diagnose Phase 4 issues.
+	// Sync-log: append each line into an in-memory buffer that the JS
+	// "download sync log" button can pull. Byte-identical to the native
+	// observer's --sync-log output modulo the O/S side marker, so a
+	// diff between the two proves the WASM sim replays the server's
+	// actions correctly. Same shape as native observer.cpp:224.
+	g_state->sync_st->sync_log = [](const bwgame::a_string& s) {
+		if (g_state) {
+			g_state->sync_log_buffer.append(s.data(), s.size());
+		}
+	};
 
-	// Transport. Same URL contract as native ws observer:
-	//   ws://host:port/observer?key=<api-key>
+	// Transport. If OPENBW_URL is set, use it verbatim — that's the
+	// production shape (wss://…/game/{id}/observer?key=…). Otherwise
+	// build ws://host:port/observer?key=… from OPENBW_HOST/PORT/KEY for
+	// local dev.
 	g_state->server = std::unique_ptr<sync_server_emscripten_ws>(
 		new sync_server_emscripten_ws());
-	g_state->server->client_url_path = "/observer";
-	g_state->server->client_api_key  = args.api_key;
-	g_state->server->connect(a_string(args.server_host.c_str()),
-	                          args.server_port);
-	ui::log("[wasm] connecting to ws://%s:%d/observer ...\n",
-		args.server_host.c_str(), args.server_port);
+	std::string url;
+	if (!args.server_url.empty()) {
+		url = args.server_url;
+	} else {
+		url = "ws://";
+		url += args.server_host;
+		url += ':';
+		url += std::to_string(args.server_port);
+		url += "/observer";
+		if (!args.api_key.empty()) {
+			url += "?key=";
+			url += args.api_key;
+		}
+	}
+	g_state->server->connect_url(url);
+	// Log with the key stripped — never write it to a place the user
+	// might paste from (console, dev tools, screenshots).
+	std::string safe_url = url;
+	auto q = safe_url.find("?key=");
+	if (q != std::string::npos) safe_url = safe_url.substr(0, q) + "?key=…";
+	ui::log("[wasm] connecting to %s ...\n", safe_url.c_str());
 
 	// 3. Create the SDL2 window -> HTML canvas, same as Phase 3.
 	auto& wnd = ui.wnd;

@@ -168,8 +168,12 @@
       const who = a || 'None';
       return `<span class="meta">${i}: ${who} · ${r}</span>`;
     }).join(' &nbsp; ');
+    // "Open observer" opens the popup shell at /simscapp/observer.html
+    // with just ?game=<id>. The shell reads the API key from
+    // localStorage (same origin, same tab-group) and calls
+    // /api/games/{id} for details. The key is NEVER in the URL.
     const observerBtn = g.observer_url
-      ? `<a class="btn primary" href="${g.observer_url}" target="_blank">${t('games.open_observer')}</a>`
+      ? `<a class="btn primary" data-observer="${g.game_id}">${t('games.open_observer')}</a>`
       : '';
     let actions = '';
     if (kind === 'invitation') {
@@ -198,6 +202,17 @@
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${actions}</div>
       </div>`;
 
+    card.querySelectorAll('[data-observer]').forEach(btn => {
+      btn.onclick = (e) => {
+        e.preventDefault();
+        // window.open must be called synchronously from the click
+        // handler or the popup blocker will refuse it.
+        const url = '/simscapp/observer.html?game=' +
+          encodeURIComponent(btn.dataset.observer);
+        window.open(url, 'simsc_observer_' + btn.dataset.observer,
+          'width=1400,height=920');
+      };
+    });
     card.querySelectorAll('[data-act]').forEach(btn => {
       btn.onclick = async () => {
         const act = btn.dataset.act;
