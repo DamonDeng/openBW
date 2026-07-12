@@ -78,6 +78,12 @@ struct args_t {
 	// control planes (EKS pods) that pass credentials as pod args
 	// instead of shipping a users.json file into the container.
 	std::vector<std::string> user_specs;
+	// Hashed inline user specs: alias:sha256hex:role[:slot]. Used when
+	// the control plane keeps only hashed keys and wants to pass them
+	// on the CLI without exposing plaintext. Repeatable, and multiple
+	// entries with the same alias (same role+slot) are allowed — one
+	// user can have several active API keys, all valid.
+	std::vector<std::string> user_hash_specs;
 	bool no_auth = false;
 	bool no_agents = false;
 	// When true, the observer WS accepts any request path (not just
@@ -145,6 +151,7 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--wait-observers") && i + 1 < argc) a.wait_observers = std::atoi(argv[++i]);
 		else if (eq("--users") && i + 1 < argc) a.users_path = argv[++i];
 		else if (eq("--user") && i + 1 < argc) a.user_specs.push_back(argv[++i]);
+		else if (eq("--user-hash") && i + 1 < argc) a.user_hash_specs.push_back(argv[++i]);
 		else if (eq("--no-auth")) a.no_auth = true;
 		else if (eq("--ws-port") && i + 1 < argc) a.ws_port = std::atoi(argv[++i]);
 		else if (eq("--no-agents")) a.no_agents = true;
@@ -201,6 +208,13 @@ args_t parse_args(int argc, char** argv) {
 				"                     --users (both are loaded together). Meant\n"
 				"                     for control planes that pass creds as pod\n"
 				"                     args instead of shipping a users.json file.\n"
+				"  --user-hash <spec> same shape as --user but middle field is\n"
+				"                     a 64-char hex SHA-256 of the API key.\n"
+				"                     Lets control planes pass hashed creds\n"
+				"                     without ever exposing plaintext on the\n"
+				"                     command line. Multiple entries per alias\n"
+				"                     are allowed (all active keys map to the\n"
+				"                     same identity).\n"
 				"  --no-auth          disable auth entirely (dev-only)\n"
 				"  --ws-port          TCP port for agent WebSocket (default: 6113)\n"
 				"  --no-agents        disable the agent WebSocket server\n"
@@ -233,15 +247,17 @@ args_t parse_args(int argc, char** argv) {
 		fprintf(stderr, "error: --map is required (try --help)\n");
 		std::exit(1);
 	}
-	if (a.users_path.empty() && a.user_specs.empty() && !a.no_auth) {
+	bool has_auth_source =
+		!a.users_path.empty() || !a.user_specs.empty() || !a.user_hash_specs.empty();
+	if (!has_auth_source && !a.no_auth) {
 		fprintf(stderr,
-			"error: pass --users <path> or one-or-more --user <spec> "
-			"(or --no-auth for dev)\n");
+			"error: pass --users <path>, --user <spec>, --user-hash <spec>, "
+			"or --no-auth for dev\n");
 		std::exit(1);
 	}
-	if ((!a.users_path.empty() || !a.user_specs.empty()) && a.no_auth) {
+	if (has_auth_source && a.no_auth) {
 		fprintf(stderr,
-			"error: --users/--user and --no-auth are mutually exclusive\n");
+			"error: --users / --user / --user-hash and --no-auth are mutually exclusive\n");
 		std::exit(1);
 	}
 	if (a.wait_observers < 0) a.wait_observers = 0;
@@ -389,6 +405,17 @@ int main(int argc, char** argv) {
 			fprintf(stderr, "[srv] loaded %zu inline user(s) from --user\n", n);
 		} catch (const std::exception& e) {
 			fprintf(stderr, "[srv] --user parse failed: %s\n", e.what());
+			return 1;
+		}
+	}
+	if (!args.user_hash_specs.empty()) {
+		try {
+			size_t n = 0;
+			for (const auto& spec : args.user_hash_specs)
+				n += registry.add_from_spec_hash(spec);
+			fprintf(stderr, "[srv] loaded %zu hashed user(s) from --user-hash\n", n);
+		} catch (const std::exception& e) {
+			fprintf(stderr, "[srv] --user-hash parse failed: %s\n", e.what());
 			return 1;
 		}
 	}

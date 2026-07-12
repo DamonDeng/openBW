@@ -113,10 +113,18 @@ public:
 				u.assigned_slot = slot;
 			}
 
-			// Alias uniqueness check.
+			// Duplicate-alias policy: same alias may appear multiple
+			// times to bind multiple API keys to one identity — but the
+			// (role, assigned_slot) triple must match, else it's a
+			// definition conflict.
 			for (const auto& existing : users_) {
-				if (existing.alias == u.alias)
-					throw std::runtime_error("auth: duplicate alias '" + u.alias + "'");
+				if (existing.alias == u.alias) {
+					if (existing.role != u.role || existing.assigned_slot != u.assigned_slot) {
+						throw std::runtime_error(
+							"auth: alias '" + u.alias
+							+ "' has conflicting role/slot across entries");
+					}
+				}
 			}
 			users_.push_back(std::move(u));
 			++added;
@@ -173,9 +181,85 @@ public:
 				"auth: --user '" + u.alias + "': role=player requires a slot");
 		}
 		for (const auto& existing : users_) {
-			if (existing.alias == u.alias)
+			if (existing.alias == u.alias) {
+				if (existing.role != u.role || existing.assigned_slot != u.assigned_slot) {
+					throw std::runtime_error(
+						"auth: --user '" + u.alias
+						+ "' conflicts with prior entry (role/slot mismatch)");
+				}
+			}
+		}
+		users_.push_back(std::move(u));
+		return 1;
+	}
+
+	// Add a single user from a `alias:sha256hex:role[:slot]` spec.
+	// Same shape as add_from_spec but the middle field is a
+	// hex-encoded SHA-256 of the API key — the plaintext never
+	// enters the server. Used by control planes that keep hashed
+	// keys in a DB and don't want to leak plaintext on the CLI.
+	//
+	// One caller may hand us many hashes for the same alias (all
+	// active keys for that user); duplicate-alias handling matches
+	// add_from_spec.
+	size_t add_from_spec_hash(const std::string& spec) {
+		std::vector<std::string> parts;
+		size_t start = 0;
+		for (size_t i = 0; i <= spec.size(); ++i) {
+			if (i == spec.size() || spec[i] == ':') {
+				parts.push_back(spec.substr(start, i - start));
+				start = i + 1;
+			}
+		}
+		if (parts.size() < 3 || parts.size() > 4) {
+			throw std::runtime_error(
+				"auth: --user-hash expects alias:sha256hex:role[:slot], got '"
+				+ spec + "'");
+		}
+		user_t u;
+		u.alias = parts[0];
+		if (u.alias.empty())
+			throw std::runtime_error("auth: --user-hash: alias must be non-empty");
+		const std::string& hex = parts[1];
+		if (hex.size() != 64)
+			throw std::runtime_error(
+				"auth: --user-hash '" + u.alias
+				+ "': hash must be 64 hex chars, got " + std::to_string(hex.size()));
+		for (size_t i = 0; i < 32; ++i) {
+			int hi = _hex_nibble(hex[i * 2]);
+			int lo = _hex_nibble(hex[i * 2 + 1]);
+			if (hi < 0 || lo < 0)
 				throw std::runtime_error(
-					"auth: duplicate alias '" + u.alias + "'");
+					"auth: --user-hash '" + u.alias
+					+ "': non-hex char in hash");
+			u.api_key_hash[i] = (uint8_t)((hi << 4) | lo);
+		}
+		const std::string& role_s = parts[2];
+		if (role_s == "player") u.role = role_t::player;
+		else if (role_s == "observer") u.role = role_t::observer;
+		else if (role_s == "admin") u.role = role_t::admin;
+		else throw std::runtime_error(
+			"auth: --user-hash '" + u.alias + "': unknown role '" + role_s
+			+ "' (want player/observer/admin)");
+		if (parts.size() == 4 && !parts[3].empty()) {
+			int slot = std::atoi(parts[3].c_str());
+			if (slot < -1 || slot > 7)
+				throw std::runtime_error(
+					"auth: --user-hash '" + u.alias + "': slot out of range");
+			u.assigned_slot = slot;
+		}
+		if (u.role == role_t::player && u.assigned_slot < 0) {
+			throw std::runtime_error(
+				"auth: --user-hash '" + u.alias + "': role=player requires a slot");
+		}
+		for (const auto& existing : users_) {
+			if (existing.alias == u.alias) {
+				if (existing.role != u.role || existing.assigned_slot != u.assigned_slot) {
+					throw std::runtime_error(
+						"auth: --user-hash '" + u.alias
+						+ "' conflicts with prior entry (role/slot mismatch)");
+				}
+			}
 		}
 		users_.push_back(std::move(u));
 		return 1;
@@ -196,6 +280,13 @@ public:
 	const std::vector<user_t>& users() const { return users_; }
 
 private:
+	static int _hex_nibble(char c) {
+		if (c >= '0' && c <= '9') return c - '0';
+		if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+		if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+		return -1;
+	}
+
 	std::vector<user_t> users_;
 };
 

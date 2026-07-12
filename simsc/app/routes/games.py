@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -21,6 +21,11 @@ router = APIRouter(prefix="/api/games")
 class CreateGameIn(BaseModel):
     map: str = Field(..., min_length=1, max_length=255)
     races: list[str] = Field(..., min_length=2, max_length=8)
+    # One alias per slot, order = slot number. Each alias must exist
+    # in the users table and have at least one active API key. The
+    # caller does not have to be in this list — any authenticated
+    # user may create a game for any set of aliases.
+    player_aliases: list[str] = Field(..., min_length=2, max_length=8)
 
 
 class GameOut(BaseModel):
@@ -62,11 +67,10 @@ def _to_out(db: Session, game: Game, include_pod_phase: bool = False) -> GameOut
 @router.post("", response_model=GameOut)
 def create_game_route(
     body: CreateGameIn,
-    x_api_key: str = Header(...),  # noqa: B008 — the plain key comes in here
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> GameOut:
-    # Cap games/user to keep the smoke happy — one active game each.
+    # Cap games/user to keep the smoke happy — three active games each.
     active = db.execute(
         select(Game).where(
             Game.owner_user_id == user.id, Game.state != "ended"
@@ -77,7 +81,9 @@ def create_game_route(
             status.HTTP_400_BAD_REQUEST,
             "max 3 concurrent games per user; DELETE some first",
         )
-    game = games_service.create_game(db, user, x_api_key, body.map, body.races)
+    game = games_service.create_game(
+        db, user, body.map, body.races, body.player_aliases
+    )
     return _to_out(db, game, include_pod_phase=True)
 
 

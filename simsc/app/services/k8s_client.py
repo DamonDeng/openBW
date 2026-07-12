@@ -59,13 +59,16 @@ def create_game(
     game_id: str,
     map_name: str,
     races: list[str],
-    users: list[tuple[str, str, int]],
+    user_hashes: list[tuple[str, str, int]],
 ) -> GameHandles:
     """Create Pod + Service + Ingress for one game.
 
     Args:
-      users: list of (alias, api_key, slot). Passed to openbw-server as
-             `--user alias:api_key:player:slot`.
+      user_hashes: list of (alias, sha256hex, slot). One entry per
+                   (player, active key). Multiple entries with the
+                   same alias/slot are OK — they bind multiple keys
+                   to the same player identity. Passed as repeated
+                   `--user-hash alias:sha256hex:player:slot` args.
     """
     _init()
     pod_name = f"{game_id}-pod"
@@ -85,8 +88,8 @@ def create_game(
     ]
     for i, race in enumerate(races):
         args.extend(["--race", f"{i}={race}"])
-    for alias, key, slot in users:
-        args.extend(["--user", f"{alias}:{key}:player:{slot}"])
+    for alias, hex_hash, slot in user_hashes:
+        args.extend(["--user-hash", f"{alias}:{hex_hash}:player:{slot}"])
 
     # --- Pod ---
     pod = client.V1Pod(
