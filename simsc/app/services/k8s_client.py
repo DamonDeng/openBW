@@ -151,8 +151,14 @@ def create_game(
                 "alb.ingress.kubernetes.io/listen-ports": '[{"HTTP":80},{"HTTPS":443}]',
                 "alb.ingress.kubernetes.io/ssl-redirect": "443",
                 "alb.ingress.kubernetes.io/certificate-arn": settings.games_acm_cert_arn,
+                # Tag values here must match the other ingresses in
+                # this ALB group ('simsc'), otherwise the ALB Ingress
+                # Controller refuses to reconcile — the entire group
+                # (main SPA + all games) sits with stale ALB rules.
+                # The main simsc ingress uses environment=m2; keep
+                # this the same value.
                 "alb.ingress.kubernetes.io/tags":
-                    f"project=simsc,environment=m3,game-id={game_id}",
+                    f"project=simsc,environment=m2,game-id={game_id}",
             },
         ),
         spec=client.V1IngressSpec(

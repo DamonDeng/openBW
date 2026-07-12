@@ -1406,10 +1406,14 @@ async def run(c: Client, interval_sec: float,
         await asyncio.sleep(interval_sec)
 
 
-async def main(api_key, host, port, interval_sec, worker_target,
+async def main(api_key, host, port, url, interval_sec, worker_target,
                supply_slack, worker_train_min, pylon_target,
                scout_radial, scout_zscan, base_target):
-    async with Client(api_key=api_key, host=host, port=port) as c:
+    if url:
+        client_kwargs = {"api_key": api_key, "url": url}
+    else:
+        client_kwargs = {"api_key": api_key, "host": host, "port": port}
+    async with Client(**client_kwargs) as c:
         await run(c, interval_sec, worker_target, supply_slack,
                   worker_train_min, pylon_target,
                   scout_radial, scout_zscan, base_target)
@@ -1422,6 +1426,9 @@ def entrypoint() -> None:
     p.add_argument("api_key")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=6113)
+    p.add_argument("--url", default=None,
+                   help="full wss://.../agent URL (overrides --host/--port); "
+                        "use this to connect through the simsc ALB")
     p.add_argument("--interval-sec", type=float, default=1.5)
     p.add_argument("--worker-target", type=int, default=40)
     p.add_argument("--supply-slack", type=int, default=8)
@@ -1435,7 +1442,7 @@ def entrypoint() -> None:
                    help="target total Nexus count including main base")
     args = p.parse_args()
     try:
-        asyncio.run(main(args.api_key, args.host, args.port,
+        asyncio.run(main(args.api_key, args.host, args.port, args.url,
                          args.interval_sec, args.worker_target,
                          args.supply_slack, args.worker_train_min,
                          args.pylon_target,

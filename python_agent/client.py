@@ -56,8 +56,20 @@ class Client:
         host: str = "127.0.0.1",
         port: int = 6113,
         path: str = "/agent",
+        url: str | None = None,
     ) -> None:
-        self._url = f"ws://{host}:{port}{path}?key={api_key}"
+        # Two connection modes:
+        #   1. Legacy host+port+path -> ws://host:port/path?key=…
+        #      Used by every dev/soak invocation against a local server.
+        #   2. Full URL -> passthrough, with ?key=… appended.
+        #      Used to connect through the simsc ALB where the URL is
+        #      wss://simsc.…/game/<id>/agent (TLS-terminated at the LB).
+        # url wins if both are supplied.
+        if url is not None:
+            sep = '&' if '?' in url else '?'
+            self._url = f"{url}{sep}key={api_key}"
+        else:
+            self._url = f"ws://{host}:{port}{path}?key={api_key}"
         self._ws: Any = None
         self.welcome: Welcome | None = None
         # If two requests are outstanding, responses can interleave.
