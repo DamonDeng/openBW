@@ -1,0 +1,35 @@
+# Trim the build context for Dockerfile.server. We copy only what the
+# server target compiles from; skip the rest so `docker build` doesn't
+# ship 100s of MB to the daemon.
+
+# Build outputs
+build/
+build_srv/
+build_wasm/
+build_test/
+
+# Tests + local artifacts
+test_resources/
+docs/repro_r7_*/runs/
+
+# UI / WASM (server image doesn't need them)
+wasm/build/
+
+# Python runtime + agents
+python_agent/**/__pycache__/
+python_agent/**/*.pyc
+
+# VCS metadata (image is content-addressed, git history isn't used at
+# runtime)
+.git/
+.github/
+
+# Editor + OS junk
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Local development artifacts
+*.log
+*.sync

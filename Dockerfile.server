@@ -1,0 +1,76 @@
+# openbw_server -- production game-server image
+#
+# Multi-stage: builder compiles from source, runtime carries only the
+# stripped binary + StarCraft data + maps. Base is debian:12-slim so we
+# get glibc (asio + libstdc++ are happier than on Alpine/musl).
+#
+# Build:
+#   docker build -f Dockerfile.server -t openbw-server:local .
+#
+# Run (smoke test with inline users):
+#   docker run --rm -p 6113:6113 -p 6114:6114 openbw-server:local \
+#     --map '/opt/openbw/data/(2)Bottleneck.scm' \
+#     --user 'alice:sk-testkey-alice-abcdefghijk:player:0' \
+#     --user 'bob:sk-testkey-bob-abcdefghijklm:player:1' \
+#     --game-speed 42
+#
+# Pod (k8s) usage: entrypoint is the server binary, so pod `args` land
+# directly. `--data-path` defaults to /opt/openbw/data via env.
+
+# ---------- stage 1: build ----------
+FROM debian:12-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Copy just enough to compile the server target. We omit ui/, wasm/,
+# python_agent/, tests/, etc. so the layer cache doesn't invalidate on
+# unrelated edits.
+COPY CMakeLists.txt ./
+COPY server/       ./server/
+COPY deps/         ./deps/
+COPY *.h           ./
+
+RUN mkdir -p build && cd build \
+    && cmake .. -DCMAKE_BUILD_TYPE=Release \
+                -DOPENBW_BUILD_OBSERVER=OFF \
+                -DOPENBW_BUILD_SERVER=ON \
+    && cmake --build . --target openbw_server -j"$(nproc)" \
+    && strip server/openbw_server
+
+# ---------- stage 2: runtime ----------
+FROM debian:12-slim AS runtime
+
+# libstdc++ runtime; the binary is statically-linked to everything else.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libstdc++6 libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r openbw && useradd -r -g openbw -s /usr/sbin/nologin openbw
+
+WORKDIR /opt/openbw
+
+# Binary + data. --chown at COPY time so we don't double the layer size
+# with a separate `chown -R` pass over 125MB of maps.
+COPY --from=builder --chown=openbw:openbw \
+	/src/build/server/openbw_server /opt/openbw/bin/openbw_server
+COPY --chown=openbw:openbw \
+	original_resources/ /opt/openbw/data/
+
+# Default listening ports:
+#   6113 = agent WebSocket (JSON control protocol)
+#   6114 = observer WebSocket (sync.h binary frames)
+EXPOSE 6113 6114
+
+USER openbw
+
+# --data-path is common to every invocation so we bake it into ENTRYPOINT.
+# Everything else (--map, --user, --race, --game-speed) is passed as
+# `args` from the pod spec / docker run command.
+ENTRYPOINT ["/opt/openbw/bin/openbw_server", "--data-path", "/opt/openbw/data"]
+
+# Default CMD: just print help so a bare `docker run <image>` is
+# self-documenting. Real invocations override this.
+CMD ["--help"]

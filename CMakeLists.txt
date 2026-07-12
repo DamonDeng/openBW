@@ -11,7 +11,13 @@ set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 option(OPENBW_BUILD_OBSERVER "Build the openbw_observer SDL2 spectator client" ON)
 option(OPENBW_BUILD_SERVER   "Build the openbw_server headless authoritative sim" ON)
 
-add_subdirectory(ui)
+# ui/CMakeLists.txt hard-requires SDL2 (openbw_ui and openbw_observer target
+# both live there). Only descend if we actually intend to build them --
+# otherwise a headless server-only image would need to install SDL2 dev libs
+# just to satisfy the cmake configure step.
+if (OPENBW_BUILD_OBSERVER)
+	add_subdirectory(ui)
+endif()
 if (OPENBW_BUILD_SERVER)
 	add_subdirectory(server)
 endif()
