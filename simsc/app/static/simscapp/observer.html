@@ -448,7 +448,16 @@
     document.getElementById('game-info').textContent =
       `${game.map} — ${(game.player_aliases || []).map(a => a || '—').join(' vs ')}`;
 
-    window.OPENBW_URL   = game.observer_url;
+    // Append the API key as a query string. The server extracts it
+    // via ?key=… at HTTP upgrade time (ws_server.h:extract_key).
+    // We deliberately keep the key OUT of game.observer_url (the DB
+    // + /api/games response), so it only lives in localStorage +
+    // this in-memory JS string.
+    {
+      const sep = game.observer_url.includes('?') ? '&' : '?';
+      window.OPENBW_URL = game.observer_url + sep + 'key=' +
+        encodeURIComponent(key);
+    }
     window.OPENBW_MAP   = 'original_resources/' + game.map;
     window.OPENBW_RACES = (game.races || [])
       .map(r => (r === 'random' ? '' : r)).join(',');
