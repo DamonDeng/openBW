@@ -35,6 +35,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 using namespace bwgame;
 
@@ -73,6 +74,10 @@ struct args_t {
 	// opening seconds live rather than fast-forwarded).
 	int wait_observers = 0;
 	std::string users_path;
+	// Inline user specs: alias:api_key:role[:slot], repeatable. Used by
+	// control planes (EKS pods) that pass credentials as pod args
+	// instead of shipping a users.json file into the container.
+	std::vector<std::string> user_specs;
 	bool no_auth = false;
 	bool no_agents = false;
 	// Diagnostic: if non-empty, append AGENT_SCHED/APPLY events for
@@ -135,6 +140,7 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--seed") && i + 1 < argc) a.seed = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
 		else if (eq("--wait-observers") && i + 1 < argc) a.wait_observers = std::atoi(argv[++i]);
 		else if (eq("--users") && i + 1 < argc) a.users_path = argv[++i];
+		else if (eq("--user") && i + 1 < argc) a.user_specs.push_back(argv[++i]);
 		else if (eq("--no-auth")) a.no_auth = true;
 		else if (eq("--ws-port") && i + 1 < argc) a.ws_port = std::atoi(argv[++i]);
 		else if (eq("--no-agents")) a.no_agents = true;
@@ -170,7 +176,7 @@ args_t parse_args(int argc, char** argv) {
 		}
 		else if (eq("--help") || eq("-h")) {
 			fprintf(stderr,
-				"usage: %s --map <path> (--users <path> | --no-auth) [options]\n"
+				"usage: %s --map <path> (--users <path> | --user <spec>... | --no-auth) [options]\n"
 				"  --map              path to .scm/.scx map file\n"
 				"  --data-path        dir containing StarDat.mpq et al (default: .)\n"
 				"  --obs-port         Observer WebSocket port (default: 6114).\n"
@@ -182,7 +188,14 @@ args_t parse_args(int argc, char** argv) {
 				"                     starting the game (default: 0). With 0,\n"
 				"                     the game starts immediately and late\n"
 				"                     joiners catch up via replay fast-forward.\n"
-				"  --users <path>     users.json for API-key auth\n"
+				"  --users <path>     users.json file for API-key auth\n"
+				"  --user <spec>      inline user, alias:api_key:role[:slot].\n"
+				"                     role is one of player/observer/admin.\n"
+				"                     slot required for player, ignored else.\n"
+				"                     Repeat for multiple users. Composes with\n"
+				"                     --users (both are loaded together). Meant\n"
+				"                     for control planes that pass creds as pod\n"
+				"                     args instead of shipping a users.json file.\n"
 				"  --no-auth          disable auth entirely (dev-only)\n"
 				"  --ws-port          TCP port for agent WebSocket (default: 6113)\n"
 				"  --no-agents        disable the agent WebSocket server\n"
@@ -212,12 +225,15 @@ args_t parse_args(int argc, char** argv) {
 		fprintf(stderr, "error: --map is required (try --help)\n");
 		std::exit(1);
 	}
-	if (a.users_path.empty() && !a.no_auth) {
-		fprintf(stderr, "error: --users <path> is required (or pass --no-auth for dev)\n");
+	if (a.users_path.empty() && a.user_specs.empty() && !a.no_auth) {
+		fprintf(stderr,
+			"error: pass --users <path> or one-or-more --user <spec> "
+			"(or --no-auth for dev)\n");
 		std::exit(1);
 	}
-	if (!a.users_path.empty() && a.no_auth) {
-		fprintf(stderr, "error: --users and --no-auth are mutually exclusive\n");
+	if ((!a.users_path.empty() || !a.user_specs.empty()) && a.no_auth) {
+		fprintf(stderr,
+			"error: --users/--user and --no-auth are mutually exclusive\n");
 		std::exit(1);
 	}
 	if (a.wait_observers < 0) a.wait_observers = 0;
@@ -344,7 +360,10 @@ int main(int argc, char** argv) {
 		};
 	}
 
-	// Wire auth if requested.
+	// Wire auth if requested. --users (file) and --user (inline specs)
+	// compose: both are loaded into the same registry. This lets a k8s
+	// control plane pass credentials as --user args without shipping a
+	// users.json file into the pod, while local dev keeps using the file.
 	openbw_auth::user_registry registry;
 	if (!args.users_path.empty()) {
 		try {
@@ -354,6 +373,18 @@ int main(int argc, char** argv) {
 			fprintf(stderr, "[srv] auth load failed: %s\n", e.what());
 			return 1;
 		}
+	}
+	if (!args.user_specs.empty()) {
+		try {
+			size_t n = 0;
+			for (const auto& spec : args.user_specs) n += registry.add_from_spec(spec);
+			fprintf(stderr, "[srv] loaded %zu inline user(s) from --user\n", n);
+		} catch (const std::exception& e) {
+			fprintf(stderr, "[srv] --user parse failed: %s\n", e.what());
+			return 1;
+		}
+	}
+	if (registry.size() > 0) {
 		sync_st.auth_check = [&registry](const uint8_t* key, size_t key_len) -> const void* {
 			std::string_view sv((const char*)key, key_len);
 			const auto* u = registry.verify(sv);
@@ -517,14 +548,15 @@ int main(int argc, char** argv) {
 	openbw_agents::query_queue q_queue;
 	std::atomic<int> current_frame_atomic{0};
 
-	// Start the agent WS server unless disabled.
+	// Start the agent WS server unless disabled. Agent WS needs auth --
+	// either --users or --user must have loaded at least one user.
 	std::unique_ptr<openbw_agents::ws_server> ws;
-	if (!args.no_agents && !args.users_path.empty()) {
+	if (!args.no_agents && registry.size() > 0) {
 		ws = std::make_unique<openbw_agents::ws_server>(
 			registry, cmd_queue, obs_queue, q_queue, current_frame_atomic);
 		ws->start((uint16_t)args.ws_port);
 	} else if (!args.no_agents) {
-		fprintf(stderr, "[srv] agent WS requires --users; skipping (or pass --no-agents).\n");
+		fprintf(stderr, "[srv] agent WS requires --users or --user; skipping (or pass --no-agents).\n");
 	}
 
 	// 4. Fixed-rate tick loop.

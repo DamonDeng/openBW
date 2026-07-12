@@ -124,6 +124,63 @@ public:
 		return added;
 	}
 
+	// Add a single user from an inline "alias:api_key:role[:slot]" spec.
+	// Used by the server's --user CLI flag so a control plane (k8s, EKS)
+	// can pass credentials as pod args instead of shipping a users.json
+	// file into the pod. role must be one of player/observer/admin.
+	// slot is optional (required for player, ignored otherwise). Throws
+	// std::runtime_error on malformed input.
+	size_t add_from_spec(const std::string& spec) {
+		// Split on ':'. Careful: api_key may contain '-' or '_' but NOT
+		// ':', so plain colon split is safe.
+		std::vector<std::string> parts;
+		size_t start = 0;
+		for (size_t i = 0; i <= spec.size(); ++i) {
+			if (i == spec.size() || spec[i] == ':') {
+				parts.push_back(spec.substr(start, i - start));
+				start = i + 1;
+			}
+		}
+		if (parts.size() < 3 || parts.size() > 4) {
+			throw std::runtime_error(
+				"auth: --user expects alias:api_key:role[:slot], got '"
+				+ spec + "'");
+		}
+		user_t u;
+		u.alias = parts[0];
+		if (u.alias.empty())
+			throw std::runtime_error("auth: --user: alias must be non-empty");
+		const std::string& key = parts[1];
+		if (key.empty())
+			throw std::runtime_error("auth: --user '" + u.alias + "': api_key empty");
+		u.api_key_hash = sha256::hash(key.data(), key.size());
+		const std::string& role_s = parts[2];
+		if (role_s == "player") u.role = role_t::player;
+		else if (role_s == "observer") u.role = role_t::observer;
+		else if (role_s == "admin") u.role = role_t::admin;
+		else throw std::runtime_error(
+			"auth: --user '" + u.alias + "': unknown role '" + role_s
+			+ "' (want player/observer/admin)");
+		if (parts.size() == 4 && !parts[3].empty()) {
+			int slot = std::atoi(parts[3].c_str());
+			if (slot < -1 || slot > 7)
+				throw std::runtime_error(
+					"auth: --user '" + u.alias + "': slot out of range");
+			u.assigned_slot = slot;
+		}
+		if (u.role == role_t::player && u.assigned_slot < 0) {
+			throw std::runtime_error(
+				"auth: --user '" + u.alias + "': role=player requires a slot");
+		}
+		for (const auto& existing : users_) {
+			if (existing.alias == u.alias)
+				throw std::runtime_error(
+					"auth: duplicate alias '" + u.alias + "'");
+		}
+		users_.push_back(std::move(u));
+		return 1;
+	}
+
 	// Verify a raw API key. Returns nullptr if unknown.
 	const user_t* verify(std::string_view key) const {
 		auto h = sha256::hash(key.data(), key.size());
