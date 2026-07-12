@@ -439,24 +439,62 @@ struct sync_functions: action_functions {
 	void next_frame(server_T& server) {
 		sync(server);
 		action_functions::next_frame();
-		// Periodic lcg snapshot to bisect where server/observer diverge.
-		// Every 30 sim frames both sides emit one line with (current_frame,
-		// lcg_rand_state). Server and observer at the same current_frame
-		// should have identical lcg iff their sims took identical code
-		// paths since the last matching point. Diff of the two logs
-		// pinpoints the frame where they first split.
+		// LCG snapshot every sim frame (was every 30 -- bumped for a
+		// bisect-the-race investigation). Cost: 1 short line per frame
+		// per side. At speed=10 with 6-min games this is ~52000 lines/
+		// side/game = a few MB of sync-log per participant. Fine for
+		// local debugging; revert after we've localized the bug.
 		//
-		// Only when sync-log is wired (i.e. --sync-log passed). Cost is
-		// one snprintf every 30 frames -- irrelevant.
+		// After each sim tick both sides emit `LCG_TICK lcg=<hex>`. Diff
+		// of the two logs at the SAME current_frame reveals the exact
+		// frame lcg first differs -- which pins the divergence to a
+		// specific bwgame::state_functions call between that frame and
+		// the previous one.
 		if (sync_st.sync_log && sync_st.game_started
-		    && this->st.current_frame > 0
-		    && this->st.current_frame % 30 == 0)
+		    && this->st.current_frame > 0)
 		{
 			char side = sync_st.auth_check ? 'S' : 'O';
 			char buf[64];
 			snprintf(buf, sizeof(buf), "LCG_TICK\tlcg=%08x",
 				(unsigned)this->st.lcg_rand_state);
 			bwgame::sync_log_line(sync_st, side, bwgame::a_string(buf));
+		}
+
+		// Per-tick loop-state trace: for each tick, log the current
+		// values of sync_frame, current_frame, and every virtual-client
+		// frame counter. This surfaces WHY the two sides get to
+		// different lcg -- if their vc->frame trails diverge, we know
+		// scheduling is offset. If sync_frame and current_frame stay
+		// aligned but lcg drifts, the divergence is deep inside the
+		// sim itself.
+		if (sync_st.sync_log && sync_st.game_started) {
+			char side = sync_st.auth_check ? 'S' : 'O';
+			// Assemble a compact per-slot vc-frame vector. Uses
+			// virtual_clients_by_slot -- server registers these at
+			// startup, observer creates them lazily as id_agent_action
+			// arrives, so early frames may have "-" for unpopulated
+			// slots. Recording that unpopulated state IS the signal
+			// we want.
+			a_string vc_body = "\tvcs=";
+			for (int slot = 0; slot < 8; ++slot) {
+				if (slot > 0) vc_body += ",";
+				auto* vc = sync_st.virtual_clients_by_slot[slot];
+				if (vc) {
+					char b[32];
+					snprintf(b, sizeof(b), "%u", (unsigned)vc->frame);
+					vc_body += b;
+				} else {
+					vc_body += "-";
+				}
+			}
+			char buf[192];
+			snprintf(buf, sizeof(buf),
+				"TICK\tsync_frame=%d\tcurrent_frame=%d\tlcg=%08x",
+				sync_st.sync_frame, (int)this->st.current_frame,
+				(unsigned)this->st.lcg_rand_state);
+			a_string body = buf;
+			body += vc_body;
+			bwgame::sync_log_line(sync_st, side, body);
 		}
 	}
 
