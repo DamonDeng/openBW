@@ -1,5 +1,11 @@
 # SyncBreaker #5 repro summary — 2026-07-12
 
+> **Handoff:** later same-day investigation is captured in
+> `handoff_syncbreaker5.md` (this directory). Read that first if
+> you're picking up the case; the section below is the original
+> morning-of-investigation snapshot.
+
+
 ## Repro config
 - Script: `scripts/repro_round7.sh`
 - Map: `(6)New Gettysburg.scm`

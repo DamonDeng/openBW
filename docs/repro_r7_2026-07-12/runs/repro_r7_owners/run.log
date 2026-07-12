@@ -1,0 +1,34 @@
+[repro-r7] starting server (map=New Gettysburg, races=protoss protoss terran terran terran terran, speed=10)
+[repro-r7] server ready
+[repro-r7] [+1] observer bob (slot 1 view)
+[repro-r7] [+2] agent alice (protoss / slot 0)
+[repro-r7] [+3] observer alice (slot 0 view)
+[repro-r7] [+4] observer frank (slot 5 view)
+[repro-r7] [+5] agent carol (terran / slot 2)
+[repro-r7] [+6] agent frank (terran / slot 5)
+[repro-r7] [+7] observer carol (slot 2 view)
+[repro-r7] [+8] agent eve (terran / slot 4)
+[repro-r7] [+9] agent bob (protoss / slot 1)
+[repro-r7] [+10] observer dave (slot 3 view)
+[repro-r7] [+11] observer eve (slot 4 view)
+[repro-r7] [+12] agent dave (terran / slot 3)
+[repro-r7] all launched. Playing 300s...
+[repro-r7] final server frame: frame=51910
+[repro-r7] stopping all processes
+scripts/repro_round7.sh: line 73: 89696 Terminated: 15          nohup ./build_srv/server/openbw_server --map "$MAP" --data-path original_resources --users test_resources/users.json "${RACE_ARGS[@]}" --game-speed 10 --sync-log "$OUT/server.sync" > "$OUT/server.log" 2>&1
+scripts/repro_round7.sh: line 92: 91328 Terminated: 15          PYTHONUNBUFFERED=1 nohup python3 -m "$mod" "$key" --host 127.0.0.1 --port 6113 --interval-sec 1.0 > "$OUT/agent_${name}.log" 2>&1
+scripts/repro_round7.sh: line 92: 92936 Terminated: 15          PYTHONUNBUFFERED=1 nohup python3 -m "$mod" "$key" --host 127.0.0.1 --port 6113 --interval-sec 1.0 > "$OUT/agent_${name}.log" 2>&1
+scripts/repro_round7.sh: line 92: 94063 Terminated: 15          PYTHONUNBUFFERED=1 nohup python3 -m "$mod" "$key" --host 127.0.0.1 --port 6113 --interval-sec 1.0 > "$OUT/agent_${name}.log" 2>&1
+scripts/repro_round7.sh: line 92: 90068 Terminated: 15          PYTHONUNBUFFERED=1 nohup python3 -m "$mod" "$key" --host 127.0.0.1 --port 6113 --interval-sec 1.0 > "$OUT/agent_${name}.log" 2>&1
+scripts/repro_round7.sh: line 92: 92589 Terminated: 15          PYTHONUNBUFFERED=1 nohup python3 -m "$mod" "$key" --host 127.0.0.1 --port 6113 --interval-sec 1.0 > "$OUT/agent_${name}.log" 2>&1
+scripts/repro_round7.sh: line 92: 91683 Terminated: 15          PYTHONUNBUFFERED=1 nohup python3 -m "$mod" "$key" --host 127.0.0.1 --port 6113 --interval-sec 1.0 > "$OUT/agent_${name}.log" 2>&1
+
+[repro-r7] --- results ---
+  alice   matched= 318  min_only=  0  real=248  FAIL_REAL
+  bob     matched= 344  min_only=  0  real=248  FAIL_REAL
+  carol   matched= 266  min_only=  0  real=248  FAIL_REAL
+  dave    matched= 226  min_only=  0  real=226  FAIL_REAL
+  eve     matched= 212  min_only=  0  real=212  FAIL_REAL
+  frank   matched= 306  min_only=  0  real=248  FAIL_REAL
+
+logs at /tmp/repro_r7_owners/

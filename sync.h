@@ -487,44 +487,43 @@ struct sync_functions: action_functions {
 					vc_body += "-";
 				}
 			}
-			// Field-partitioned FNV-1a state hashes. Server and observer
-			// disagree on lcg once their sims diverge. To pin the FIRST
-			// state field that differs we compute a hash per group and
-			// print all four. Whichever group's hash first splits between
-			// server and observer is the divergence bucket:
-			//   nu  = unit count
-			//   ht  = hp + exact_position (same body as insync_hash)
-			//   od  = order_type->id, order_state, main_order_timer
-			//   tp  = unit_type->id, owner (identity + ownership)
-			// If nu splits, list membership itself changed (unit spawned /
-			// died on one side only). If ht splits, position or hp
-			// changed. If od splits, an order/state machine advanced
-			// differently. If tp splits, an owner/type field changed.
-			uint32_t h_ht = 2166136261u;
-			uint32_t h_od = 2166136261u;
-			uint32_t h_tp = 2166136261u;
-			auto mix = [](uint32_t& h, uint32_t v) {
-				h ^= v; h *= 16777619u;
+			// Field-partitioned FNV-1a state hashes bucketed by owner. Per
+			// tick we emit one hash + count per owner slot; whichever
+			// slot's hash first splits between server and observer is
+			// the party whose units drifted first. The hash body is
+			// {hp+shield raw, exact_pos.x, exact_pos.y, order_type.id,
+			// order_state, main_order_timer} -- covers most of what we
+			// need to bucket in one pass.
+			//
+			// Neutral / not-owned units (owner >= 8) fold into the
+			// "neutral" bucket (index 8).
+			uint32_t h[9];
+			uint32_t n[9];
+			for (int i = 0; i < 9; ++i) { h[i] = 2166136261u; n[i] = 0; }
+			auto mix = [](uint32_t& hh, uint32_t v) {
+				hh ^= v; hh *= 16777619u;
 			};
-			uint32_t nu = 0;
 			for (unit_t* u : ptr(this->st.visible_units)) {
-				++nu;
-				mix(h_ht, (uint32_t)(u->shield_points + u->hp).raw_value);
-				mix(h_ht, (uint32_t)u->exact_position.x.raw_value);
-				mix(h_ht, (uint32_t)u->exact_position.y.raw_value);
-				mix(h_od, u->order_type ? (uint32_t)u->order_type->id : 0u);
-				mix(h_od, (uint32_t)u->order_state);
-				mix(h_od, (uint32_t)u->main_order_timer);
-				mix(h_tp, u->unit_type ? (uint32_t)u->unit_type->id : 0u);
-				mix(h_tp, (uint32_t)u->owner);
+				int o = u->owner;
+				if (o < 0 || o >= 8) o = 8;
+				++n[o];
+				mix(h[o], (uint32_t)(u->shield_points + u->hp).raw_value);
+				mix(h[o], (uint32_t)u->exact_position.x.raw_value);
+				mix(h[o], (uint32_t)u->exact_position.y.raw_value);
+				mix(h[o], u->order_type ? (uint32_t)u->order_type->id : 0u);
+				mix(h[o], (uint32_t)u->order_state);
+				mix(h[o], (uint32_t)u->main_order_timer);
 			}
-			char buf[288];
+			char buf[512];
 			snprintf(buf, sizeof(buf),
 				"TICK\tsync_frame=%d\tcurrent_frame=%d\tlcg=%08x"
-				"\tnu=%u\tht=%08x\tod=%08x\ttp=%08x",
+				"\tn=%u,%u,%u,%u,%u,%u,%u,%u,%u"
+				"\th0=%08x\th1=%08x\th2=%08x\th3=%08x"
+				"\th4=%08x\th5=%08x\th6=%08x\th7=%08x\thN=%08x",
 				sync_st.sync_frame, (int)this->st.current_frame,
 				(unsigned)this->st.lcg_rand_state,
-				nu, h_ht, h_od, h_tp);
+				n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7], n[8],
+				h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]);
 			a_string body = buf;
 			body += vc_body;
 			bwgame::sync_log_line(sync_st, side, body);
