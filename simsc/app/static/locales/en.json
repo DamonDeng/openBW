@@ -7,7 +7,7 @@
     "greeting_fallback": "Welcome.",
     "intro": "This is your entry point to the simsc simulation environment. Your account is signed in via Cognito; the app itself uses an API key for all backend calls.",
     "your_key_label": "Your API key",
-    "your_key_reveal_hint": "This key is shown ONCE. Copy or download it now — you can also regenerate later from the app's settings.",
+    "your_key_reveal_hint": "This key is shown ONCE. Copy or download it now — you can also regenerate later from the app's Keys tab.",
     "copy_button": "Copy",
     "download_button": "Download",
     "saved_button": "I've saved my key",
@@ -22,9 +22,69 @@
     "title": "simsc",
     "loading": "Loading…",
     "welcome_line": "Hi, {name}",
-    "no_key_prompt": "This browser has no API key yet. Sign in from /  to auto-populate one, or paste an existing key below.",
+    "no_key_prompt": "This browser has no API key yet. Sign in from / to auto-populate one, or paste an existing key below.",
     "paste_key_label": "Paste API key",
-    "paste_key_button": "Save key"
+    "paste_key_button": "Save key",
+    "tab_games": "Games",
+    "tab_keys": "Keys",
+    "sign_out": "Sign out"
+  },
+
+  "games": {
+    "create_button": "+ Create Game",
+    "invitations_header": "Invitations",
+    "your_games_header": "Your games",
+    "no_games": "No games yet.",
+    "no_invitations": "No pending invitations.",
+    "accept": "Accept",
+    "decline": "Decline",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "open_observer": "Open observer",
+    "waiting_for": "waiting for: {aliases}",
+    "state_pending": "pending",
+    "state_running": "running",
+    "state_ended": "ended",
+    "state_cancelled": "cancelled",
+    "from": "from {alias}",
+    "your_slot": "your slot: {slot}",
+    "invalid_state": "cannot act now"
+  },
+
+  "create_game": {
+    "title": "Create Game",
+    "map_label": "Map",
+    "map_players_hint": "Players: {n}",
+    "slot_label": "Slot {n}",
+    "race_random": "Random",
+    "race_protoss": "Protoss",
+    "race_terran": "Terran",
+    "race_zerg": "Zerg",
+    "slot_you": "{alias} (you)",
+    "slot_aibot": "AIBot (empty)",
+    "slot_none": "None",
+    "cancel_button": "Cancel",
+    "create_button": "Create",
+    "creating": "Creating…"
+  },
+
+  "keys": {
+    "list_header": "Your API keys",
+    "column_label": "Label",
+    "column_created": "Created",
+    "column_status": "Status",
+    "column_action": "",
+    "status_active": "active",
+    "status_revoked": "revoked",
+    "revoke_button": "Revoke",
+    "new_label_placeholder": "e.g. laptop, bot-1",
+    "create_button": "Create key",
+    "just_created_header": "Your new key — copy it now",
+    "just_created_hint": "This key is shown only once. Copy or download it. You can revoke it any time.",
+    "copy_button": "Copy",
+    "download_button": "Download",
+    "dismiss_button": "OK, I've saved it",
+    "max_reached": "You already have {max} active keys. Revoke one first."
   },
 
   "admin": {
@@ -34,7 +94,8 @@
   },
 
   "common": {
-    "sign_out": "Sign out",
-    "loading": "Loading…"
+    "loading": "Loading…",
+    "close": "Close",
+    "error": "Error: {msg}"
   }
 }

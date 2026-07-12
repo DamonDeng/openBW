@@ -4,126 +4,48 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>simsc</title>
-  <style>
-    :root { color-scheme: dark; }
-    body {
-      background: #0e1116; color: #e6e6e6;
-      font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
-      display: flex; align-items: center; justify-content: center;
-      min-height: 100vh; margin: 0; padding: 24px; box-sizing: border-box;
-    }
-    .card {
-      max-width: 640px; width: 100%;
-      background: #151a21; border: 1px solid #262c36; border-radius: 12px;
-      padding: 28px 32px;
-    }
-    h1 { margin: 0 0 16px 0; font-size: 22px; }
-    label { display: block; font-size: 12px; opacity: .7; margin: 14px 0 6px 0; }
-    input[type=text] {
-      width: 100%; box-sizing: border-box;
-      background: #0a0d12; border: 1px solid #2a3140; border-radius: 6px;
-      padding: 8px 10px; color: #e6e6e6; font-family: ui-monospace, Menlo, monospace;
-      font-size: 13px;
-    }
-    button {
-      background: #2a70e0; color: white; border: none;
-      border-radius: 6px; padding: 8px 16px; font-size: 13px;
-      cursor: pointer; margin-top: 12px;
-    }
-    button:hover { background: #3580ee; }
-    .row { display: flex; gap: 10px; align-items: baseline; }
-    .lang-row { position: absolute; top: 20px; right: 24px; font-size: 12px; }
-    .hidden { display: none !important; }
-    .muted { opacity: .7; font-size: 12px; }
-    pre { background: #0a0d12; border: 1px solid #2a3140; padding: 10px;
-      border-radius: 6px; overflow-x: auto; font-size: 12px; }
-  </style>
+  <link rel="stylesheet" href="/simscapp/styles.css">
 </head>
 <body>
-  <div class="lang-row">
-    <select id="lang-select"></select>
+  <!-- Boot: no-key screen -->
+  <div id="need-key" class="hidden">
+    <main>
+      <div class="card">
+        <p id="need-key-msg" class="meta"></p>
+        <label class="form-label" id="key-input-label" for="key-input"></label>
+        <input type="text" id="key-input" placeholder="sk-…" autocomplete="off" style="width:100%">
+        <div style="margin-top: 8px">
+          <button id="key-save-btn" class="primary"></button>
+        </div>
+      </div>
+    </main>
   </div>
 
-  <div class="card">
-    <h1 id="app-title">simsc</h1>
-
-    <div id="need-key" class="hidden">
-      <p id="need-key-msg" class="muted"></p>
-      <label for="key-input" id="key-input-label"></label>
-      <input type="text" id="key-input" placeholder="sk-…" autocomplete="off">
-      <button id="key-save-btn"></button>
-    </div>
-
-    <div id="signed-in" class="hidden">
-      <p id="welcome-line"></p>
-      <p class="muted">M2 stub — control-server APIs wired, real UI arrives in M3.</p>
-      <pre id="profile-dump"></pre>
-      <button id="sign-out-btn"></button>
-    </div>
+  <!-- App shell (shown once key is loaded) -->
+  <div id="app" class="hidden">
+    <header>
+      <h1 id="app-title">simsc</h1>
+      <div class="right">
+        <span id="welcome-line"></span>
+        <select id="lang-select"></select>
+        <button id="sign-out-btn"></button>
+      </div>
+    </header>
+    <nav>
+      <button id="tab-games" class="active" data-tab="games"></button>
+      <button id="tab-keys"  data-tab="keys"></button>
+    </nav>
+    <main>
+      <div id="view-games"></div>
+      <div id="view-keys" class="hidden"></div>
+      <div id="error-box" class="error hidden"></div>
+    </main>
   </div>
+
+  <!-- Modals target -->
+  <div id="modal-root"></div>
 
   <script src="/simscapp/i18n.js"></script>
-  <script>
-  (async function () {
-    const supportedLocales = ['en', 'zh-CN'];
-    const savedLocale = localStorage.getItem('simsc_locale');
-    let locale = supportedLocales.includes(savedLocale) ? savedLocale : 'en';
-    const dict = await i18n.load(locale);
-    const t = (p, v) => i18n.t(dict, p, v);
-
-    const select = document.getElementById('lang-select');
-    for (const code of supportedLocales) {
-      const d = code === locale ? dict : await i18n.load(code);
-      const opt = document.createElement('option');
-      opt.value = code; opt.textContent = d.meta.language_name;
-      if (code === locale) opt.selected = true;
-      select.appendChild(opt);
-    }
-    select.addEventListener('change', () => {
-      localStorage.setItem('simsc_locale', select.value);
-      location.reload();
-    });
-
-    document.title = t('app.title');
-    document.getElementById('app-title').textContent = t('app.title');
-
-    const key = localStorage.getItem('simsc_api_key');
-    if (!key) {
-      document.getElementById('need-key').classList.remove('hidden');
-      document.getElementById('need-key-msg').textContent = t('app.no_key_prompt');
-      document.getElementById('key-input-label').textContent = t('app.paste_key_label');
-      document.getElementById('key-save-btn').textContent = t('app.paste_key_button');
-      document.getElementById('key-save-btn').onclick = () => {
-        const v = document.getElementById('key-input').value.trim();
-        if (!v) return;
-        localStorage.setItem('simsc_api_key', v);
-        location.reload();
-      };
-      return;
-    }
-
-    // Have a key — fetch profile
-    const resp = await fetch('/api/me/profile', {
-      headers: { 'X-API-Key': key },
-    });
-    if (!resp.ok) {
-      // Bad key — wipe it and prompt again
-      localStorage.removeItem('simsc_api_key');
-      location.reload();
-      return;
-    }
-    const profile = await resp.json();
-    document.getElementById('signed-in').classList.remove('hidden');
-    document.getElementById('welcome-line').textContent = t(
-      'app.welcome_line', { name: profile.display_name || profile.alias });
-    document.getElementById('profile-dump').textContent = JSON.stringify(profile, null, 2);
-    document.getElementById('sign-out-btn').textContent = t('common.sign_out');
-    document.getElementById('sign-out-btn').onclick = () => {
-      localStorage.removeItem('simsc_api_key');
-      // Also nuke the Cognito session for a truly clean multi-user handoff
-      window.location.href = '/ui/logout';
-    };
-  })();
-  </script>
+  <script src="/simscapp/app.js"></script>
 </body>
 </html>

@@ -18,6 +18,7 @@ Routing map (see aws_account_info/04_m2_plan.md):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import pathlib
 
@@ -27,10 +28,12 @@ from fastapi.staticfiles import StaticFiles
 
 from app.auth.reveal_cache import RevealCache
 from app.core.config import settings
+from app.db.session import SessionLocal
 from app.routes import api as api_routes
 from app.routes import games as games_routes
 from app.routes import meta as meta_routes
 from app.routes import ui as ui_routes
+from app.services import games as games_service
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -47,6 +50,7 @@ app.include_router(ui_routes.router)
 app.include_router(api_routes.router)
 app.include_router(games_routes.router)
 app.include_router(games_routes.admin_router)
+app.include_router(games_routes.users_router)
 
 # Static: SPAs + locale bundles.
 app.mount("/simscapp", StaticFiles(directory=_STATIC_ROOT / "simscapp", html=True), name="simscapp")
@@ -63,8 +67,24 @@ def welcome_page() -> FileResponse:
 
 
 @app.on_event("startup")
-def _startup_banner() -> None:
+async def _startup_banner() -> None:
     log.info(
         "simsc-app starting; site=%s cognito=%s pool=%s",
         settings.site_origin, settings.cognito_domain, settings.cognito_pool_id,
     )
+    # Sweep expired invitations every 60s. Runs forever until the pod
+    # dies. Kept in-process — no external scheduler needed at M4 scale.
+    async def _sweeper():
+        while True:
+            try:
+                await asyncio.sleep(60)
+                db = SessionLocal()
+                try:
+                    n = games_service.sweep_expired(db)
+                    if n:
+                        log.info("swept %d expired game(s)", n)
+                finally:
+                    db.close()
+            except Exception as e:
+                log.exception("sweeper error: %s", e)
+    asyncio.create_task(_sweeper())

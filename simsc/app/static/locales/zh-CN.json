@@ -7,11 +7,11 @@
     "greeting_fallback": "欢迎。",
     "intro": "这里是进入 simsc 模拟环境的入口。你已通过 Cognito 完成登录;应用本身使用一个 API Key 与后端通信。",
     "your_key_label": "你的 API Key",
-    "your_key_reveal_hint": "这把 Key 只显示一次。请立刻复制或下载 —— 你也可以稍后在应用内的“密钥”页面重新生成。",
+    "your_key_reveal_hint": "这把 Key 只显示一次。请立刻复制或下载 —— 你也可以稍后在应用的“密钥”页面重新生成。",
     "copy_button": "复制",
     "download_button": "下载",
     "saved_button": "我已保存",
-    "no_key_hint": "本浏览器已保存过 API Key。如需新的 Key,请到应用内的“密钥”页面创建。",
+    "no_key_hint": "本浏览器已保存过 API Key。如需新的 Key,请到应用的“密钥”页面创建。",
     "enter_app_button": "进入应用",
     "admin_console_button": "管理后台",
     "sign_out_button": "退出登录",
@@ -24,7 +24,67 @@
     "welcome_line": "你好,{name}",
     "no_key_prompt": "本浏览器还没有 API Key。请从 / 登录以自动填充,或在下方粘贴已有的 Key。",
     "paste_key_label": "粘贴 API Key",
-    "paste_key_button": "保存"
+    "paste_key_button": "保存",
+    "tab_games": "游戏",
+    "tab_keys": "密钥",
+    "sign_out": "退出"
+  },
+
+  "games": {
+    "create_button": "+ 创建游戏",
+    "invitations_header": "邀请",
+    "your_games_header": "我的游戏",
+    "no_games": "还没有游戏。",
+    "no_invitations": "没有待处理的邀请。",
+    "accept": "接受",
+    "decline": "拒绝",
+    "cancel": "取消",
+    "delete": "删除",
+    "open_observer": "打开观战",
+    "waiting_for": "等待:{aliases}",
+    "state_pending": "等待中",
+    "state_running": "进行中",
+    "state_ended": "已结束",
+    "state_cancelled": "已取消",
+    "from": "来自 {alias}",
+    "your_slot": "你的位置:{slot}",
+    "invalid_state": "当前状态无法操作"
+  },
+
+  "create_game": {
+    "title": "创建游戏",
+    "map_label": "地图",
+    "map_players_hint": "玩家数:{n}",
+    "slot_label": "位置 {n}",
+    "race_random": "随机",
+    "race_protoss": "神族",
+    "race_terran": "人族",
+    "race_zerg": "虫族",
+    "slot_you": "{alias}(自己)",
+    "slot_aibot": "AI 机器人(空)",
+    "slot_none": "无",
+    "cancel_button": "取消",
+    "create_button": "创建",
+    "creating": "创建中…"
+  },
+
+  "keys": {
+    "list_header": "我的 API Key",
+    "column_label": "标签",
+    "column_created": "创建时间",
+    "column_status": "状态",
+    "column_action": "",
+    "status_active": "有效",
+    "status_revoked": "已撤销",
+    "revoke_button": "撤销",
+    "new_label_placeholder": "例如 laptop、bot-1",
+    "create_button": "新建 Key",
+    "just_created_header": "新的 Key —— 请立刻复制",
+    "just_created_hint": "这把 Key 只显示一次。请复制或下载。之后可以随时撤销。",
+    "copy_button": "复制",
+    "download_button": "下载",
+    "dismiss_button": "我已保存",
+    "max_reached": "你已有 {max} 把有效 Key。请先撤销一把。"
   },
 
   "admin": {
@@ -34,7 +94,8 @@
   },
 
   "common": {
-    "sign_out": "退出",
-    "loading": "加载中…"
+    "loading": "加载中…",
+    "close": "关闭",
+    "error": "出错:{msg}"
   }
 }

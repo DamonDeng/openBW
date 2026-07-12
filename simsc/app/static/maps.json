@@ -1,0 +1,222 @@
+[
+  {
+    "filename": "(2)Bottleneck.scm",
+    "player_count": 2,
+    "display_name": "Bottleneck"
+  },
+  {
+    "filename": "(2)Boxer.scm",
+    "player_count": 2,
+    "display_name": "Boxer"
+  },
+  {
+    "filename": "(2)Challenger.scm",
+    "player_count": 2,
+    "display_name": "Challenger"
+  },
+  {
+    "filename": "(2)River Crossing.scm",
+    "player_count": 2,
+    "display_name": "River Crossing"
+  },
+  {
+    "filename": "(2)Road War.scm",
+    "player_count": 2,
+    "display_name": "Road War"
+  },
+  {
+    "filename": "(2)Space Madness.scm",
+    "player_count": 2,
+    "display_name": "Space Madness"
+  },
+  {
+    "filename": "(2)The Small Divide.scm",
+    "player_count": 2,
+    "display_name": "The Small Divide"
+  },
+  {
+    "filename": "(2)Volcanis.scm",
+    "player_count": 2,
+    "display_name": "Volcanis"
+  },
+  {
+    "filename": "(3)Holy Ground.scm",
+    "player_count": 3,
+    "display_name": "Holy Ground"
+  },
+  {
+    "filename": "(3)Meltdown.scm",
+    "player_count": 3,
+    "display_name": "Meltdown"
+  },
+  {
+    "filename": "(3)Three Kingdoms.scm",
+    "player_count": 3,
+    "display_name": "Three Kingdoms"
+  },
+  {
+    "filename": "(3)Triumvirate.scm",
+    "player_count": 3,
+    "display_name": "Triumvirate"
+  },
+  {
+    "filename": "(4)Alpha Draconis.scm",
+    "player_count": 4,
+    "display_name": "Alpha Draconis"
+  },
+  {
+    "filename": "(4)Blood Bath.scm",
+    "player_count": 4,
+    "display_name": "Blood Bath"
+  },
+  {
+    "filename": "(4)Bridge Too Near.scm",
+    "player_count": 4,
+    "display_name": "Bridge Too Near"
+  },
+  {
+    "filename": "(4)Cyclone.scm",
+    "player_count": 4,
+    "display_name": "Cyclone"
+  },
+  {
+    "filename": "(4)Dark Crystal.scm",
+    "player_count": 4,
+    "display_name": "Dark Crystal"
+  },
+  {
+    "filename": "(4)Dark Star.scm",
+    "player_count": 4,
+    "display_name": "Dark Star"
+  },
+  {
+    "filename": "(4)Lost Civilization.scm",
+    "player_count": 4,
+    "display_name": "Lost Civilization"
+  },
+  {
+    "filename": "(4)Nightmare Station.scm",
+    "player_count": 4,
+    "display_name": "Nightmare Station"
+  },
+  {
+    "filename": "(4)Opposing City States '98.scm",
+    "player_count": 4,
+    "display_name": "Opposing City States '98"
+  },
+  {
+    "filename": "(4)Orbital Relay.scm",
+    "player_count": 4,
+    "display_name": "Orbital Relay"
+  },
+  {
+    "filename": "(4)Power Lines.scm",
+    "player_count": 4,
+    "display_name": "Power Lines"
+  },
+  {
+    "filename": "(4)Ruins of the Ancients.scm",
+    "player_count": 4,
+    "display_name": "Ruins of the Ancients"
+  },
+  {
+    "filename": "(4)Tarsonis Orbital.scm",
+    "player_count": 4,
+    "display_name": "Tarsonis Orbital"
+  },
+  {
+    "filename": "(5)Diablo.scm",
+    "player_count": 5,
+    "display_name": "Diablo"
+  },
+  {
+    "filename": "(5)Island Hop.scm",
+    "player_count": 5,
+    "display_name": "Island Hop"
+  },
+  {
+    "filename": "(5)Jeweled River.scm",
+    "player_count": 5,
+    "display_name": "Jeweled River"
+  },
+  {
+    "filename": "(5)Sherwood Forest.scm",
+    "player_count": 5,
+    "display_name": "Sherwood Forest"
+  },
+  {
+    "filename": "(6)Ground Zero.scm",
+    "player_count": 6,
+    "display_name": "Ground Zero"
+  },
+  {
+    "filename": "(6)Hidden Shrine.scm",
+    "player_count": 6,
+    "display_name": "Hidden Shrine"
+  },
+  {
+    "filename": "(6)New Gettysburg.scm",
+    "player_count": 6,
+    "display_name": "New Gettysburg"
+  },
+  {
+    "filename": "(7)Continental Divide.scm",
+    "player_count": 7,
+    "display_name": "Continental Divide"
+  },
+  {
+    "filename": "(7)River War.scm",
+    "player_count": 7,
+    "display_name": "River War"
+  },
+  {
+    "filename": "(8)Bridge to Bridge '98.scm",
+    "player_count": 8,
+    "display_name": "Bridge to Bridge '98"
+  },
+  {
+    "filename": "(8)Char Magma.scm",
+    "player_count": 8,
+    "display_name": "Char Magma"
+  },
+  {
+    "filename": "(8)Homeworld.scm",
+    "player_count": 8,
+    "display_name": "Homeworld"
+  },
+  {
+    "filename": "(8)Jungle Rumble.scm",
+    "player_count": 8,
+    "display_name": "Jungle Rumble"
+  },
+  {
+    "filename": "(8)Killing Fields.scm",
+    "player_count": 8,
+    "display_name": "Killing Fields"
+  },
+  {
+    "filename": "(8)Orbital Death.scm",
+    "player_count": 8,
+    "display_name": "Orbital Death"
+  },
+  {
+    "filename": "(8)Plains of Snow '98.scm",
+    "player_count": 8,
+    "display_name": "Plains of Snow '98"
+  },
+  {
+    "filename": "(8)River Runs Through It.scm",
+    "player_count": 8,
+    "display_name": "River Runs Through It"
+  },
+  {
+    "filename": "(8)Station Unrest.scm",
+    "player_count": 8,
+    "display_name": "Station Unrest"
+  },
+  {
+    "filename": "(8)The Hunters.scm",
+    "player_count": 8,
+    "display_name": "The Hunters"
+  }
+]

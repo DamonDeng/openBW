@@ -85,13 +85,33 @@ class Game(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     map: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Per-slot race choice; length matches map's player count.
     races: Mapped[list[str]] = mapped_column(JSON, nullable=False)
-    player_aliases: Mapped[list[str]] = mapped_column(JSON, nullable=False)
-    pod_name: Mapped[str] = mapped_column(String(63), nullable=False)
-    ingress_name: Mapped[str] = mapped_column(String(63), nullable=False)
-    # "creating" | "running" | "ended"
-    state: Mapped[str] = mapped_column(String(16), default="creating", nullable=False)
+    # Per-slot alias. Entries: real alias, "AIBot" (treated as empty
+    # for M4), or None (empty). Length matches races.
+    player_aliases: Mapped[list[Optional[str]]] = mapped_column(JSON, nullable=False)
+    # Pod / ingress names — set once the game transitions to running.
+    pod_name: Mapped[Optional[str]] = mapped_column(String(63))
+    ingress_name: Mapped[Optional[str]] = mapped_column(String(63))
+    # pending_invitations | running | ended | cancelled
+    state: Mapped[str] = mapped_column(String(20), default="pending_invitations", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+class GameInvitation(Base):
+    __tablename__ = "game_invitations"
+
+    game_id: Mapped[str] = mapped_column(
+        ForeignKey("games.id", ondelete="CASCADE"), primary_key=True
+    )
+    alias: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # pending | accepted | declined | expired
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    invited_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    responded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
