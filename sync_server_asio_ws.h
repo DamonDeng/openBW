@@ -238,6 +238,13 @@ struct sync_server_asio_ws {
 	ws_auth_fn auth_fn;
 	// Path the server accepts on. Requests to any other path get 404.
 	// The observer variant sets this to "/observer".
+	//
+	// If left empty (""), any path is accepted. Used when the server
+	// sits behind an ALB that path-multiplexes to a specific port
+	// (e.g. /game/{id}/observer -> container port 6114) — the ALB has
+	// already gated by path, so the server accepting any path is
+	// safe and lets us skip synchronizing path strings across the
+	// two layers.
 	std::string server_path = "/observer";
 
 	// Same async_handle machinery as the raw TCP transport.
@@ -628,7 +635,7 @@ struct sync_server_asio_ws {
 			reject("400 Bad Request");
 			return;
 		}
-		if (path != server_path) {
+		if (!server_path.empty() && path != server_path) {
 			reject("404 Not Found");
 			return;
 		}

@@ -80,6 +80,10 @@ struct args_t {
 	std::vector<std::string> user_specs;
 	bool no_auth = false;
 	bool no_agents = false;
+	// When true, the observer WS accepts any request path (not just
+	// /observer). Meant for deployments behind an ALB that path-routes
+	// each game pod (e.g. /game/{id}/observer -> container:6114).
+	bool any_ws_path = false;
 	// Diagnostic: if non-empty, append AGENT_SCHED/APPLY events for
 	// each agent action to this file. Same format as the observer's
 	// sync-log so `diff` catches divergence.
@@ -144,6 +148,7 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--no-auth")) a.no_auth = true;
 		else if (eq("--ws-port") && i + 1 < argc) a.ws_port = std::atoi(argv[++i]);
 		else if (eq("--no-agents")) a.no_agents = true;
+		else if (eq("--any-ws-path")) a.any_ws_path = true;
 		else if (eq("--sync-log") && i + 1 < argc) a.sync_log_path = argv[++i];
 		else if (eq("--race") && i + 1 < argc) {
 			std::string v = argv[++i];
@@ -199,6 +204,9 @@ args_t parse_args(int argc, char** argv) {
 				"  --no-auth          disable auth entirely (dev-only)\n"
 				"  --ws-port          TCP port for agent WebSocket (default: 6113)\n"
 				"  --no-agents        disable the agent WebSocket server\n"
+				"  --any-ws-path      accept observer WS on any path\n"
+				"                     (default: /observer only). Used\n"
+				"                     when ALB path-routes to this pod.\n"
 				"  --sync-log <path>  append per-frame agent-action events\n"
 				"                     to <path>. Diff against observer's\n"
 				"                     sync-log to find replay divergence.\n"
@@ -420,7 +428,11 @@ int main(int argc, char** argv) {
 	//    sync_server_asio_tcp transport is retired -- its .h stays in
 	//    tree for now as a reference but is no longer wired.
 	sync_server_asio_ws server;
-	server.server_path = "/observer";
+	// Under ALB path-routing (e.g. /game/{id}/observer -> container
+	// port 6114), the load balancer has already gated by path before
+	// the request arrives; the server accepting any path is safe.
+	// --any-ws-path opts in.
+	server.server_path = args.any_ws_path ? std::string() : std::string("/observer");
 	if (!args.no_auth) {
 		server.auth_fn = [&registry](const std::string& api_key) {
 			if (api_key.empty()) return false;

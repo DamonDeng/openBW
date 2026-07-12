@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     ForeignKey,
@@ -74,3 +75,23 @@ class ApiKey(Base):
     @property
     def is_active(self) -> bool:
         return self.revoked_at is None
+
+
+class Game(Base):
+    __tablename__ = "games"
+
+    id: Mapped[str] = mapped_column(String(24), primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    map: Mapped[str] = mapped_column(String(255), nullable=False)
+    races: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    player_aliases: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    pod_name: Mapped[str] = mapped_column(String(63), nullable=False)
+    ingress_name: Mapped[str] = mapped_column(String(63), nullable=False)
+    # "creating" | "running" | "ended"
+    state: Mapped[str] = mapped_column(String(16), default="creating", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))

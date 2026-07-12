@@ -1,0 +1,46 @@
+---
+# Namespace for per-game pods. Kept separate from `simsc` so RBAC
+# stays crisp: simsc-app has full control here, no rights elsewhere.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: simsc-games
+  labels:
+    project: simsc
+    environment: m3
+---
+# ServiceAccount used by the simsc-app pod. The Deployment references
+# this SA name.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: simsc-app
+  namespace: ${K8S_NAMESPACE}
+---
+# Role in simsc-games: create/delete/list Pods, Services, Ingresses.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: game-orchestrator
+  namespace: simsc-games
+rules:
+  - apiGroups: [""]
+    resources: [pods, services]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, watch, create, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: simsc-app-orchestrator
+  namespace: simsc-games
+subjects:
+  - kind: ServiceAccount
+    name: simsc-app
+    namespace: ${K8S_NAMESPACE}
+roleRef:
+  kind: Role
+  name: game-orchestrator
+  apiGroup: rbac.authorization.k8s.io

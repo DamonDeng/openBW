@@ -18,6 +18,7 @@ spec:
       labels:
         app: simsc-app
     spec:
+      serviceAccountName: simsc-app
       containers:
         - name: app
           image: ${ECR_IMAGE}:${IMAGE_TAG}
@@ -35,6 +36,14 @@ spec:
               value: ${COGNITO_REGION}
             - name: SITE_ORIGIN
               value: ${SITE_ORIGIN}
+            - name: OPENBW_SERVER_IMAGE
+              value: ${OPENBW_SERVER_IMAGE}
+            - name: GAMES_NAMESPACE
+              value: simsc-games
+            - name: GAMES_HOST
+              value: ${SITE_HOST}
+            - name: GAMES_ACM_CERT_ARN
+              value: ${ACM_CERT_ARN}
           envFrom:
             - secretRef:
                 name: simsc-app-env

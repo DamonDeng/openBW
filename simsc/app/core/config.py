@@ -39,6 +39,14 @@ class Settings:
     default_locale: str = "en"
     supported_locales: tuple[str, ...] = ("en", "zh-CN")
 
+    # Game orchestration (M3).
+    openbw_server_image: str = ""
+    games_namespace: str = "simsc-games"
+    games_host: str = "simsc.agentnumber47.com"
+    # ACM cert ARN for the shared ALB (games Ingresses use the same
+    # cert as the main site).
+    games_acm_cert_arn: str = ""
+
 
 def _require(key: str) -> str:
     val = os.environ.get(key)
@@ -62,6 +70,10 @@ def load_settings() -> Settings:
         cognito_region=os.environ.get("COGNITO_REGION", "ap-northeast-1"),
         site_origin=os.environ.get("SITE_ORIGIN", "https://simsc.agentnumber47.com"),
         admin_token=os.environ.get("ADMIN_TOKEN", ""),
+        openbw_server_image=os.environ.get("OPENBW_SERVER_IMAGE", ""),
+        games_namespace=os.environ.get("GAMES_NAMESPACE", "simsc-games"),
+        games_host=os.environ.get("GAMES_HOST", "simsc.agentnumber47.com"),
+        games_acm_cert_arn=os.environ.get("GAMES_ACM_CERT_ARN", ""),
     )
 
 

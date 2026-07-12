@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from app.auth.reveal_cache import RevealCache
 from app.core.config import settings
 from app.routes import api as api_routes
+from app.routes import games as games_routes
 from app.routes import meta as meta_routes
 from app.routes import ui as ui_routes
 
@@ -44,6 +45,8 @@ app.state.reveal_cache = RevealCache(ttl_seconds=settings.reveal_ttl_seconds)
 app.include_router(meta_routes.router)
 app.include_router(ui_routes.router)
 app.include_router(api_routes.router)
+app.include_router(games_routes.router)
+app.include_router(games_routes.admin_router)
 
 # Static: SPAs + locale bundles.
 app.mount("/simscapp", StaticFiles(directory=_STATIC_ROOT / "simscapp", html=True), name="simscapp")
