@@ -87,8 +87,10 @@ def create_game(
         "--any-ws-path",  # ALB path-routes to us; accept any WS path.
     ]
     for i, race in enumerate(races):
-        # "random" from the UI == leave map default alone (no --race).
-        # openbw-server's --race only understands zerg/terran/protoss.
+        # Control server resolves 'random' → concrete race before
+        # calling us (see games.py:_resolve_races), so every slot
+        # should carry one of zerg/terran/protoss. The `in` guard
+        # is belt-and-suspenders for older DB rows.
         if race in ("zerg", "terran", "protoss"):
             args.extend(["--race", f"{i}={race}"])
     for alias, hex_hash, slot in user_hashes:

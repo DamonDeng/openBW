@@ -21,6 +21,7 @@ pre-filled with the last inputs. Keeps the server state tiny.
 """
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
@@ -37,6 +38,25 @@ NONE_SLOT = "None"
 
 # 4-hour TTL on pending invitations, per M4 decisions.
 INVITATION_TTL = timedelta(hours=4)
+
+# Race resolution ----------------------------------------------------
+# The control server owns race selection so the DB is the single
+# source of truth. `random` is resolved into a concrete race at
+# create() time — that way the observer, replay, and analytics all
+# see the same value and don't have to re-derive it from the wire.
+_CONCRETE_RACES = ("protoss", "terran", "zerg")
+
+
+def _resolve_races(races: list[str]) -> list[str]:
+    """Replace any 'random' entry with a uniformly-picked concrete
+    race. Uses secrets.choice for cryptographic-grade uniformity
+    (overkill, but our only randomness source that isn't the game's
+    own RNG stream — and this decision precedes the game so it must
+    not perturb it)."""
+    return [
+        secrets.choice(_CONCRETE_RACES) if r == "random" else r
+        for r in races
+    ]
 
 
 def _real_players(player_aliases: list[str | None]) -> list[str]:
@@ -130,12 +150,17 @@ def create(
 
     invitees = [a for a in real if a != creator.alias]
 
+    # Resolve 'random' NOW so the DB is authoritative. Observers,
+    # analytics, and replays all read game.races directly and don't
+    # have to re-derive from the wire.
+    resolved_races = _resolve_races(races)
+
     game_id = k8s_client.make_game_id()
     game = Game(
         id=game_id,
         owner_user_id=creator.id,
         map=map_name,
-        races=races,
+        races=resolved_races,
         player_aliases=list(player_aliases),
         state="pending_invitations" if invitees else "running",
     )
