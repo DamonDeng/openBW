@@ -40,11 +40,57 @@
       font-size: 14px;
     }
     .fatal a { color: #9ec4ff; }
+    /* Asset-picker overlay. Full-screen dark card with a drop zone
+       and a folder-picker input. */
+    #picker {
+      padding: 24px 32px; max-width: 640px; margin: 24px auto;
+      background: #141821; border: 1px solid #262c36; border-radius: 6px;
+      color: #e6e6e6; font-size: 13px; line-height: 1.5;
+    }
+    #picker h2 { margin: 0 0 12px 0; font-size: 16px; color: #9ec4ff; }
+    #picker p { margin: 8px 0; opacity: .85; }
+    #picker code { background: #0d0d0d; padding: 1px 5px;
+                    border-radius: 3px; font-size: 12px; }
+    #picker .dropzone {
+      margin: 16px 0; padding: 24px; text-align: center;
+      border: 2px dashed #384253; border-radius: 6px;
+      background: #0d0d0d; cursor: pointer;
+    }
+    #picker .dropzone:hover, #picker .dropzone.drag-over {
+      border-color: #6bd58a; background: #10160f;
+    }
+    #picker .btn-row { margin: 12px 0; }
+    #picker button, #picker label.file-btn {
+      background: #1c2430; color: #e6e6e6; border: 1px solid #384253;
+      border-radius: 4px; padding: 6px 12px; font-size: 12px;
+      cursor: pointer; display: inline-block; margin-right: 8px;
+    }
+    #picker button:hover, #picker label.file-btn:hover {
+      background: #263042;
+    }
+    #picker input[type=file] { display: none; }
+    #picker .file-list {
+      margin: 8px 0; font-family: ui-monospace, Menlo, monospace;
+      font-size: 11px;
+    }
+    #picker .file-list .ok  { color: #6bd58a; }
+    #picker .file-list .bad { color: #f26464; }
+    #picker .progress {
+      margin: 12px 0; height: 6px; background: #0d0d0d;
+      border-radius: 3px; overflow: hidden;
+    }
+    #picker .progress > div {
+      height: 100%; background: #6bd58a; width: 0%;
+      transition: width 120ms linear;
+    }
+    #picker .footer { margin-top: 16px; font-size: 11px; opacity: .6; }
+    #picker .footer a { color: #9ec4ff; cursor: pointer; }
   </style>
 </head>
 <body>
 
 <div id="fatal-holder"></div>
+<div id="picker-holder"></div>
 
 <div id="shell" style="display:none">
   <div id="topbar">
@@ -68,29 +114,40 @@
 </div>
 
 <script>
-// M5.a observer shell — popup at /simscapp/observer.html?game=<id>
+// M5.a-mpq observer shell.
 //
-// Boot sequence:
-//   1. Read `?game=<id>` from URL. If missing → show fatal.
-//   2. Read API key from localStorage.simsc_api_key. If missing →
-//      fatal with a "sign in from /simscapp/" link.
-//   3. Fetch /api/games/{id} with X-API-Key header. If the game is
-//      not running → fatal.
-//   4. From the response, take `observer_url` (already includes
-//      `?key=` per M3), `map`, `player_aliases`, `races`.
-//   5. Compute the local `.scm` filename the WASM data blob holds:
-//      it lives under `original_resources/<map>` in the WASM VFS.
-//   6. Set window.OPENBW_URL / OPENBW_MAP / OPENBW_RACES.
-//   7. Inject observer_wasm.js — that's when the emscripten runtime
-//      picks up the globals and main() runs.
+// Boot flow:
+//   1. Read ?game=<id> + API key. Fetch /api/games/{id}.
+//   2. Check IndexedDB for StarDat.mpq / BrooDat.mpq / Patch_rt.mpq
+//      and the game's .scm map. If any missing, render the picker
+//      overlay so the user selects their local BW folder (and, if
+//      needed, the map file separately).
+//   3. Once all 4 files are in IDB, load their bytes and inject
+//      them into the wasm VFS via Module.preRun.
+//   4. Inject observer_wasm.js; main() reads OPENBW_URL / MAP /
+//      RACES globals and starts.
 //
-// The API key never appears in this page's URL. The WSS URL that
-// goes to the ALB does carry ?key= — same trade-off as M3.
+// The .wasm bundle no longer ships MPQs or maps. That's both a
+// bandwidth win (~120 MB → ~2 MB per fresh cache) and a legal one
+// (Blizzard MPQs come from the user's own install, never our
+// server).
 
 (async function () {
   const KEY_STORAGE = 'simsc_api_key';
-  const fatalHolder = document.getElementById('fatal-holder');
-  const shell = document.getElementById('shell');
+  const IDB_NAME    = 'simsc_openbw_assets';
+  const IDB_STORE   = 'files';
+  const IDB_VERSION = 1;
+  const MPQ_NAMES   = ['startdat.mpq', 'broodat.mpq', 'patch_rt.mpq'];
+  // Wasm-side canonical filenames (case-preserving for VFS write).
+  const MPQ_VFS     = {
+    'startdat.mpq': 'StarDat.mpq',
+    'broodat.mpq':  'BrooDat.mpq',
+    'patch_rt.mpq': 'Patch_rt.mpq',
+  };
+
+  const fatalHolder  = document.getElementById('fatal-holder');
+  const pickerHolder = document.getElementById('picker-holder');
+  const shell        = document.getElementById('shell');
 
   function fatal(msg, showSignInLink) {
     const p = document.createElement('div');
@@ -106,6 +163,8 @@
     fatalHolder.appendChild(p);
   }
 
+  // ---- Step 1: bootstrap params + game detail ----
+
   const params = new URLSearchParams(location.search);
   const gameId = params.get('game');
   if (!gameId) {
@@ -118,7 +177,6 @@
     return;
   }
 
-  // 1. Fetch game detail.
   let game;
   try {
     const resp = await fetch(`/api/games/${encodeURIComponent(gameId)}`, {
@@ -142,115 +200,366 @@
     fatal(`Failed to load game: ${e.message}`, false);
     return;
   }
-
   if (!game.observer_url) {
     fatal(`Game is <code>${game.state}</code>, no observer URL yet.`, false);
     return;
   }
 
-  // 2. Reveal the shell and hand params to the wasm module.
-  shell.style.display = '';
-  document.title = `simsc observer — ${game.game_id}`;
-  document.getElementById('game-info').textContent =
-    `${game.map} — ${(game.player_aliases || []).map(a => a || '—').join(' vs ')}`;
+  // Filename the wasm C++ side will fopen (see observer_wasm.cpp:
+  // args.map_path = "original_resources/" + game.map).
+  const mapBasename = game.map;
+  const mapKey = mapBasename.toLowerCase();
 
-  // The WASM data blob bundles maps under `original_resources/`. See
-  // wasm/build_observer_wasm.sh (--preload-file). We just have to
-  // point OPENBW_MAP at the right filename inside that VFS.
-  window.OPENBW_URL   = game.observer_url;
-  window.OPENBW_MAP   = `original_resources/${game.map}`;
-  // Comma-separated per-slot races; "random" -> empty (use map default).
-  window.OPENBW_RACES = (game.races || [])
-    .map(r => (r === 'random' ? '' : r)).join(',');
+  // ---- Step 2: IndexedDB helpers ----
 
-  // Console mirror.
-  const consoleBox = document.getElementById('console-box');
-  function appendLog(t) {
-    consoleBox.textContent += t + '\n';
-    consoleBox.scrollTop = consoleBox.scrollHeight;
+  function idbOpen() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore(IDB_STORE, { keyPath: 'name' });
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror   = () => reject(req.error);
+    });
+  }
+  function idbGet(db, name) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const req = tx.objectStore(IDB_STORE).get(name);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror   = () => reject(req.error);
+    });
+  }
+  function idbPut(db, rec) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const req = tx.objectStore(IDB_STORE).put(rec);
+      req.onsuccess = () => resolve();
+      req.onerror   = () => reject(req.error);
+    });
+  }
+  function idbClear(db) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const req = tx.objectStore(IDB_STORE).clear();
+      req.onsuccess = () => resolve();
+      req.onerror   = () => reject(req.error);
+    });
   }
 
-  // Debug harness — same shape as wasm/observer_shell.html.
-  window.OPENBW_PAUSED = false;
-  window.OPENBW_STEP = 0;
-  const pauseStatus = document.getElementById('pause-status');
-  function refreshPauseStatus() {
-    pauseStatus.textContent = window.OPENBW_PAUSED
-      ? '⏸ paused  (STEP=' + window.OPENBW_STEP + ')' : '';
+  // ---- Step 3: probe cache; render picker if anything missing ----
+
+  const db = await idbOpen();
+  const need = [...MPQ_NAMES, mapKey];
+  const cached = {};
+  for (const n of need) {
+    cached[n] = await idbGet(db, n);
   }
-  document.getElementById('btn-pause').onclick = () => {
-    window.OPENBW_PAUSED = true; refreshPauseStatus();
-  };
-  document.getElementById('btn-play').onclick = () => {
-    window.OPENBW_PAUSED = false; window.OPENBW_STEP = 0; refreshPauseStatus();
-  };
-  document.getElementById('btn-step').onclick = () => {
-    window.OPENBW_PAUSED = true; window.OPENBW_STEP += 1; refreshPauseStatus();
-  };
-  document.getElementById('btn-step10').onclick = () => {
-    window.OPENBW_PAUSED = true; window.OPENBW_STEP += 10; refreshPauseStatus();
-  };
-  document.getElementById('btn-log').onclick = () => {
-    if (!window.Module || !window.Module.ccall || !window.Module.HEAPU8) {
-      appendLog('[shell] sync-log: wasm module not ready yet'); return;
-    }
-    const size = window.Module.ccall('openbw_sync_log_size', 'number', [], []);
-    if (size === 0) {
-      appendLog('[shell] sync-log is empty (game may not have started)'); return;
-    }
-    const ptr = window.Module.ccall('openbw_sync_log_ptr', 'number', [], []);
-    const bytes = new Uint8Array(window.Module.HEAPU8.buffer, ptr, size).slice();
-    const blob = new Blob([bytes], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    a.href = url;
-    a.download = `simsc-obs-${gameId}-${stamp}.log`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    appendLog('[shell] downloaded sync-log (' + size + ' bytes)');
-  };
-  // Space toggles pause, right-arrow single steps.
-  document.getElementById('canvas').addEventListener('keydown', (e) => {
-    if (e.code === 'Space') {
-      window.OPENBW_PAUSED = !window.OPENBW_PAUSED;
-      window.OPENBW_STEP = 0; refreshPauseStatus(); e.preventDefault();
-    } else if (e.code === 'ArrowRight') {
-      window.OPENBW_PAUSED = true;
-      window.OPENBW_STEP += e.shiftKey ? 10 : 1;
-      refreshPauseStatus(); e.preventDefault();
-    }
-  });
-  document.getElementById('canvas').addEventListener('click', () => {
-    if (window.OPENBW_PAUSED) {
-      window.OPENBW_STEP += 1; refreshPauseStatus();
-    }
-  });
 
-  // 3. Emscripten module hook. Must be set before observer_wasm.js runs.
-  window.Module = {
-    canvas: document.getElementById('canvas'),
-    print:    (t) => { console.log(t); appendLog(t); },
-    printErr: (t) => { console.warn(t); appendLog(t); },
-    onRuntimeInitialized: () => {
-      document.getElementById('status').textContent = 'wasm running';
-    },
-    setStatus: (t) => {
-      if (t) document.getElementById('status').textContent = t;
-    },
-    monitorRunDependencies: (left) => {
-      const s = document.getElementById('status');
-      s.textContent = left > 0
-        ? 'loading assets (' + left + ' remaining)…'
-        : 'assets loaded';
-    },
-  };
+  if (need.every(n => cached[n])) {
+    // Fast path — nothing to pick. Boot straight into wasm.
+    return bootWasm(cached);
+  }
 
-  // 4. Kick it off. observer_wasm.js will fetch the .wasm + .data (~85 MB
-  // MPQ blob) and eventually call main(), which reads the OPENBW_* globals.
-  const s = document.createElement('script');
-  s.src = '/simscapp/observer_wasm.js';
-  document.body.appendChild(s);
+  // Slow path — render picker until we have every file.
+  renderPicker(cached);
+
+  // ---- Picker UI ----
+
+  function renderPicker(cachedInit) {
+    // Track per-file status. Values: File | ArrayBuffer | null.
+    // A File means "user picked but not yet read"; ArrayBuffer means
+    // "read + written to IDB"; null means "still needed".
+    const have = {};
+    for (const n of need) have[n] = cachedInit[n] ? cachedInit[n].bytes : null;
+
+    const el = document.createElement('div');
+    el.id = 'picker';
+    el.innerHTML = `
+      <h2>Brood War data files needed</h2>
+      <p>The in-browser observer plays back your game using StarCraft
+         Brood War's original graphics, audio, and unit data. Those come
+         from your local install — we do <strong>not</strong> ship
+         Blizzard's data files from our servers.</p>
+      <p>Pick the folder that contains <code>StarDat.mpq</code>,
+         <code>BrooDat.mpq</code>, and <code>Patch_rt.mpq</code>
+         — typically your Brood War install directory. The map file
+         <code>${mapBasename}</code> is also needed; it can be in the
+         same folder or picked separately below.</p>
+      <div class="dropzone" id="dropzone">
+        <div><strong>Drop your BW folder here</strong></div>
+        <div style="opacity:.6;font-size:11px;margin-top:6px">
+          or use the buttons below
+        </div>
+      </div>
+      <div class="btn-row">
+        <label class="file-btn">
+          Pick BW folder
+          <input type="file" id="folder-input" webkitdirectory directory multiple>
+        </label>
+        <label class="file-btn">
+          Pick individual files
+          <input type="file" id="files-input" multiple>
+        </label>
+      </div>
+      <div class="file-list" id="file-list"></div>
+      <div class="progress"><div id="progress-bar"></div></div>
+      <div class="footer">
+        Cached in your browser (IndexedDB). No files are ever uploaded.
+        <br>
+        <a id="clear-cache">Clear cached files</a>
+      </div>
+    `;
+    pickerHolder.appendChild(el);
+
+    const list       = el.querySelector('#file-list');
+    const progressEl = el.querySelector('#progress-bar');
+    const dropzone   = el.querySelector('#dropzone');
+
+    function refreshList() {
+      const rows = [];
+      for (const n of need) {
+        const label = MPQ_VFS[n] || mapBasename;
+        const ok = !!have[n];
+        rows.push(`<div class="${ok ? 'ok' : 'bad'}">
+          ${ok ? '✓' : '·'} ${label}
+        </div>`);
+      }
+      list.innerHTML = rows.join('');
+    }
+    refreshList();
+
+    function pctString() {
+      const got = need.filter(n => have[n]).length;
+      return (got / need.length * 100).toFixed(0) + '%';
+    }
+    async function ingestFiles(fileList) {
+      // Iterate every File. Match by lowercase basename against our
+      // needs. Silently ignore anything else (users often pick the
+      // whole StarCraft folder which has hundreds of unrelated files).
+      const files = Array.from(fileList);
+      // Sort so the biggest files (StarDat is 63 MB) start first —
+      // gives the user faster visible progress.
+      files.sort((a, b) => b.size - a.size);
+
+      let anyChange = false;
+      for (const f of files) {
+        const base = f.name.toLowerCase();
+        if (!need.includes(base)) continue;
+        if (have[base]) continue;  // already have it
+        try {
+          const buf = await f.arrayBuffer();
+          await idbPut(db, {
+            name:  base,
+            bytes: buf,
+            size:  buf.byteLength,
+            mtime: Date.now(),
+          });
+          have[base] = buf;
+          anyChange = true;
+          refreshList();
+          progressEl.style.width = pctString();
+        } catch (e) {
+          console.error('failed to read/store', f.name, e);
+        }
+      }
+      if (need.every(n => have[n])) {
+        // Everything present — remove overlay, boot wasm.
+        setTimeout(() => {
+          pickerHolder.innerHTML = '';
+          bootWasm(Object.fromEntries(
+            need.map(n => [n, { bytes: have[n] }])));
+        }, 200);
+      } else if (!anyChange) {
+        // User picked things but nothing matched — nudge them.
+        const missing = need.filter(n => !have[n])
+          .map(n => MPQ_VFS[n] || mapBasename).join(', ');
+        list.insertAdjacentHTML('beforeend',
+          `<div class="bad" style="margin-top:8px">
+             None of the files you picked matched. Still need: ${missing}.
+           </div>`);
+      }
+    }
+
+    el.querySelector('#folder-input').addEventListener('change', (e) => {
+      ingestFiles(e.target.files);
+    });
+    el.querySelector('#files-input').addEventListener('change', (e) => {
+      ingestFiles(e.target.files);
+    });
+    // Drag-and-drop of a folder or files.
+    dropzone.addEventListener('dragover', (e) => {
+      e.preventDefault(); dropzone.classList.add('drag-over');
+    });
+    dropzone.addEventListener('dragleave', () => {
+      dropzone.classList.remove('drag-over');
+    });
+    dropzone.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      dropzone.classList.remove('drag-over');
+      // DataTransfer -> list of File. If dropped item is a directory
+      // we need webkitGetAsEntry to walk it; a plain File list works
+      // for files dropped directly.
+      const dt = e.dataTransfer;
+      if (dt.items && dt.items[0] && dt.items[0].webkitGetAsEntry) {
+        const files = [];
+        const entries = [];
+        for (let i = 0; i < dt.items.length; i++) {
+          const en = dt.items[i].webkitGetAsEntry();
+          if (en) entries.push(en);
+        }
+        await Promise.all(entries.map(en => walkEntry(en, files)));
+        ingestFiles(files);
+      } else {
+        ingestFiles(dt.files);
+      }
+    });
+
+    el.querySelector('#clear-cache').addEventListener('click', async () => {
+      await idbClear(db);
+      location.reload();
+    });
+  }
+
+  // Walk a DirectoryEntry / FileEntry tree, pushing every File into
+  // `out`. Depth-first, but bounded — no cycle detection because
+  // the browser doesn't hand us cycle-forming entries via DnD.
+  function walkEntry(entry, out) {
+    return new Promise((resolve) => {
+      if (entry.isFile) {
+        entry.file(f => { out.push(f); resolve(); },
+                   () => resolve());
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+        reader.readEntries(async (children) => {
+          await Promise.all(children.map(c => walkEntry(c, out)));
+          resolve();
+        }, () => resolve());
+      } else resolve();
+    });
+  }
+
+  // ---- bootWasm(): wire preRun + inject observer_wasm.js ----
+
+  function bootWasm(files) {
+    // files: { name -> {bytes: ArrayBuffer} } with all needed entries.
+    shell.style.display = '';
+    document.title = `simsc observer — ${game.game_id}`;
+    document.getElementById('game-info').textContent =
+      `${game.map} — ${(game.player_aliases || []).map(a => a || '—').join(' vs ')}`;
+
+    window.OPENBW_URL   = game.observer_url;
+    window.OPENBW_MAP   = 'original_resources/' + game.map;
+    window.OPENBW_RACES = (game.races || [])
+      .map(r => (r === 'random' ? '' : r)).join(',');
+
+    // Console mirror.
+    const consoleBox = document.getElementById('console-box');
+    function appendLog(t) {
+      consoleBox.textContent += t + '\n';
+      consoleBox.scrollTop = consoleBox.scrollHeight;
+    }
+
+    // Debug harness — same shape as wasm/observer_shell.html.
+    window.OPENBW_PAUSED = false;
+    window.OPENBW_STEP = 0;
+    const pauseStatus = document.getElementById('pause-status');
+    function refreshPauseStatus() {
+      pauseStatus.textContent = window.OPENBW_PAUSED
+        ? '⏸ paused  (STEP=' + window.OPENBW_STEP + ')' : '';
+    }
+    document.getElementById('btn-pause').onclick = () => {
+      window.OPENBW_PAUSED = true; refreshPauseStatus();
+    };
+    document.getElementById('btn-play').onclick = () => {
+      window.OPENBW_PAUSED = false; window.OPENBW_STEP = 0; refreshPauseStatus();
+    };
+    document.getElementById('btn-step').onclick = () => {
+      window.OPENBW_PAUSED = true; window.OPENBW_STEP += 1; refreshPauseStatus();
+    };
+    document.getElementById('btn-step10').onclick = () => {
+      window.OPENBW_PAUSED = true; window.OPENBW_STEP += 10; refreshPauseStatus();
+    };
+    document.getElementById('btn-log').onclick = () => {
+      if (!window.Module || !window.Module.ccall || !window.Module.HEAPU8) {
+        appendLog('[shell] sync-log: wasm module not ready yet'); return;
+      }
+      const size = window.Module.ccall('openbw_sync_log_size', 'number', [], []);
+      if (size === 0) {
+        appendLog('[shell] sync-log is empty (game may not have started)'); return;
+      }
+      const ptr = window.Module.ccall('openbw_sync_log_ptr', 'number', [], []);
+      const bytes = new Uint8Array(window.Module.HEAPU8.buffer, ptr, size).slice();
+      const blob = new Blob([bytes], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      a.href = url;
+      a.download = `simsc-obs-${gameId}-${stamp}.log`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      appendLog('[shell] downloaded sync-log (' + size + ' bytes)');
+    };
+    document.getElementById('canvas').addEventListener('keydown', (e) => {
+      if (e.code === 'Space') {
+        window.OPENBW_PAUSED = !window.OPENBW_PAUSED;
+        window.OPENBW_STEP = 0; refreshPauseStatus(); e.preventDefault();
+      } else if (e.code === 'ArrowRight') {
+        window.OPENBW_PAUSED = true;
+        window.OPENBW_STEP += e.shiftKey ? 10 : 1;
+        refreshPauseStatus(); e.preventDefault();
+      }
+    });
+    document.getElementById('canvas').addEventListener('click', () => {
+      if (window.OPENBW_PAUSED) {
+        window.OPENBW_STEP += 1; refreshPauseStatus();
+      }
+    });
+
+    // Emscripten module hook — MUST be set before observer_wasm.js runs.
+    // preRun runs after the runtime is up (FS is available) but before
+    // main(). Inside it we mkdir + writeFile the 4 files the C++ side
+    // will fopen: data_files_directory() at observer_wasm.cpp:355 eagerly
+    // opens Patch_rt.mpq, BrooDat.mpq, StarDat.mpq; load_map_file() at
+    // line 377 then opens the map. All must be present before main()
+    // starts.
+    window.Module = {
+      canvas: document.getElementById('canvas'),
+      print:    (t) => { console.log(t); appendLog(t); },
+      printErr: (t) => { console.warn(t); appendLog(t); },
+      preRun: [() => {
+        // FS is exposed thanks to -sEXPORTED_RUNTIME_METHODS=['FS'].
+        try { Module.FS.mkdir('/original_resources'); }
+        catch (e) { /* already exists — fine */ }
+        for (const n of MPQ_NAMES) {
+          Module.FS.writeFile(
+            '/original_resources/' + MPQ_VFS[n],
+            new Uint8Array(files[n].bytes));
+        }
+        Module.FS.writeFile(
+          '/original_resources/' + mapBasename,
+          new Uint8Array(files[mapKey].bytes));
+        appendLog('[shell] injected ' + (MPQ_NAMES.length + 1) +
+                  ' files into wasm VFS');
+      }],
+      onRuntimeInitialized: () => {
+        document.getElementById('status').textContent = 'wasm running';
+      },
+      setStatus: (t) => {
+        if (t) document.getElementById('status').textContent = t;
+      },
+      monitorRunDependencies: (left) => {
+        const s = document.getElementById('status');
+        s.textContent = left > 0
+          ? 'loading assets (' + left + ' remaining)…'
+          : 'assets loaded';
+      },
+    };
+
+    const s = document.createElement('script');
+    s.src = '/simscapp/observer_wasm.js';
+    document.body.appendChild(s);
+  }
 })();
 </script>
 

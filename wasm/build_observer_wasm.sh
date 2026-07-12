@@ -61,10 +61,13 @@ EMSCRIPTEN_FLAGS=(
     # for a PoC that's fine. Later optimizations: pin a subset via
     # -sASYNCIFY_ADD or migrate to jspi.
     -sASYNCIFY_STACK_SIZE=32768
-    # Bake all of original_resources/ into a .data blob at the same
-    # path in the emscripten VFS. observer_wasm.cpp reads relative
-    # paths like "original_resources/(2)Bottleneck.scm".
-    --preload-file original_resources
+    # NO --preload-file: as of M5.a-mpq the MPQs + map file are
+    # supplied by the end user, cached client-side in IndexedDB,
+    # and injected into the emscripten VFS via Module.preRun.
+    # See simsc/app/static/simscapp/observer.html.
+    # Rationale: (a) MPQ contents are Blizzard-owned so we can't
+    # ship them from our servers, and (b) the 120 MB blob was a
+    # cold-cache tax on every fresh browser.
     # We do NOT use --shell-file. Instead we ship a plain
     # observer_shell.html that manually loads observer_wasm.js
     # via a script tag. That way we don't have to deal with
