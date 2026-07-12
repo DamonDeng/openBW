@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>simsc admin</title>
+  <style>
+    body { background:#0e1116;color:#e6e6e6;font-family:system-ui,sans-serif;
+      padding:24px; }
+    table { border-collapse: collapse; margin-top: 16px; }
+    th,td { border:1px solid #333; padding:6px 10px; font-size:13px; text-align:left; }
+    button { background:#2a70e0;color:white;border:none;border-radius:6px;
+      padding:6px 12px;cursor:pointer;font-size:12px; }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+  <h1 id="admin-title"></h1>
+  <div id="not-admin" class="hidden"></div>
+  <div id="body" class="hidden">
+    <button id="refresh-btn">↻</button>
+    <table id="users-table">
+      <thead><tr>
+        <th>id</th><th>alias</th><th>email</th><th>display_name</th>
+        <th>is_admin</th><th>is_enabled</th><th>created</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <script src="/simscapp/i18n.js"></script>
+  <script>
+  (async function () {
+    const supported = ['en','zh-CN'];
+    let locale = localStorage.getItem('simsc_locale');
+    if (!supported.includes(locale)) locale = 'en';
+    const dict = await i18n.load(locale);
+    const t = (p, v) => i18n.t(dict, p, v);
+
+    document.title = t('admin.title');
+    document.getElementById('admin-title').textContent = t('admin.title');
+
+    const key = localStorage.getItem('simsc_api_key');
+    if (!key) {
+      window.location.href = '/simscapp/';
+      return;
+    }
+    const profile = await (await fetch('/api/me/profile',
+      { headers: { 'X-API-Key': key } })).json();
+    if (!profile.is_admin) {
+      const el = document.getElementById('not-admin');
+      el.textContent = t('admin.not_admin');
+      el.classList.remove('hidden');
+      return;
+    }
+    document.getElementById('body').classList.remove('hidden');
+    async function refresh() {
+      const rows = await (await fetch('/api/admin/users',
+        { headers: { 'X-API-Key': key } })).json();
+      const tb = document.querySelector('#users-table tbody');
+      tb.innerHTML = '';
+      for (const u of rows) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${u.id}</td><td>${u.alias}</td>` +
+          `<td>${u.email||''}</td><td>${u.display_name||''}</td>` +
+          `<td>${u.is_admin}</td><td>${u.is_enabled}</td>` +
+          `<td>${new Date(u.created_at).toISOString().slice(0,19)}</td>`;
+        tb.appendChild(tr);
+      }
+    }
+    document.getElementById('refresh-btn').onclick = refresh;
+    refresh();
+  })();
+  </script>
+</body>
+</html>

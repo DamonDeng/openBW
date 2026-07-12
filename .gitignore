@@ -5,6 +5,11 @@ original_resources/
 # Contents are secrets and machine-specific; never commit.
 test_resources/
 
+# AWS account details, IAM keys, isengard creds, cluster names, and
+# any other tenant-specific configuration. Machine- and account-
+# specific; contains secrets; never commit.
+aws_account_info/
+
 # Build outputs
 build/
 build_*/

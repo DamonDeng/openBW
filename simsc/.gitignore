@@ -1,0 +1,8 @@
+# Rendered manifests contain account IDs, ARNs, and pool IDs — never commit.
+deploy/*.yaml
+!deploy/*.yaml.tmpl
+
+# Python
+__pycache__/
+*.pyc
+.venv/

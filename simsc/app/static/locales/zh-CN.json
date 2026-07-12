@@ -1,0 +1,40 @@
+{
+  "meta": { "language_name": "简体中文" },
+
+  "welcome": {
+    "title": "欢迎使用 simsc",
+    "greeting": "你好,{name}。",
+    "greeting_fallback": "欢迎。",
+    "intro": "这里是进入 simsc 模拟环境的入口。你已通过 Cognito 完成登录;应用本身使用一个 API Key 与后端通信。",
+    "your_key_label": "你的 API Key",
+    "your_key_reveal_hint": "这把 Key 只显示一次。请立刻复制或下载 —— 你也可以稍后在应用内的“密钥”页面重新生成。",
+    "copy_button": "复制",
+    "download_button": "下载",
+    "saved_button": "我已保存",
+    "no_key_hint": "本浏览器已保存过 API Key。如需新的 Key,请到应用内的“密钥”页面创建。",
+    "enter_app_button": "进入应用",
+    "admin_console_button": "管理后台",
+    "sign_out_button": "退出登录",
+    "language_label": "语言"
+  },
+
+  "app": {
+    "title": "simsc",
+    "loading": "加载中…",
+    "welcome_line": "你好,{name}",
+    "no_key_prompt": "本浏览器还没有 API Key。请从 / 登录以自动填充,或在下方粘贴已有的 Key。",
+    "paste_key_label": "粘贴 API Key",
+    "paste_key_button": "保存"
+  },
+
+  "admin": {
+    "title": "simsc 管理",
+    "users_tab": "用户",
+    "not_admin": "你已登录,但没有管理员权限。"
+  },
+
+  "common": {
+    "sign_out": "退出",
+    "loading": "加载中…"
+  }
+}

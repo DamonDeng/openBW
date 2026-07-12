@@ -1,0 +1,40 @@
+{
+  "meta": { "language_name": "English" },
+
+  "welcome": {
+    "title": "Welcome to simsc",
+    "greeting": "Hi, {name}.",
+    "greeting_fallback": "Welcome.",
+    "intro": "This is your entry point to the simsc simulation environment. Your account is signed in via Cognito; the app itself uses an API key for all backend calls.",
+    "your_key_label": "Your API key",
+    "your_key_reveal_hint": "This key is shown ONCE. Copy or download it now — you can also regenerate later from the app's settings.",
+    "copy_button": "Copy",
+    "download_button": "Download",
+    "saved_button": "I've saved my key",
+    "no_key_hint": "Your API key is already saved in this browser. If you need a fresh one, use the Keys tab inside the app.",
+    "enter_app_button": "Enter app",
+    "admin_console_button": "Admin console",
+    "sign_out_button": "Sign out",
+    "language_label": "Language"
+  },
+
+  "app": {
+    "title": "simsc",
+    "loading": "Loading…",
+    "welcome_line": "Hi, {name}",
+    "no_key_prompt": "This browser has no API key yet. Sign in from /  to auto-populate one, or paste an existing key below.",
+    "paste_key_label": "Paste API key",
+    "paste_key_button": "Save key"
+  },
+
+  "admin": {
+    "title": "simsc admin",
+    "users_tab": "Users",
+    "not_admin": "You are signed in but do not have admin rights."
+  },
+
+  "common": {
+    "sign_out": "Sign out",
+    "loading": "Loading…"
+  }
+}

@@ -1,0 +1,58 @@
+---
+# Public paths — no Cognito. Same ALB (via group.name=simsc), evaluated
+# before the Cognito Ingress (group.order=10 < 100). See
+# aws_account_info/06_alb_split_spike.md for the two gotchas this
+# avoids: (1) never retrofit group.name on an existing Ingress;
+# (2) IAM policy must include elasticloadbalancing:SetRulePriorities.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: simsc-public
+  namespace: ${K8S_NAMESPACE}
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/group.name: simsc
+    alb.ingress.kubernetes.io/group.order: "10"
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+    alb.ingress.kubernetes.io/certificate-arn: ${ACM_CERT_ARN}
+    alb.ingress.kubernetes.io/load-balancer-name: simsc
+    alb.ingress.kubernetes.io/tags: project=simsc,environment=m2
+spec:
+  ingressClassName: alb
+  rules:
+    - host: ${SITE_HOST}
+      http:
+        paths:
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: simsc-app
+                port: { number: 80 }
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: simsc-app
+                port: { number: 80 }
+          - path: /simscapp
+            pathType: Prefix
+            backend:
+              service:
+                name: simsc-app
+                port: { number: 80 }
+          - path: /simscadmin
+            pathType: Prefix
+            backend:
+              service:
+                name: simsc-app
+                port: { number: 80 }
+          - path: /locales
+            pathType: Prefix
+            backend:
+              service:
+                name: simsc-app
+                port: { number: 80 }

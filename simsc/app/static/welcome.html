@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>simsc</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      background: #0e1116; color: #e6e6e6;
+      font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; margin: 0; padding: 24px; box-sizing: border-box;
+    }
+    .card {
+      max-width: 560px; width: 100%;
+      background: #151a21; border: 1px solid #262c36; border-radius: 12px;
+      padding: 28px 32px;
+    }
+    h1 { margin: 0 0 6px 0; font-size: 22px; }
+    p.greet { margin: 0 0 16px 0; font-size: 16px; opacity: .9; }
+    p.intro { margin: 12px 0 20px 0; font-size: 13px; line-height: 1.6; opacity: .8; }
+    label { display: block; font-size: 12px; opacity: .7; margin: 14px 0 4px 0; }
+    .key-box {
+      display: flex; gap: 8px; align-items: center;
+      background: #0a0d12; border: 1px solid #2a3140; border-radius: 6px;
+      padding: 8px 10px; font-family: ui-monospace, Menlo, monospace;
+      font-size: 12px; word-break: break-all;
+    }
+    .btn-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    button, .btn {
+      background: #1c2430; color: #e6e6e6; border: 1px solid #384253;
+      border-radius: 6px; padding: 8px 16px; font-size: 13px;
+      cursor: pointer; text-decoration: none; display: inline-block;
+    }
+    button:hover, .btn:hover { background: #263042; }
+    button.primary, .btn.primary { background: #2a70e0; border-color: #2a70e0; }
+    button.primary:hover, .btn.primary:hover { background: #3580ee; }
+    .lang-row { position: absolute; top: 20px; right: 24px; font-size: 12px; }
+    .hint { font-size: 12px; opacity: .7; margin-top: 6px; }
+    .hidden { display: none !important; }
+    .key-reveal { margin: 16px 0; padding: 14px; background: #12211a;
+      border: 1px solid #2f5d3b; border-radius: 8px; }
+    .key-reveal h3 { margin: 0 0 8px 0; font-size: 14px; color: #6bd58a; }
+  </style>
+</head>
+<body>
+  <div class="lang-row">
+    <span id="lang-label"></span>:
+    <select id="lang-select"></select>
+  </div>
+
+  <div class="card">
+    <h1 id="w-title">Welcome</h1>
+    <p class="greet" id="w-greeting"></p>
+    <p class="intro" id="w-intro"></p>
+
+    <div id="key-reveal" class="key-reveal hidden">
+      <h3 id="w-key-label">Your API key</h3>
+      <div class="key-box"><code id="key-value"></code></div>
+      <p class="hint" id="w-key-hint"></p>
+      <div class="btn-row">
+        <button id="btn-copy"></button>
+        <button id="btn-download"></button>
+        <button id="btn-ack" class="primary"></button>
+      </div>
+    </div>
+
+    <div id="no-key-msg" class="hidden">
+      <p class="hint" id="w-no-key-hint"></p>
+    </div>
+
+    <div class="btn-row" style="margin-top: 24px;">
+      <a class="btn primary" href="/simscapp/" id="btn-enter"></a>
+      <a class="btn hidden" href="/simscadmin/" id="btn-admin"></a>
+      <a class="btn" href="/ui/logout" id="btn-logout"></a>
+    </div>
+  </div>
+
+  <script src="/simscapp/i18n.js"></script>
+  <script>
+  (async function () {
+    // Boot: pick locale from localStorage or default, load bundle, hydrate.
+    const supportedLocales = ['en', 'zh-CN'];
+    const savedLocale = localStorage.getItem('simsc_locale');
+    let locale = supportedLocales.includes(savedLocale) ? savedLocale : 'en';
+    const dict = await i18n.load(locale);
+
+    // Populate language switcher
+    const select = document.getElementById('lang-select');
+    for (const code of supportedLocales) {
+      const opt = document.createElement('option');
+      opt.value = code;
+      // We display the language's own name — load each bundle just for meta.language_name
+      const d = code === locale ? dict : await i18n.load(code);
+      opt.textContent = d.meta.language_name;
+      if (code === locale) opt.selected = true;
+      select.appendChild(opt);
+    }
+    select.addEventListener('change', () => {
+      localStorage.setItem('simsc_locale', select.value);
+      location.reload();
+    });
+
+    // Fetch whoami — Cognito is enforced by ALB before this page loads, so
+    // if we're here the OIDC header will be present on this same-origin call.
+    let whoami = null;
+    try {
+      const resp = await fetch('/ui/whoami');
+      if (resp.ok) whoami = await resp.json();
+    } catch (e) {
+      console.error('whoami failed', e);
+    }
+
+    const t = (path, vars) => i18n.t(dict, path, vars);
+
+    document.title = t('welcome.title');
+    document.getElementById('w-title').textContent = t('welcome.title');
+    document.getElementById('lang-label').textContent = t('welcome.language_label');
+
+    const name = (whoami && (whoami.display_name || whoami.alias)) || '';
+    document.getElementById('w-greeting').textContent =
+      name ? t('welcome.greeting', { name }) : t('welcome.greeting_fallback');
+
+    document.getElementById('w-intro').textContent = t('welcome.intro');
+    document.getElementById('btn-enter').textContent = t('welcome.enter_app_button');
+    document.getElementById('btn-logout').textContent = t('welcome.sign_out_button');
+
+    if (whoami && whoami.is_admin) {
+      const admin = document.getElementById('btn-admin');
+      admin.textContent = t('welcome.admin_console_button');
+      admin.classList.remove('hidden');
+    }
+
+    if (whoami && whoami.api_key) {
+      // Fresh reveal — show the box, mirror to localStorage for SPA
+      localStorage.setItem('simsc_api_key', whoami.api_key);
+      document.getElementById('key-reveal').classList.remove('hidden');
+      document.getElementById('w-key-label').textContent = t('welcome.your_key_label');
+      document.getElementById('w-key-hint').textContent = t('welcome.your_key_reveal_hint');
+      document.getElementById('key-value').textContent = whoami.api_key;
+      document.getElementById('btn-copy').textContent = t('welcome.copy_button');
+      document.getElementById('btn-download').textContent = t('welcome.download_button');
+      document.getElementById('btn-ack').textContent = t('welcome.saved_button');
+
+      document.getElementById('btn-copy').onclick = async () => {
+        try { await navigator.clipboard.writeText(whoami.api_key); }
+        catch (e) { console.error(e); }
+      };
+      document.getElementById('btn-download').onclick = () => {
+        const blob = new Blob([whoami.api_key + '\n'], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'simsc-api-key.txt';
+        a.click(); URL.revokeObjectURL(url);
+      };
+      document.getElementById('btn-ack').onclick = async () => {
+        await fetch('/ui/whoami/ack-key', { method: 'POST' });
+        document.getElementById('key-reveal').classList.add('hidden');
+      };
+    } else {
+      // Existing key — SPA can read it from localStorage; no reveal needed
+      document.getElementById('no-key-msg').classList.remove('hidden');
+      document.getElementById('w-no-key-hint').textContent = t('welcome.no_key_hint');
+    }
+  })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,72 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simsc-app
+  namespace: ${K8S_NAMESPACE}
+spec:
+  # ONE replica. This pod holds Postgres locally on a PVC — we can't
+  # roll a second concurrently. Blue/green needs a different topology.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: simsc-app
+  template:
+    metadata:
+      labels:
+        app: simsc-app
+    spec:
+      containers:
+        - name: app
+          image: ${ECR_IMAGE}:${IMAGE_TAG}
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: COGNITO_POOL_ID
+              value: ${COGNITO_POOL_ID}
+            - name: COGNITO_CLIENT_ID
+              value: ${COGNITO_CLIENT_ID}
+            - name: COGNITO_DOMAIN
+              value: ${COGNITO_DOMAIN}
+            - name: COGNITO_REGION
+              value: ${COGNITO_REGION}
+            - name: SITE_ORIGIN
+              value: ${SITE_ORIGIN}
+          envFrom:
+            - secretRef:
+                name: simsc-app-env
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   { cpu: 1000m, memory: 1Gi }
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/16/main
+      volumes:
+        - name: pgdata
+          persistentVolumeClaim:
+            claimName: simsc-pgdata
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simsc-app
+  namespace: ${K8S_NAMESPACE}
+spec:
+  type: ClusterIP
+  selector:
+    app: simsc-app
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
