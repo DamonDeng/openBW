@@ -1309,6 +1309,31 @@ struct sync_functions: action_functions {
 					seed ^= v;
 				}
 			}
+			// Anti-replay UID mixing happens ON THE SERVER ONLY, and the
+			// resulting authoritative rand_state is what we broadcast to
+			// observers. Observers must NOT re-XOR the wire value with
+			// their own client list -- their sync_st.clients has a
+			// different membership from the server's (server sees agent
+			// virtual clients + all observers; each observer sees only
+			// itself + the server-as-peer, and generally does not see
+			// its fellow observers). If each side XORed its own list,
+			// each peer would land on a different initial_rand and
+			// their LCG chains would diverge from frame 1. See task #138.
+			//
+			// Note: fixed_initial_rand overrides this entirely (see
+			// start_game(seed) below); it's handled by servers running
+			// deterministic soak tests.
+			if (sync_st.fixed_initial_rand) {
+				seed = sync_st.fixed_initial_rand_value;
+			} else if (sync_st.auth_check) {
+				// Server-side path: mix in our own client UIDs to get
+				// the anti-replay initial_rand. Observers arriving here
+				// (auth_check == nullptr) skip this mix.
+				a_string seed_str;
+				for (auto& v : sync_st.clients) seed_str += v.uid.str();
+				seed ^= data_loading::crc32_t()(
+					(const uint8_t*)seed_str.data(), seed_str.size());
+			}
 			w.put<uint32_t>(seed);
 			send(w);
 		}
@@ -1548,19 +1573,26 @@ struct sync_functions: action_functions {
 		}
 
 		void start_game(uint32_t seed) {
-			// Bypass UID-XOR mix when the caller has pinned an exact
-			// initial LCG state via --fixed-initial-rand. Used by
-			// deterministic soak-test repros where identical bytes
-			// across runs matter more than anti-replay mixing.
+			// `seed` is the wire value from id_start_game and is
+			// ALREADY MIXED with the server's own client UIDs by
+			// send_start_game() (which is only meaningful on the
+			// server; observers ship the wire value verbatim). So
+			// every peer arrives here with the same value in `seed`
+			// -- we just adopt it as the initial LCG state.
+			//
+			// This function is invoked from process_messages after
+			// the game_starting_countdown ticks to 0, on both server
+			// (via local-loopback of its own id_start_game) and
+			// observer (via wire receipt).
+			//
+			// --fixed-initial-rand overrides everything for
+			// deterministic soak-test repros.
 			if (sync_st.fixed_initial_rand) {
 				start_game_impl(sync_st.fixed_initial_rand_value,
 				                /*broadcast=*/true);
 				return;
 			}
-			a_string seed_str;
-			for (auto& v : sync_st.clients) seed_str += v.uid.str();
-			uint32_t rand_state = seed ^ data_loading::crc32_t()((const uint8_t*)seed_str.data(), seed_str.size());
-			start_game_impl(rand_state, /*broadcast=*/true);
+			start_game_impl(seed, /*broadcast=*/true);
 		}
 
 		// Same as start_game(seed) but takes the already-mixed
