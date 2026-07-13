@@ -258,7 +258,13 @@ int main(int argc, char** argv) {
 	loop_state loop_st;
 
 	QTimer sim_timer;
-	sim_timer.setInterval(42);   // BW fastest
+	// Sim tick has to be at least as fast as the server's tick_ms
+	// or sync.h stalls waiting for us to catch up. Server can be as
+	// fast as --game-speed 10 (100 ticks/sec = 10 ms/tick). A 10 ms
+	// timer keeps up in all cases; on slower speeds we just repeat
+	// no-op next_frames until server catches up, at trivial cost.
+	// (The SDL observer does the same thing with a 1 ms sleep loop.)
+	sim_timer.setInterval(10);
 	QObject::connect(&sim_timer, &QTimer::timeout, &app,
 		[&funcs, &server, &sync_st, &ui, &loop_st]() {
 		funcs.next_frame(server);
@@ -286,6 +292,20 @@ int main(int argc, char** argv) {
 			ui::log("[simsc_app] viewing perspective: slot=%d\n",
 				(int)sync_st.viewing_slot);
 			loop_st.last_slot = sync_st.viewing_slot;
+		}
+
+		// Diagnostic: print local sim frame every 300 sim frames. Lets us
+		// tell "we are falling behind the server" (frame numbers barely
+		// advancing) from "we are up-to-date but rendering wrong pixels"
+		// (frames advance normally, screen is stale). SyncBreaker
+		// scenarios look like the latter.
+		{
+			static int last_printed = -1;
+			if (cf > 0 && cf != last_printed && cf % 300 == 0) {
+				ui::log("[simsc_app] local_frame=%d sync_frame=%u\n",
+					cf, (unsigned)sync_st.sync_frame);
+				last_printed = cf;
+			}
 		}
 		ui.update();
 	});

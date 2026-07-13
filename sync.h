@@ -456,6 +456,29 @@ struct sync_functions: action_functions {
 	template<typename server_T>
 	void next_frame(server_T& server) {
 		sync(server);
+		// Don't advance the sim until the game has actually started.
+		// Server's pre-game busy-loop uses raw sync() and holds
+		// st.current_frame at 0 until sync_st.game_started flips.
+		// Observers historically called next_frame() unconditionally
+		// from their main loop, which meant action_functions::next_frame
+		// bumped st.current_frame every iteration while waiting for
+		// the countdown. By the time game_started flipped on the
+		// observer, its st.current_frame had drifted N frames past
+		// zero (N == number of pre-game main-loop iterations), while
+		// the server's stayed pinned. That desynced sim_frame between
+		// the two sides for the rest of the game: server applies an
+		// action at st.current_frame=15, observer applies same action
+		// at st.current_frame=34, so unit positions / iscript timers /
+		// build validity all evaluate against different game-state
+		// instants. The two sims silently forked.
+		//
+		// Fix: match the server's shape by skipping the sim-advance
+		// path until game_started. sync() alone is still needed to
+		// pump the message queue so id_start_game / id_catchup_data
+		// can arrive and flip game_started to true. See
+		// docs/syncbreaker5_debug_2026-07-13/findings.md for the
+		// full trace showing the 19-frame offset.
+		if (!sync_st.game_started) return;
 		action_functions::next_frame();
 		// LCG snapshot every sim frame (was every 30 -- bumped for a
 		// bisect-the-race investigation). Cost: 1 short line per frame

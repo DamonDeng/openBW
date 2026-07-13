@@ -534,7 +534,15 @@ struct qt_surface : surface {
 		if (!image || !dst || !dst->image) return;
 		QPainter painter(dst->image);
 		painter.setCompositionMode(composition_mode(blend));
-		if (alpha_mod < 255) {
+		// SDL semantics: alpha-mod is a no-op when the surface's blend
+		// mode is BLENDMODE_NONE (see SDL_SetSurfaceAlphaMod docs).
+		// ui.h relies on this -- it calls set_alpha(0) on rgba_surface
+		// and window_surface at startup as a "just in case" reset, then
+		// never touches it again. If we applied opacity=0 with blend=
+		// none here, every frame would paint with 0% opacity -> black
+		// window. Match SDL's rule: only apply alpha when a blend mode
+		// is actually engaged.
+		if (blend != blend_mode::none && alpha_mod < 255) {
 			painter.setOpacity(alpha_mod / 255.0);
 		}
 		if (w_scale > 0 && h_scale > 0) {

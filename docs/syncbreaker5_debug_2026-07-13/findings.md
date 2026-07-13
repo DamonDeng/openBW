@@ -1,3 +1,20 @@
+# SyncBreaker #5 — RESOLVED (2026-07-13, same day, one-line fix)
+
+**Update: fixed in a follow-up commit later this session. sync.h
+`sync_functions::next_frame` now short-circuits on
+`!sync_st.game_started`; the observer's `st.current_frame` stays
+pinned at 0 during pre-game just like the server's. Post-fix the
+observer's LCG chain matches the server's byte-for-byte at every
+INVENTORY snapshot (verified through frame 4500 on the repro
+config). The 19-frame phase-shift documented below was the root
+cause of what appeared to be a downstream late-join replay bug —
+turns out there was never a late-join scenario, just an
+observer-side pre-game sim drift.**
+
+The rest of this file is preserved as the investigation trail.
+
+---
+
 # SyncBreaker #5 — new findings from 2-player P v T repro (2026-07-13)
 
 ## What we did
