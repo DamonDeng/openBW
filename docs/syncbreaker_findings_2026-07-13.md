@@ -140,3 +140,120 @@ Retention: these are `/tmp` files. Kept as long as this Mac
 doesn't reboot. If the finding needs to be independently
 re-verified, re-run `scripts/soak_sync_debug.sh` — the setup is
 deterministic given the same `seed` (default 42).
+
+---
+
+## Follow-up: v2 combat soak result
+
+Same setup as the v1 soak above, but agents are `t_agent_debug_v2`
+and `p_agent_debug_v2` (`scripts/soak_sync_debug_v2.sh`). These
+add a Priority-8 attack pass:
+  - 3/4 of idle combat units attack-move to the map center.
+  - 1/4 attack-move to a random tile (re-rolled per unit per tick).
+  - Everything else (no scouts, no worker moves, no lift, no
+    repair, no mines, no coverage) stays disabled.
+
+The two players fought for real. Protoss decisively won —
+Terran ended with `bases=0`, all SCVs killed off. Protoss ended
+at `combat=46, buildings=35, supply=121/169, scarabs=10/10`.
+
+TICK-line diff (per-frame state hashes across 44,000+ frames):
+
+| pair                      | overlapping frames | diverged |
+|---------------------------|-------------------:|---------:|
+| obs_A vs server           |             43,782 |    **0** |
+| obs_B vs server           |             43,781 |    **0** |
+| obs_A vs obs_B            |             43,788 |    **0** |
+
+Wire traffic: **73,300 AGENT_APPLY events** processed. Byte-
+identical across all three logs.
+
+## Combined implications
+
+Neither peaceful (v1) nor combat (v2) soak produced any state-
+hash divergence. That covers:
+  - `train` / `build` / `upgrade` / `research` / `morph` /
+    `gather` / mining
+  - `attack` (both attack-move to point and attack-unit)
+  - Unit spawn / kill / death handling
+  - Multi-observer fan-out across two distinct observer clients
+
+The previously-observed divergence (yesterday's speed=10 soak
+with full v4/v5 agents at frame 24862) must originate from a
+code path that these two variants do NOT exercise:
+  - `phase_scout` — worker `c.move` orders to distant waypoints
+    with per-worker blacklists
+  - `c.stop` — the "coverage verb" post-move pass
+  - `c.lift` / `c.land` — Terran building flight
+  - `c.repair` — SCV movement onto damage targets
+  - `c.siege` / `c.unsiege` — sim-side tank transformation
+  - `c.place_mine` — Vulture mines with home->enemy vector logic
+  - `c.morph` / `c.morph_building` — Zerg (not on this map)
+
+Next candidate to bisect: enable ONE of those verbs at a time
+in a v3/v4 variant and see which one reintroduces divergence.
+Best first candidate is `phase_scout`, since it's the most
+prolific `c.move` source and the yesterday-observed drift did
+happen with the full scout pass enabled.
+
+---
+
+## Follow-up 2: v2 combat soak P-v-P
+
+Runbook: `scripts/soak_sync_debug_v2_pvp.sh`. Same as v2 T-v-P
+but both slots are Protoss driven by `p_agent_debug_v2`. Mirror
+match runs longer before one side collapses.
+
+Duration: server frame 45,434 (~30 min game time). Player B
+(slot 1) dominated (99/169 supply vs A's 6/89).
+
+TICK-line diff (per-frame state hashes):
+
+| pair                      | overlapping frames | diverged |
+|---------------------------|-------------------:|---------:|
+| obs_A vs server           |             45,033 |    **0** |
+| obs_B vs server           |             45,034 |    **0** |
+| obs_A vs obs_B            |             45,042 |    **0** |
+
+Wire traffic: **43,084 AGENT_APPLY events**. Byte-identical
+across all three logs.
+
+## Cumulative evidence
+
+Three independent multi-thousand-frame soaks, all localhost, all
+native SDL observers, all with two distinct observer clients:
+
+| soak                      | total frames | diverged |
+|---------------------------|-------------:|---------:|
+| v1 peaceful (T-v-P)       |       31,218 |        0 |
+| v2 combat (T-v-P)         |       43,782 |        0 |
+| v2 combat P-v-P           |       45,033 |        0 |
+| **total**                 |  **120,033** |    **0** |
+
+Every state hash (h0..h7, hN, LCG) matches on every frame across
+server + 2 observers on 120,000+ frames covering both peaceful
+production and full-tempo combat.
+
+## Where the bugs really live
+
+By elimination, sync divergence must originate in one of the
+verbs the debug agents deliberately don't use:
+
+- `phase_scout` — worker `c.move` to distant waypoints (radial /
+  zscan patrol). Most prolific `c.move` source in the full agent.
+- `c.stop` (Priority 9 coverage) — post-move stop verb.
+- `c.lift` / `c.land` — Terran building airborne state.
+- `c.repair` — SCV movement onto damaged targets.
+- `c.siege` / `c.unsiege` — sim-side tank state transformation.
+- `c.place_mine` — Vulture mine placement.
+- `c.morph` / `c.morph_building` — Zerg (not exercised on
+  Bottleneck since it has no Zerg starting positions).
+
+Yesterday's Terran-observer divergence at frame 24862 happened
+while the full `t_agent_v5` + `p_agent_v4` were running, so the
+guilty verb is a subset of that list.
+
+The natural bisection is a series of `_debug_v3.<verb>` variants
+that enable exactly ONE of those passes on top of v2. If v3.scout
+diverges but v3.repair doesn't, we've pinned scout as the culprit.
+
