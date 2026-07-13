@@ -1,0 +1,62 @@
+{
+  "initial_rand": {
+    "server": "8bbfd0d3",
+    "qt_slot0": "8bbfd0d3",
+    "qt_slot1": "8bbfd0d3"
+  },
+  "lcg_check": {
+    "qt_slot0": {
+      "shared": 27966,
+      "mismatches": 12055
+    },
+    "qt_slot1": {
+      "shared": 30177,
+      "mismatches": 12431
+    }
+  },
+  "inv_check": {
+    "qt_slot0": {
+      "shared": 186,
+      "mismatches": 80
+    },
+    "qt_slot1": {
+      "shared": 202,
+      "mismatches": 84
+    }
+  },
+  "apply_check": {
+    "qt_slot0": {
+      "srv": 20394,
+      "obs": 12460,
+      "missing": 4444,
+      "spurious": 0
+    },
+    "qt_slot1": {
+      "srv": 20394,
+      "obs": 12916,
+      "missing": 4078,
+      "spurious": 0
+    }
+  },
+  "cross_check": {
+    "shared": 27966,
+    "mismatches": 12199
+  },
+  "notes": [],
+  "server_frames": [
+    1,
+    35324
+  ],
+  "pass": false,
+  "round": 4,
+  "races": {
+    "slot0": "zerg",
+    "slot1": "protoss"
+  },
+  "launch_order": [
+    "agent_slot0",
+    "agent_slot1",
+    "qt_slot1",
+    "qt_slot0"
+  ]
+}
