@@ -59,6 +59,16 @@ struct args_t {
 	int screen_height = 800;
 	std::string api_key;
 	std::string sync_log_path;
+	// WS path on the server. Default is "/observer" (what plain
+	// openbw_server exposes). Override this when going through the
+	// simsc ALB, which path-routes /game/{id}/observer -> pod:6114.
+	std::string ws_path = "/observer";
+	// HTTP Host header. Set to the ALB's virtual host name (e.g.
+	// simsc.agentnumber47.com) when connecting through a local TLS
+	// proxy — otherwise the ALB refuses the request. See docs on
+	// running against remote simsc: point --server at a local
+	// socat/stunnel that TLS-wraps to the ALB.
+	std::string host_header;
 	// -1 = "no override, use map default". Values 0/1/2 = zerg/terran/
 	// protoss (matches bwgame::race_t and server's --race parsing).
 	// The launcher script must pass the SAME --race args here as on
@@ -86,6 +96,8 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--height") && i + 1 < argc) a.screen_height = std::atoi(argv[++i]);
 		else if (eq("--api-key") && i + 1 < argc) a.api_key = argv[++i];
 		else if (eq("--sync-log") && i + 1 < argc) a.sync_log_path = argv[++i];
+		else if (eq("--path") && i + 1 < argc) a.ws_path = argv[++i];
+		else if (eq("--host-header") && i + 1 < argc) a.host_header = argv[++i];
 		else if (eq("--race") && i + 1 < argc) {
 			// Format: N=zerg|terran|protoss. Server-side race
 			// (server/main.cpp:104 parse_race_override) uses the
@@ -136,7 +148,19 @@ args_t parse_args(int argc, char** argv) {
 				"               match the server's --race args or observer will show\n"
 				"               wrong-race starting units. Repeat per slot.\n"
 				"  --sync-log <path>  append per-frame agent-action events to <path>.\n"
-				"                     Diff against server's sync-log to find replay divergence.\n",
+				"                     Diff against server's sync-log to find replay divergence.\n"
+				"  --path <p>   WS path on the server (default: /observer). Use\n"
+				"               /game/<id>/observer when connecting through the simsc ALB.\n"
+				"  --host-header <h>  HTTP Host header (default: none). Set to the\n"
+				"               virtual host of the ALB (e.g. simsc.agentnumber47.com)\n"
+				"               when connecting through a local TLS proxy such as socat.\n"
+				"               Example (local socat wraps TLS to remote ALB):\n"
+				"                 socat TCP-LISTEN:8443,reuseaddr,fork \\\n"
+				"                   OPENSSL:simsc.agentnumber47.com:443 &\n"
+				"                 ./openbw_observer --server 127.0.0.1:8443 \\\n"
+				"                   --path /game/<id>/observer \\\n"
+				"                   --host-header simsc.agentnumber47.com \\\n"
+				"                   --api-key sk-... --map <path>\n",
 				argv[0]);
 			std::exit(0);
 		} else {
@@ -242,11 +266,14 @@ int main(int argc, char** argv) {
 	// after the WS handshake completes (matches the pre-WS raw-TCP flow).
 	// Both look up the same user_registry entry server-side.
 	sync_server_asio_ws server;
-	server.client_url_path = "/observer";
-	server.client_api_key  = args.api_key; // safe if empty
+	server.client_url_path    = args.ws_path;
+	server.client_api_key     = args.api_key;      // safe if empty
+	server.client_host_header = args.host_header;  // safe if empty
 	server.connect(a_string(args.server_host.c_str()), args.server_port);
-	ui::log("[obs] connecting to ws://%s:%d/observer ...\n",
-		args.server_host.c_str(), args.server_port);
+	ui::log("[obs] connecting to ws://%s:%d%s (Host: %s) ...\n",
+		args.server_host.c_str(), args.server_port,
+		args.ws_path.c_str(),
+		args.host_header.empty() ? "localhost" : args.host_header.c_str());
 
 	// 3. Now create the window. Pump the io_service a few times while we
 	//    wait for the window to open, so the async_connect callback fires

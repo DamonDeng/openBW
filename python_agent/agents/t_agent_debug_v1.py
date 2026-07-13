@@ -1,4 +1,29 @@
-"""t_agent_v5: v4 + Terran-tactical actions.
+"""t_agent_debug_v1: sync stress-test fork of t_agent_v5.
+
+Purpose: exercise sync.h's action fan-out to observers under high
+action rate WITHOUT any unit movement. Combat units and SCVs stand
+where the sim spawned them; buildings stay tight to the home
+cluster. Any visual or hash-level mismatch between two connected
+observers is then a real sync bug (not a consequence of one
+observer having missed a Move).
+
+Changes from t_agent_v5:
+  - phase_scout DISABLED — no worker roaming.
+  - Priority 7.4 (lift-to-safety) DISABLED — no building flight.
+  - Priority 7.5 (SCV repair) DISABLED — no SCV movement off the
+    mineral line.
+  - Priority 7.7 (auto-siege / unsiege) DISABLED.
+  - Priority 7.8 (Vulture Spider Mine drop) DISABLED — no Vulture
+    movement.
+  - Priority 8 (attack) DISABLED — combat units stay put.
+  - Priority 9 (coverage move/stop) DISABLED.
+  - _ANCHOR_STRATEGIES = ["nearest_own", ...] — buildings cluster.
+  - `toward_center` fallback clamped (t=0..0.1, jitter ±48).
+  - Default --interval-sec 0.1, --base-target 2.
+
+Original t_agent_v5 docstring below.
+
+t_agent_v5: v4 + Terran-tactical actions.
 
 Extends t_agent_v4 (SCV repair) with four new priority passes that
 finally use the Terran-specific verbs (siege / unsiege / place_mine /
@@ -215,7 +240,7 @@ def race_catalogs(race: str):
                 UNIT_TYPES_BY_NAME["Terran_SCV"],
                 UNIT_TYPES_BY_NAME["Terran_Supply_Depot"],
                 UNIT_TYPES_BY_NAME["Terran_Command_Center"])
-    raise SystemExit(f"[t_v5] race={race} not supported (this is the "
+    raise SystemExit(f"[t_dbg] race={race} not supported (this is the "
                      f"Terran agent -- use p_agent_v4 for Protoss)")
 
 
@@ -329,7 +354,7 @@ def verify_pending(pending: dict, obs: dict, stats: Stats,
         age = frame - p.issued_frame
         if cur_count > p.pre_count:
             stats.took[p.label()] += 1
-            print(f"[t_v5] TOOK  {p.label():48s} "
+            print(f"[t_dbg] TOOK  {p.label():48s} "
                   f"(count {p.pre_count}->{cur_count} after {age}f)")
             to_drop.append(key)
             continue
@@ -337,7 +362,7 @@ def verify_pending(pending: dict, obs: dict, stats: Stats,
             stats.reject[p.label()] += 1
             n = stats.reject[p.label()]
             if n == 1 or n % 5 == 0:
-                print(f"[t_v5] REJECT {p.label():48s} after {age}f. n={n}. "
+                print(f"[t_dbg] REJECT {p.label():48s} after {age}f. n={n}. "
                       f"pre min={p.pre_min} gas={p.pre_gas} count={p.pre_count}; "
                       f"now min={r['minerals']} gas={r['gas']} count={cur_count}")
             to_drop.append(key)
@@ -376,7 +401,7 @@ async def phase_mine(c: Client, obs: dict, worker_type: int,
                                    target_unit=target["unit_id"])
                     just_assigned.add(w["unit_id"])
                 except Exception as e:
-                    print(f"[t_v5]  gather-gas error: {e}")
+                    print(f"[t_dbg]  gather-gas error: {e}")
 
     if mfs:
         for w in wu:
@@ -389,7 +414,7 @@ async def phase_mine(c: Client, obs: dict, worker_type: int,
                 await c.gather(unit_id=w["unit_id"], target_unit=m["unit_id"])
                 just_assigned.add(w["unit_id"])
             except Exception as e:
-                print(f"[t_v5]  gather-min error: {e}")
+                print(f"[t_dbg]  gather-min error: {e}")
 
     return just_assigned
 
@@ -476,7 +501,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
     live_ids = {u["unit_id"] for u in units}
     for wid in list(scouts.keys()):
         if wid not in live_ids:
-            print(f"[t_v5]  SCOUT worker {wid} died; unassigning")
+            print(f"[t_dbg]  SCOUT worker {wid} died; unassigning")
             scouts.pop(wid, None)
 
     # 2) Assign new scouts up to each mode's target.
@@ -508,7 +533,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
                 wp_started_frame=frame,
                 wp_start_dist=dist_pixels(w["x"], w["y"], tgt[0], tgt[1]),
             )
-            print(f"[t_v5]  SCOUT worker {w['unit_id']} mode={mode} "
+            print(f"[t_dbg]  SCOUT worker {w['unit_id']} mode={mode} "
                   f"-> wp {wp_idx} {tgt} from ({w['x']},{w['y']}) "
                   f"dist={dist_pixels(w['x'], w['y'], tgt[0], tgt[1]):.0f}")
 
@@ -520,7 +545,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
         # If everything is blacklisted, reset -- terrain may have
         # changed (enemy building destroyed, for example).
         if len(sc.blacklist) >= n:
-            print(f"[t_v5]  SCOUT {sc.worker_id} [{sc.mode}] all "
+            print(f"[t_dbg]  SCOUT {sc.worker_id} [{sc.mode}] all "
                   f"{n} waypoints blacklisted; resetting blacklist")
             sc.blacklist.clear()
         # Advance, skipping blacklisted.
@@ -579,13 +604,13 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             new_idx = next_wp_idx(sc, len(wps))
             reset_scout_wp(sc, new_idx, w, wps)
             sc.arrived_frame = frame
-            print(f"[t_v5]  SCOUT {wid} [{sc.mode}] ARRIVED @{target}; "
+            print(f"[t_dbg]  SCOUT {wid} [{sc.mode}] ARRIVED @{target}; "
                   f"next wp {new_idx} {wps[new_idx]}")
             try:
                 nxt = wps[new_idx]
                 await c.move(unit_id=wid, x=nxt[0], y=nxt[1])
             except Exception as e:
-                print(f"[t_v5]  scout move error: {e}")
+                print(f"[t_dbg]  scout move error: {e}")
             continue
 
         # Three independent stuck checks (any triggers a blacklist).
@@ -614,7 +639,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             stuck_reason = f"timeout={age}f>{STUCK_TIMEOUT_FRAMES}"
 
         if stuck_reason is not None:
-            print(f"[t_v5]  SCOUT {wid} [{sc.mode}] STUCK near "
+            print(f"[t_dbg]  SCOUT {wid} [{sc.mode}] STUCK near "
                   f"({wx},{wy}) wp {sc.waypoint_idx}={target}; "
                   f"reason={stuck_reason}; blacklisting.")
             sc.blacklist.add(sc.waypoint_idx)
@@ -623,10 +648,10 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             try:
                 nxt = wps[new_idx]
                 await c.move(unit_id=wid, x=nxt[0], y=nxt[1])
-                print(f"[t_v5]  SCOUT {wid} [{sc.mode}] -> wp {new_idx} "
+                print(f"[t_dbg]  SCOUT {wid} [{sc.mode}] -> wp {new_idx} "
                       f"{nxt} (blacklist size {len(sc.blacklist)})")
             except Exception as e:
-                print(f"[t_v5]  scout skip-move error: {e}")
+                print(f"[t_dbg]  scout skip-move error: {e}")
         else:
             # Re-issue move only if the probe isn't already moving.
             order_name_str = order_name(w["order"])
@@ -635,7 +660,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
                 try:
                     await c.move(unit_id=wid, x=target[0], y=target[1])
                 except Exception as e:
-                    print(f"[t_v5]  scout re-move error: {e}")
+                    print(f"[t_dbg]  scout re-move error: {e}")
 
     # 4) Harvest visibility -- remember enemies + off-base resources.
     for e in obs.get("enemies", []):
@@ -643,7 +668,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             known_enemies[e["unit_id"]] = KnownEnemy(
                 unit_id=e["unit_id"], type_id=e["type"],
                 x=e["x"], y=e["y"], first_seen_frame=frame)
-            print(f"[t_v5]  SCOUT SPOTTED enemy building "
+            print(f"[t_dbg]  SCOUT SPOTTED enemy building "
                   f"{unit_type_name(e['type'])} @({e['x']},{e['y']}) "
                   f"unit_id={e['unit_id']}")
 
@@ -661,7 +686,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             dist_home = dist_pixels(n["x"], n["y"], home_x, home_y)
             if dist_home > 1500:
                 kind = "geyser" if n["type"] == 188 else "mineral"
-                print(f"[t_v5]  SCOUT SPOTTED {kind} @({n['x']},{n['y']}) "
+                print(f"[t_dbg]  SCOUT SPOTTED {kind} @({n['x']},{n['y']}) "
                       f"tile=({n['x']//32},{n['y']//32}) "
                       f"dist_home={dist_home:.0f} unit_id={uid}")
 
@@ -678,7 +703,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
 # tightly clustered around home (which it is by default), "nearest_own"
 # just pins new buildings back on top of the CC and undoes any spread
 # the other strategies achieved.
-_ANCHOR_STRATEGIES = ["toward_center", "furthest_own", "toward_center"]
+_ANCHOR_STRATEGIES = ["nearest_own", "nearest_own", "nearest_own"]
 
 
 def pick_anchor(units: list[dict], own_type_id: int,
@@ -716,15 +741,15 @@ def pick_anchor(units: list[dict], own_type_id: int,
         c = max(cands, key=lambda u: dist_pixels(u["x"], u["y"],
                                                  home_x, home_y))
         return (c["x"], c["y"])
-    # toward_center: point along vector home -> map center
+    # toward_center: unreachable in t_debug (all _ANCHOR_STRATEGIES
+    # entries are nearest_own) but clamped hard so any future refactor
+    # can't send buildings toward the map center.
     cx, cy = map_w // 2, map_h // 2
-    # random distance along the vector, [20%..90%] of the way to center.
-    t = random.uniform(0.2, 0.9)
+    t = random.uniform(0.0, 0.1)
     ax = int(home_x + t * (cx - home_x))
     ay = int(home_y + t * (cy - home_y))
-    # small jitter so we don't stack on the exact same line every time
-    ax += random.randint(-160, 160)
-    ay += random.randint(-160, 160)
+    ax += random.randint(-48, 48)
+    ay += random.randint(-48, 48)
     return (ax, ay)
 
 
@@ -862,11 +887,11 @@ async def try_expand(c: Client, obs: dict,
             center_x=cx, center_y=cy,
             radius_tiles=8, max_results=8)
     except Exception as e:
-        print(f"[t_v5]  expand find_placement error: {e}")
+        print(f"[t_dbg]  expand find_placement error: {e}")
         return None
     spots = resp.get("spots", [])
     if not spots:
-        print(f"[t_v5]  EXPAND: no placement near cluster ({cx},{cy})")
+        print(f"[t_dbg]  EXPAND: no placement near cluster ({cx},{cy})")
         return None
     spot = spots[0]
 
@@ -876,11 +901,11 @@ async def try_expand(c: Client, obs: dict,
                       unit_type=nexus_type,
                       tile_x=spot["tile_x"], tile_y=spot["tile_y"])
     except Exception as e:
-        print(f"[t_v5]  expand build cmd error: {e}")
+        print(f"[t_dbg]  expand build cmd error: {e}")
         return None
 
     pending_expansion_pts.add((cx, cy))
-    print(f"[t_v5] FIRE  EXPAND CC @cluster ({cx},{cy}) "
+    print(f"[t_dbg] FIRE  EXPAND CC @cluster ({cx},{cy}) "
           f"tile=({spot['tile_x']},{spot['tile_y']}) worker={worker['unit_id']}")
     return Pending(
         verb="build", target_type=nexus_type,
@@ -938,7 +963,7 @@ async def try_build(c: Client, obs: dict, spec: BuildingSpec,
     try:
         resp = await c.find_placement(**kwargs)
     except Exception as e:
-        print(f"[t_v5]  find_placement error {unit_type_name(spec.type_id)}: {e}")
+        print(f"[t_dbg]  find_placement error {unit_type_name(spec.type_id)}: {e}")
         return None
     spots = resp.get("spots", [])
     if not spots:
@@ -950,7 +975,7 @@ async def try_build(c: Client, obs: dict, spec: BuildingSpec,
         await c.build(unit_id=worker["unit_id"], unit_type=spec.type_id,
                       tile_x=spot["tile_x"], tile_y=spot["tile_y"])
     except Exception as e:
-        print(f"[t_v5]  build cmd error {unit_type_name(spec.type_id)}: {e}")
+        print(f"[t_dbg]  build cmd error {unit_type_name(spec.type_id)}: {e}")
         return None
     return Pending(
         verb="build", target_type=spec.type_id,
@@ -974,7 +999,7 @@ async def try_train_worker(c, obs, worker_type, main_type, cost_min):
     try:
         await c.train(unit_id=p["unit_id"], unit_type=worker_type)
     except Exception as e:
-        print(f"[t_v5]  train worker error: {e}")
+        print(f"[t_dbg]  train worker error: {e}")
         return None
     return Pending(verb="train", target_type=worker_type,
                    issued_frame=obs["current_frame"],
@@ -995,7 +1020,7 @@ async def try_train_unit(c, obs, spec: UnitSpec) -> Pending | None:
     try:
         await c.train(unit_id=p["unit_id"], unit_type=spec.type_id)
     except Exception as e:
-        print(f"[t_v5]  train unit error: {e}")
+        print(f"[t_dbg]  train unit error: {e}")
         return None
     return Pending(verb="train", target_type=spec.type_id,
                    issued_frame=obs["current_frame"],
@@ -1033,11 +1058,11 @@ async def try_upgrade(c: Client, obs: dict,
         else:
             await c.research(unit_id=src["unit_id"], tech=spec.enum_id)
         fired_upgrades.add(key)
-        print(f"[t_v5] FIRE  {spec.kind}:{spec.label} @{src['unit_id']} "
+        print(f"[t_dbg] FIRE  {spec.kind}:{spec.label} @{src['unit_id']} "
               f"cost={spec.cost_min}/{spec.cost_gas}")
         return True
     except Exception as e:
-        print(f"[t_v5]  {spec.kind} error: {e}")
+        print(f"[t_dbg]  {spec.kind} error: {e}")
         return False
 
 
@@ -1050,7 +1075,7 @@ async def run(c: Client, interval_sec: float,
               worker_train_min: int, pylon_target: int,
               scout_radial: int, scout_zscan: int,
               base_target: int) -> None:
-    print(f"[t_v5] connected slot={c.welcome.slot} "
+    print(f"[t_dbg] connected slot={c.welcome.slot} "
           f"frame={c.welcome.current_frame}")
 
     map_info = (await c.observe(targets=["map_info"]))["map_info"]
@@ -1144,10 +1169,10 @@ async def run(c: Client, interval_sec: float,
             waypoints_by_mode["radial"] = radial_waypoints(
                 home_x, home_y, map_w, map_h, n=8)
             waypoints_by_mode["zscan"] = zscan_waypoints(map_w, map_h)
-            print(f"[t_v5] race={race} home=({home_x},{home_y}) "
+            print(f"[t_dbg] race={race} home=({home_x},{home_y}) "
                   f"map={map_w}x{map_h}")
-            print(f"[t_v5] radial wps: {waypoints_by_mode['radial']}")
-            print(f"[t_v5] zscan wps: {len(waypoints_by_mode['zscan'])} points "
+            print(f"[t_dbg] radial wps: {waypoints_by_mode['radial']}")
+            print(f"[t_dbg] zscan wps: {len(waypoints_by_mode['zscan'])} points "
                   f"({waypoints_by_mode['zscan'][:2]}...)")
 
         verify_pending(pending, obs, stats, grace_frames)
@@ -1169,12 +1194,12 @@ async def run(c: Client, interval_sec: float,
                 lvl = obs_upgrades.get(str(spec.enum_id), 0)
                 if lvl > 0:
                     completed_upgrades.add(key)
-                    print(f"[t_v5] TOOK  upgrade:{spec.label} "
+                    print(f"[t_dbg] TOOK  upgrade:{spec.label} "
                           f"(level {lvl})")
             else:  # research
                 if spec.enum_id in obs_tech:
                     completed_upgrades.add(key)
-                    print(f"[t_v5] TOOK  research:{spec.label}")
+                    print(f"[t_dbg] TOOK  research:{spec.label}")
 
         # Compute attack target: nearest known enemy building; else fall
         # back to opposite corner (v2 behavior).
@@ -1211,7 +1236,7 @@ async def run(c: Client, interval_sec: float,
                 repairing += 1
             if is_repairable(pu):
                 damaged_mech += 1
-        print(f"[t_v5] f={frame} min={r['minerals']} gas={r['gas']} "
+        print(f"[t_dbg] f={frame} min={r['minerals']} gas={r['gas']} "
               f"sup={r['supply_used']}/{r['supply_max']} "
               f"workers={n_workers}/{worker_target} "
               f"bases={nx_completed}(+{nx_in_progress})/{base_target} "
@@ -1230,13 +1255,8 @@ async def run(c: Client, interval_sec: float,
         pending_workers = {p.worker_id for p in pending.values()
                            if p.worker_id is not None}
 
-        # ---- Priority 0.5: scouting (does NOT reserve budget).
-        scout_ids = await phase_scout(
-            c, obs, worker_type, scouts, waypoints_by_mode,
-            known_enemies, known_resources,
-            target_by_mode=target_by_mode,
-            busy_workers=pending_workers,
-            home_x=home_x, home_y=home_y)
+        # ---- Priority 0.5: scouting DISABLED for t_debug.
+        scout_ids = set()  # was: await phase_scout(...)
         pending_workers |= scout_ids
 
         # ---- Priority 1: mining.
@@ -1295,13 +1315,13 @@ async def run(c: Client, interval_sec: float,
                                 cost_min=100, cost_gas=0,
                                 worker_id=worker["unit_id"])
                             pending_workers.add(worker["unit_id"])
-                            print(f"[t_v5] FIRE  build:Supply_Depot "
+                            print(f"[t_dbg] FIRE  build:Supply_Depot "
                                   f"({pyl_total2 + 1}/{pylon_target}) "
                                   f"anchor={anchor_pt}")
                         else:
                             budget["min"] += 100  # refund
                     except Exception as e:
-                        print(f"[t_v5]  supply-depot fire error: {e}")
+                        print(f"[t_dbg]  supply-depot fire error: {e}")
                         budget["min"] += 100
                 else:
                     budget["min"] += 100
@@ -1313,7 +1333,7 @@ async def run(c: Client, interval_sec: float,
                                            main_type, worker_train_min)
                 if p is not None:
                     pending[f"train:{worker_type}"] = p
-                    print(f"[t_v5] FIRE  train:SCV ({n_workers + 1}/{worker_target})")
+                    print(f"[t_dbg] FIRE  train:SCV ({n_workers + 1}/{worker_target})")
                 else:
                     budget["min"] += worker_train_min
 
@@ -1329,7 +1349,7 @@ async def run(c: Client, interval_sec: float,
                 if p is not None:
                     pending[f"build:{gas_bld}"] = p
                     pending_workers.add(p.worker_id)
-                    print(f"[t_v5] FIRE  build:Refinery")
+                    print(f"[t_dbg] FIRE  build:Refinery")
                 else:
                     budget["min"] += 100
 
@@ -1375,7 +1395,7 @@ async def run(c: Client, interval_sec: float,
             if p is not None:
                 pending[key] = p
                 pending_workers.add(p.worker_id)
-                print(f"[t_v5] FIRE  build:{unit_type_name(spec.type_id)}")
+                print(f"[t_dbg] FIRE  build:{unit_type_name(spec.type_id)}")
                 catalog_build_this_tick += 1
             else:
                 budget["min"] += spec.cost_min
@@ -1424,12 +1444,12 @@ async def run(c: Client, interval_sec: float,
                              "tile_y": parent_tile_y,
                              "order": 36})  # Orders::PlaceAddon
                 addon_attempted.add(parent["unit_id"])
-                print(f"[t_v5] FIRE  addon:{aname} on "
+                print(f"[t_dbg] FIRE  addon:{aname} on "
                       f"{unit_type_name(parent_type)} {parent['unit_id']}")
                 addon_fired = True
             except Exception as e:
                 budget["min"] += amin; budget["gas"] += agas
-                print(f"[t_v5]  addon fire error: {e}")
+                print(f"[t_dbg]  addon fire error: {e}")
 
         # ---- Priority 6: catalog units (up to 6 fires per tick,
         #      throttled per-type by target_count and pending grace).
@@ -1452,7 +1472,7 @@ async def run(c: Client, interval_sec: float,
             p = await try_train_unit(c, obs, spec)
             if p is not None:
                 pending[key] = p
-                print(f"[t_v5] FIRE  train:{unit_type_name(spec.type_id)} "
+                print(f"[t_dbg] FIRE  train:{unit_type_name(spec.type_id)} "
                       f"({completed + ip + 1}/{spec.target_count})")
                 catalog_train_this_tick += 1
             else:
@@ -1472,255 +1492,32 @@ async def run(c: Client, interval_sec: float,
                 budget["min"] += spec.cost_min
                 budget["gas"] += spec.cost_gas
 
-        # ---- Priority 7.4: lift-to-safety (v5 pass E).
-        # For each own lift-capable building at critical HP (< 30 %)
-        # WITH a visible enemy in range, fire `lift` and float back
-        # to home. Repair pass (7.5) can still heal it airborne --
-        # SCVs can repair flying buildings.
-        # Skips re-landing: this v5 doesn't auto-land the building;
-        # a follow-up (v5.1) can add "re-land at safe tile when HP
-        # > 80 %". For now the lifted building just floats near home.
-        # Rate-limit: 1 lift per tick.
-        _LIFT_TYPES = {
-            UNIT_TYPES_BY_NAME["Terran_Command_Center"],
-            UNIT_TYPES_BY_NAME["Terran_Barracks"],
-            UNIT_TYPES_BY_NAME["Terran_Factory"],
-            UNIT_TYPES_BY_NAME["Terran_Starport"],
-            UNIT_TYPES_BY_NAME["Terran_Science_Facility"],
-        }
-        LIFT_ENEMY_RANGE_PX = 600
-        lifted = False
-        for bld in units:
-            if lifted: break
-            if bld.get("type") not in _LIFT_TYPES: continue
-            if not bld.get("completed"): continue
-            if bld.get("flying"): continue          # already airborne
-            hp = bld.get("hp"); hp_max = bld.get("hp_max")
-            if not hp or not hp_max: continue
-            if hp * 10 >= hp_max * 3: continue      # HP >= 30 %, safe
-            # Only lift if there's an enemy nearby -- lifting a
-            # building the sim never intended to be damaged just
-            # freezes production for no reason.
-            near = False
-            for e in enemies_visible:
-                if dist_pixels(e["x"], e["y"],
-                               bld["x"], bld["y"]) <= LIFT_ENEMY_RANGE_PX:
-                    near = True
-                    break
-            if not near: continue
-            try:
-                await c.lift(unit_id=bld["unit_id"], x=home_x, y=home_y)
-                print(f"[t_v5] FIRE  lift "
-                      f"{unit_type_name(bld['type'])} {bld['unit_id']} "
-                      f"hp={hp}/{hp_max} -> retreat to ({home_x},{home_y})")
-                lifted = True
-            except Exception as e:
-                print(f"[t_v5]  lift error: {e}")
+        # ---- Priority 7.4: lift-to-safety DISABLED for t_debug.
+        # (v5's original pass fired `c.lift(bld, x=home, y=home)` —
+        # forbidden in the stress test since it moves the building.)
 
-        # ---- Priority 7.5: SCV repair on damaged mechanical assets.
-        # Terran's answer to Protoss v4's fighter refill: instead of
-        # topping up interceptor/scarab counts we keep our late-game
-        # mech units and buildings alive. For each damaged mechanical
-        # target, pull the nearest idle SCV and dispatch a repair.
-        # Rate-limited to 3 fires per tick so a hail-of-damage moment
-        # doesn't pull the entire mining fleet off minerals.
-        #
-        # Doesn't reserve budget: minerals + gas are consumed over
-        # time by the repair process, not up-front. The sim silent-
-        # rejects if the SCV can't reach the target or the target is
-        # bio/undamaged/dead by the time the action lands.
-        repair_fires = 0
-        # Skip SCVs already repairing (their order == Repair) or
-        # already engaged in this tick's build/scout/gas pipelines.
-        repair_ord = ORDERS_BY_NAME.get("Repair", 34)
-        busy_scvs = set(pending_workers)
-        for pu in units:
-            if pu.get("type") == _SCV and pu.get("order") == repair_ord:
-                busy_scvs.add(pu["unit_id"])
+        # ---- Priority 7.5: SCV repair DISABLED for t_debug.
+        # (v5's original pass fired `c.repair(scv, tgt)` — this pulls
+        # SCVs off the mineral line to a repair target, i.e. movement.
+        # Forbidden in the stress test.)
 
-        # Rebuild the damaged list explicitly (the status-line loop
-        # only counted them; we need the entries themselves).
-        damaged = [u for u in units if is_repairable(u)]
-        # Prefer high-value targets first: buildings first, then
-        # tanks / battlecruisers, then everything else. Cheap heuristic
-        # sort by hp_missing descending as a tie-breaker.
-        _HIGH = {
-            UNIT_TYPES_BY_NAME["Terran_Siege_Tank_Tank_Mode"],
-            UNIT_TYPES_BY_NAME["Terran_Siege_Tank_Siege_Mode"],
-            UNIT_TYPES_BY_NAME["Terran_Battlecruiser"],
-            UNIT_TYPES_BY_NAME["Terran_Science_Vessel"],
-        }
-        def _repair_priority(u):
-            is_building = bool(u.get("building"))
-            hp_missing = int(u.get("hp_max", 0)) - int(u.get("hp", 0))
-            tier = 0 if is_building else (1 if u["type"] in _HIGH else 2)
-            return (tier, -hp_missing)
-        damaged.sort(key=_repair_priority)
+        # ---- Priority 7.7: auto-siege / auto-unsiege DISABLED for t_debug.
+        # (Siege itself is stationary, but this pass depends on visible-
+        # enemy logic that would only fire when things move — noise for
+        # the sync stress test. Also there are no enemies to detect since
+        # neither debug agent sends units out.)
 
-        # Pool of idle SCVs: not building, not scouting, not gathering
-        # gas (Harvest orders 78-89 range roughly), just standing or
-        # mining minerals. Mining SCVs are fair game -- pulling one for
-        # a repair is cheap short-term.
-        _MINING_ORDERS = {
-            ORDERS_BY_NAME.get("MoveToMinerals", 80),
-            ORDERS_BY_NAME.get("WaitForMinerals", 81),
-            ORDERS_BY_NAME.get("MiningMinerals", 82),
-            ORDERS_BY_NAME.get("ReturnMinerals", 84),
-            ORDERS_BY_NAME.get("Harvest1", 78),
-            ORDERS_BY_NAME.get("Harvest2", 79),
-        }
-        _MINING_ORDERS.discard(None)
-        idle_scvs = [u for u in units
-                     if u.get("type") == _SCV
-                     and u.get("completed")
-                     and u["unit_id"] not in busy_scvs
-                     and (u.get("order") in IDLE_ORDERS
-                          or u.get("order") in _MINING_ORDERS)]
+        # ---- Priority 7.8: Vulture Spider Mine drop DISABLED for t_debug.
+        # (v5 places mines along the home->enemy vector, i.e. moves
+        # Vultures out. Forbidden in the stress test.)
 
-        for tgt in damaged:
-            if repair_fires >= 3:
-                break
-            if not idle_scvs:
-                break
-            # Pick nearest idle SCV to target.
-            scv = min(idle_scvs, key=lambda s: dist_pixels(
-                s["x"], s["y"], tgt["x"], tgt["y"]))
-            try:
-                await c.repair(unit_id=scv["unit_id"],
-                               target_unit=tgt["unit_id"])
-                print(f"[t_v5] FIRE  repair "
-                      f"scv={scv['unit_id']} -> "
-                      f"{unit_type_name(tgt['type'])} {tgt['unit_id']} "
-                      f"hp={tgt.get('hp')}/{tgt.get('hp_max')}")
-                repair_fires += 1
-                idle_scvs.remove(scv)
-                busy_scvs.add(scv["unit_id"])
-            except Exception as e:
-                print(f"[t_v5]  repair error: {e}")
+        # ---- Priority 8: attack DISABLED for t_debug.
+        # (v5 sends idle combat units toward nearest enemy. Combat
+        # units in t_debug just accumulate at their spawn point.)
 
-        # ---- Priority 7.7: auto-siege / auto-unsiege (v5 pass C).
-        # Tanks in Tank_Mode with a live enemy in range fire `siege`.
-        # Tanks in Siege_Mode with NO enemy in a wider range fire
-        # `unsiege` (hysteresis avoids spam-toggle when a marine
-        # ping-pongs across the siege/unsiege boundary).
-        # Prereq: Tank_Siege_Mode tech researched (TechTypes id 5,
-        # in obs_tech set). Sim silent-rejects without the tech, but
-        # we skip fires anyway to keep the log clean.
-        _TANK_MODE = UNIT_TYPES_BY_NAME["Terran_Siege_Tank_Tank_Mode"]
-        _SIEGE_MODE = UNIT_TYPES_BY_NAME["Terran_Siege_Tank_Siege_Mode"]
-        _TECH_SIEGE_MODE = 5
-        SIEGE_RANGE_PX = 320   # ~10 tiles -- Siege Mode attack range
-        UNSIEGE_RANGE_PX = 448  # 14 tiles -- must be OUT this far to lift
-        siege_fires = 0
-        if _TECH_SIEGE_MODE in obs_tech:
-            for tank in units:
-                if siege_fires >= 3: break
-                if not tank.get("completed"): continue
-                t_type = tank["type"]
-                if t_type not in (_TANK_MODE, _SIEGE_MODE): continue
-                # Nearest visible enemy distance.
-                if enemies_visible:
-                    ne = min(enemies_visible,
-                             key=lambda e: dist_pixels(
-                                 e["x"], e["y"], tank["x"], tank["y"]))
-                    ne_dist = dist_pixels(
-                        ne["x"], ne["y"], tank["x"], tank["y"])
-                else:
-                    ne_dist = 1_000_000
-                if t_type == _TANK_MODE and ne_dist <= SIEGE_RANGE_PX:
-                    try:
-                        await c.siege(unit_id=tank["unit_id"])
-                        print(f"[t_v5] FIRE  siege tank={tank['unit_id']} "
-                              f"enemy={ne['unit_id']}@{ne_dist}px")
-                        siege_fires += 1
-                    except Exception as e:
-                        print(f"[t_v5]  siege error: {e}")
-                elif t_type == _SIEGE_MODE and ne_dist >= UNSIEGE_RANGE_PX:
-                    try:
-                        await c.unsiege(unit_id=tank["unit_id"])
-                        print(f"[t_v5] FIRE  unsiege tank={tank['unit_id']} "
-                              f"(no enemy within {UNSIEGE_RANGE_PX}px)")
-                        siege_fires += 1
-                    except Exception as e:
-                        print(f"[t_v5]  unsiege error: {e}")
-
-        # ---- Priority 7.8: Vulture Spider Mine drop (v5 pass D).
-        # For each Vulture with mines remaining and Spider_Mines
-        # tech researched, drop a mine at a point along the home->
-        # enemy vector. Progress each vulture's mine placements
-        # further along the vector (30%, 50%, 70%) so we don't stack
-        # all mines on top of each other. `mine_count_by_vulture`
-        # tracks per-unit remaining mines (each Vulture ships with 3).
-        # Sim silent-rejects if the Vulture actually has 0 mines
-        # remaining, but our client-side counter usually agrees.
-        _VULTURE = UNIT_TYPES_BY_NAME["Terran_Vulture"]
-        _TECH_SPIDER_MINES = 3
-        mine_fires = 0
-        if _TECH_SPIDER_MINES in obs_tech and tgt_x is not None:
-            for vult in units:
-                if mine_fires >= 2: break
-                if vult.get("type") != _VULTURE: continue
-                if not vult.get("completed"): continue
-                vid = vult["unit_id"]
-                remaining = mine_count_by_vulture.get(vid, 3)
-                if remaining <= 0: continue
-                # Progress along home -> tgt vector. First drop at
-                # 30 % of the way, second at 50 %, third at 70 %.
-                drop_idx = 3 - remaining   # 0, 1, 2
-                t = 0.30 + drop_idx * 0.20
-                mx = int(home_x + t * (tgt_x - home_x))
-                my = int(home_y + t * (tgt_y - home_y))
-                try:
-                    await c.place_mine(unit_id=vid, x=mx, y=my)
-                    mine_count_by_vulture[vid] = remaining - 1
-                    print(f"[t_v5] FIRE  place_mine vulture={vid} "
-                          f"@({mx},{my}) drop {drop_idx+1}/3")
-                    mine_fires += 1
-                except Exception as e:
-                    print(f"[t_v5]  place_mine error: {e}")
-
-        # ---- Priority 8: attack (idle combat -> nearest known enemy).
-        for u in combat_units(units):
-            if u["order"] not in IDLE_ORDERS: continue
-            try:
-                enemies = obs.get("enemies", [])
-                # Prefer enemy in current vision (nearest to unit).
-                if enemies:
-                    t = nearest(u, enemies)
-                    if t is not None:
-                        await c.attack(unit_id=u["unit_id"],
-                                       target_unit=t["unit_id"])
-                        continue
-                # Else attack-move toward known enemy base (or fallback).
-                if tgt_x is not None:
-                    await c.attack(unit_id=u["unit_id"], target_unit=0,
-                                   x=tgt_x, y=tgt_y)
-            except Exception as e:
-                print(f"[t_v5]  attack error: {e}")
-
-        # ---- Priority 9: coverage verbs.
-        if not move_done:
-            idle = [u for u in workers(units)
-                    if u["order"] in IDLE_ORDERS
-                    and u["unit_id"] not in pending_workers]
-            if idle:
-                w = idle[0]
-                dst_x = home_x + random.randint(-200, 200)
-                dst_y = home_y + random.randint(-200, 200)
-                try:
-                    await c.move(unit_id=w["unit_id"], x=dst_x, y=dst_y)
-                    move_done = True
-                except Exception as e:
-                    print(f"[t_v5]  cover move error: {e}")
-        if move_done and not stop_done:
-            cands = [u for u in units if u["order"] not in IDLE_ORDERS
-                     and not u.get("building")]
-            if cands:
-                try:
-                    await c.stop(unit_id=cands[0]["unit_id"])
-                    stop_done = True
-                except Exception as e:
-                    print(f"[t_v5]  cover stop error: {e}")
+        # ---- Priority 9: coverage verbs DISABLED for t_debug.
+        # (v5 shuffles a random idle worker to break AFK-detection
+        # heuristics. In t_debug we WANT everything idle.)
 
         await asyncio.sleep(interval_sec)
 
@@ -1740,26 +1537,32 @@ async def main(api_key, host, port, url, interval_sec, worker_target,
 
 def entrypoint() -> None:
     p = argparse.ArgumentParser(
-        prog="python3 -m python_agent.agents.t_agent_v5",
-        description="Terran v5: v4 (SCV repair) + addons + siege "
-                    "+ mine drop + lift-to-safety.")
+        prog="python3 -m python_agent.agents.t_agent_debug_v1",
+        description="t_debug: sync stress-test variant of t_agent_v5. "
+                    "Spams production/build actions; NEVER issues "
+                    "attack/move/lift/repair/mine.")
     p.add_argument("api_key")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=6113)
     p.add_argument("--url", default=None,
                    help="full wss://.../agent URL (overrides --host/--port); "
                         "use this to connect through the simsc ALB")
-    p.add_argument("--interval-sec", type=float, default=1.5)
+    p.add_argument("--interval-sec", type=float, default=0.1,
+                   help="tick interval in seconds. t_debug fires as fast "
+                        "as reasonable (default 0.1s) to stress the sync "
+                        "action fan-out.")
     p.add_argument("--worker-target", type=int, default=40)
     p.add_argument("--supply-slack", type=int, default=8)
     p.add_argument("--worker-train-min", type=int, default=50)
     p.add_argument("--pylon-target", type=int, default=20)
-    p.add_argument("--scout-radial", type=int, default=1,
-                   help="probes doing 8-point radial ring patrol")
-    p.add_argument("--scout-zscan", type=int, default=1,
-                   help="probes doing Z-shape sweep of the whole map")
-    p.add_argument("--base-target", type=int, default=4,
-                   help="target total CC count including main base")
+    # scout flags kept for CLI parity but the pass is disabled.
+    p.add_argument("--scout-radial", type=int, default=0,
+                   help="DISABLED in t_debug (kept for CLI parity)")
+    p.add_argument("--scout-zscan", type=int, default=0,
+                   help="DISABLED in t_debug (kept for CLI parity)")
+    p.add_argument("--base-target", type=int, default=2,
+                   help="target total CC count including main base. "
+                        "t_debug defaults to 2 to keep buildings clustered.")
     args = p.parse_args()
     try:
         asyncio.run(main(args.api_key, args.host, args.port, args.url,
@@ -1769,7 +1572,7 @@ def entrypoint() -> None:
                          args.scout_radial, args.scout_zscan,
                          args.base_target))
     except KeyboardInterrupt:
-        print("\n[t_v5] stopped")
+        print("\n[t_dbg] stopped")
 
 
 if __name__ == "__main__":

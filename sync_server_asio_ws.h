@@ -1009,7 +1009,14 @@ struct sync_server_asio_ws {
 	}
 
 	void connect(const a_string& hostname, int port) {
-		client_host_header = std::string(hostname.c_str());
+		// Only default the Host header from the TCP hostname if the
+		// caller hasn't set it explicitly. This lets a TLS-proxy
+		// setup work: TCP hostname = 127.0.0.1 (the local proxy),
+		// but the HTTP Host header must match the ALB's virtual
+		// host so path-routing works on the far side.
+		if (client_host_header.empty()) {
+			client_host_header = std::string(hostname.c_str());
+		}
 		asio::error_code ec;
 		asio::ip::address address = asio::ip::address::from_string(hostname.c_str(), ec);
 		if (ec) {

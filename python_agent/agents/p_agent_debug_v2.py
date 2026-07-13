@@ -1,39 +1,22 @@
-"""t_agent_v5: v4 + Terran-tactical actions.
+"""p_agent_debug_v2: combat-enabled sync stress-test fork.
 
-Extends t_agent_v4 (SCV repair) with four new priority passes that
-finally use the Terran-specific verbs (siege / unsiege / place_mine /
-lift / build-addon) added to the server in commit 3e723cb. v4 could
-train Siege Tanks but never sieged them; v5 does.
+Same as p_agent_debug_v1 (no workers roaming, buildings tight to
+home) EXCEPT combat units now attack-move: 3/4 toward the map
+center, 1/4 to a random tile (re-rolled per unit per tick).
+Scouts, coverage moves, and worker moves stay off.
 
-Inherited from v4:
-  * SCV repair: for every own damaged mechanical unit or building,
-    dispatch an idle SCV via the `repair` verb (Orders::Repair).
-    Mechanical combat units qualify (SCV, Vulture, Tank both modes,
-    Goliath, Wraith, Dropship, BC, Science Vessel, Valkyrie);
-    biological infantry is skipped (auto-healed by Medics anyway).
+Rationale: the 2026-07-13 peaceful soak showed sync.h is clean
+on train/build/upgrade paths, so the surviving SyncBreaker
+bugs must live in attack/move/kill code paths. v2 fires those
+paths hard while everything else stays quiet, isolating the
+divergence signal.
 
-New in v5:
-  * Addon build (Pass A): Machine Shop attached to Factories,
-    Control Tower to Starports, Comsat Station to Command Centers.
-    Unlocks Machine-Shop-gated research (siege mode, spider mines,
-    ion thrusters, charon boosters).
-  * Auto-siege / auto-unsiege (Pass C): Siege Tanks in enemy range
-    fire `siege`; tanks out of range unsiege (with hysteresis to
-    prevent spam-toggle).
-  * Vulture Spider Mine drop (Pass D): Vultures with mines
-    remaining drop them along the home-to-enemy vector.
-  * Building lift-to-safety (Pass E): lift-capable buildings (CC,
-    Barracks, Factory, Starport, Science Facility) at <30 % HP
-    with an enemy in range lift off and float near home.
-
-Everything else is Terran-adapted from v3/v4: scouting (radial +
-zscan), wider building spread (toward map center), upgrades/tech,
-expansions (up to 4 bases), verbose scout logs.
-
-Zerg still out of scope.
+Changes from p_agent_debug_v1:
+  - New Priority 8 combat pass: drive-to-center + 1/4 random.
+  - Everything else identical to v1.
 
 Usage:
-    python3 -m python_agent.agents.t_agent_v5 <api_key>
+    python3 -m python_agent.agents.p_agent_debug_v2 <api_key>
 """
 
 from __future__ import annotations
@@ -58,7 +41,7 @@ from python_agent.helpers import (
 
 
 # --------------------------------------------------------------------
-# Race catalogs (Terran).
+# Race catalogs (Protoss primary; Terran mostly reused).
 # --------------------------------------------------------------------
 
 @dataclass
@@ -66,12 +49,7 @@ class BuildingSpec:
     type_id: int
     cost_min: int
     cost_gas: int = 0
-    # Terran anchors ("cc" = near Command Center, "geyser" = on a
-    # geyser, "any" = far from home biased toward map center).
-    # The Protoss "pylon" anchor still exists in the code path but no
-    # Terran building specifies it -- Terran buildings don't need a
-    # power source. "depot" is treated the same as "cc" (near CC).
-    anchor: str = "any"          # "cc" | "depot" | "geyser" | "any"
+    anchor: str = "any"          # "nexus" | "pylon" | "geyser" | "any"
 
 @dataclass
 class UnitSpec:
@@ -81,10 +59,10 @@ class UnitSpec:
     cost_gas: int = 0
     supply_each: int = 0
     # How many of this unit type to maintain (completed + in-progress).
-    # Cheap infantry gets big targets so an army actually forms;
-    # expensive/late-tier units (Battlecruiser, Ghost) stay low so we
-    # still try one or two for coverage without dumping all resources
-    # on them. Default 1 keeps original v2/v3 "one of each" semantics
+    # Cheap ground units get big targets so an army actually forms;
+    # expensive/late-tier units (Carrier, Arbiter) stay low so we still
+    # try one or two for coverage without dumping all resources on
+    # them. Default 1 keeps original v2/v3 "one of each" semantics
     # for any spec that doesn't override.
     target_count: int = 1
 
@@ -100,123 +78,93 @@ class UpgradeSpec:
     label: str                    # human-readable, e.g. "GroundWeapons L1"
 
 
-TERRAN_BUILDINGS: list[BuildingSpec] = [
-    # Core production, roughly tech-order. Anchor "cc" places near
-    # own Command_Center (equivalent to Protoss's "nexus"); "any"
-    # places anywhere valid (biased toward center by anchor rotation
-    # in try_build). Refinery must anchor on a geyser tile.
-    BuildingSpec(UNIT_TYPES_BY_NAME["Terran_Barracks"],           150,   0, "cc"),
-    BuildingSpec(UNIT_TYPES_BY_NAME["Terran_Engineering_Bay"],   125,   0, "cc"),
-    BuildingSpec(UNIT_TYPES_BY_NAME["Terran_Bunker"],            100,   0, "cc"),
-    BuildingSpec(UNIT_TYPES_BY_NAME["Terran_Missile_Turret"],     75,   0, "cc"),
-    BuildingSpec(UNIT_TYPES_BY_NAME["Terran_Academy"],           150,   0, "any"),
-    BuildingSpec(UNIT_TYPES_BY_NAME["Terran_Factory"],           200, 100, "any"),
-    BuildingSpec(UNIT_TYPES_BY_NAME["Terran_Starport"],          150, 100, "any"),
-    BuildingSpec(UNIT_TYPES_BY_NAME["Terran_Science_Facility"],  100, 150, "any"),
-    BuildingSpec(UNIT_TYPES_BY_NAME["Terran_Armory"],            100,  50, "any"),
-    # Addons (Comsat, Machine Shop, Control Tower) are handled by
-    # the dedicated Pass A `phase_addon_build` in the main loop
-    # below -- they use Orders::PlaceAddon (id 36) with the parent
-    # building as the selected `unit`, not a worker. Not listed in
-    # TERRAN_BUILDINGS because the standard `try_build` picks an
-    # SCV and issues PlaceBuilding, which silent-rejects for addons.
-    # See phase_addon_build docstring for the wire shape used.
+PROTOSS_BUILDINGS: list[BuildingSpec] = [
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Gateway"],            150, 0,   "nexus"),
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Forge"],              150, 0,   "nexus"),
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Cybernetics_Core"],   200, 0,   "pylon"),
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Photon_Cannon"],      150, 0,   "pylon"),
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Shield_Battery"],     100, 0,   "pylon"),
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Citadel_of_Adun"],    150, 100, "pylon"),
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Robotics_Facility"],  200, 200, "pylon"),
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Stargate"],           150, 150, "pylon"),
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Templar_Archives"],   150, 200, "pylon"),
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Observatory"],         50, 100, "pylon"),
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Robotics_Support_Bay"],150, 100, "pylon"),
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Fleet_Beacon"],       300, 200, "pylon"),
+    BuildingSpec(UNIT_TYPES_BY_NAME["Protoss_Arbiter_Tribunal"],   200, 150, "pylon"),
 ]
 
-TERRAN_UNITS: list[UnitSpec] = [
-    # Cheap Barracks units -- large army targets.
-    UnitSpec(UNIT_TYPES_BY_NAME["Terran_Marine"],
-             UNIT_TYPES_BY_NAME["Terran_Barracks"],        50,  0, 1, target_count=8),
-    UnitSpec(UNIT_TYPES_BY_NAME["Terran_Firebat"],
-             UNIT_TYPES_BY_NAME["Terran_Barracks"],        50, 25, 1, target_count=8),
-    UnitSpec(UNIT_TYPES_BY_NAME["Terran_Medic"],
-             UNIT_TYPES_BY_NAME["Terran_Barracks"],        50, 25, 1, target_count=4),
-    UnitSpec(UNIT_TYPES_BY_NAME["Terran_Ghost"],
-             UNIT_TYPES_BY_NAME["Terran_Barracks"],        25, 75, 1, target_count=1),
-    # Factory -- vehicles, medium cost.
-    UnitSpec(UNIT_TYPES_BY_NAME["Terran_Vulture"],
-             UNIT_TYPES_BY_NAME["Terran_Factory"],         75,  0, 2, target_count=2),
-    UnitSpec(UNIT_TYPES_BY_NAME["Terran_Siege_Tank_Tank_Mode"],
-             UNIT_TYPES_BY_NAME["Terran_Factory"],        150, 100, 2, target_count=2),
-    UnitSpec(UNIT_TYPES_BY_NAME["Terran_Goliath"],
-             UNIT_TYPES_BY_NAME["Terran_Factory"],        100,  50, 2, target_count=2),
-    # Starport -- air, expensive.
-    UnitSpec(UNIT_TYPES_BY_NAME["Terran_Wraith"],
-             UNIT_TYPES_BY_NAME["Terran_Starport"],       150, 100, 2, target_count=2),
-    UnitSpec(UNIT_TYPES_BY_NAME["Terran_Dropship"],
-             UNIT_TYPES_BY_NAME["Terran_Starport"],       100, 100, 2, target_count=1),
-    UnitSpec(UNIT_TYPES_BY_NAME["Terran_Valkyrie"],
-             UNIT_TYPES_BY_NAME["Terran_Starport"],       250, 125, 3, target_count=1),
-    UnitSpec(UNIT_TYPES_BY_NAME["Terran_Science_Vessel"],
-             UNIT_TYPES_BY_NAME["Terran_Starport"],       100, 225, 2, target_count=1),
-    UnitSpec(UNIT_TYPES_BY_NAME["Terran_Battlecruiser"],
-             UNIT_TYPES_BY_NAME["Terran_Starport"],       400, 300, 6, target_count=1),
+PROTOSS_UNITS: list[UnitSpec] = [
+    # Cheap Gateway units -- large army targets.
+    UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Zealot"],
+             UNIT_TYPES_BY_NAME["Protoss_Gateway"],       100,   0, 2, target_count=8),
+    UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Dragoon"],
+             UNIT_TYPES_BY_NAME["Protoss_Gateway"],       125,  50, 2, target_count=8),
+    UnitSpec(UNIT_TYPES_BY_NAME["Protoss_High_Templar"],
+             UNIT_TYPES_BY_NAME["Protoss_Gateway"],        50, 150, 2, target_count=2),
+    UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Dark_Templar"],
+             UNIT_TYPES_BY_NAME["Protoss_Gateway"],       125, 100, 2, target_count=2),
+    # Robotics -- medium cost, medium count.
+    UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Reaver"],
+             UNIT_TYPES_BY_NAME["Protoss_Robotics_Facility"], 200, 100, 4, target_count=2),
+    UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Observer"],
+             UNIT_TYPES_BY_NAME["Protoss_Robotics_Facility"],  25,  75, 1, target_count=2),
+    UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Shuttle"],
+             UNIT_TYPES_BY_NAME["Protoss_Robotics_Facility"], 200,   0, 2, target_count=1),
+    # Stargate -- expensive air, low counts.
+    UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Scout"],
+             UNIT_TYPES_BY_NAME["Protoss_Stargate"],      275, 125, 3, target_count=2),
+    UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Corsair"],
+             UNIT_TYPES_BY_NAME["Protoss_Stargate"],      150, 100, 2, target_count=2),
+    UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Carrier"],
+             UNIT_TYPES_BY_NAME["Protoss_Stargate"],      350, 250, 6, target_count=2),
+    UnitSpec(UNIT_TYPES_BY_NAME["Protoss_Arbiter"],
+             UNIT_TYPES_BY_NAME["Protoss_Stargate"],      100, 350, 4, target_count=1),
 ]
 
-# Terran upgrade catalog. Enum values from bwenums.h:
-#   UpgradeTypes: Terran_Infantry_Armor=0, Terran_Vehicle_Plating=1,
-#                 Terran_Ship_Plating=2, Terran_Infantry_Weapons=7,
-#                 Terran_Vehicle_Weapons=8, Terran_Ship_Weapons=9,
-#                 U_238_Shells=16 (Marine range), Ion_Thrusters=17,
-#                 Charon_Boosters=53 (Goliath range), Titan_Reactor=19,
-#                 Moebius_Reactor=21, Apollo_Reactor=22, Colossus_Reactor=23,
-#                 Caduceus_Reactor=50 (Medic energy)
-#   TechTypes:    Stim_Packs=0, Lockdown=1, EMP_Shockwave=2,
-#                 Spider_Mines=3, Tank_Siege_Mode=5, Irradiate=7,
-#                 Yamato_Gun=8, Cloaking_Field=9, Personnel_Cloaking=10,
-#                 Restoration=24, Optical_Flare=30
-#
-TERRAN_UPGRADES: list[UpgradeSpec] = [
-    # Engineering Bay -- infantry upgrades, available on completion.
-    UpgradeSpec("upgrade", 7, UNIT_TYPES_BY_NAME["Terran_Engineering_Bay"],
-                100, 100, "InfantryWeapons_L1"),
-    UpgradeSpec("upgrade", 0, UNIT_TYPES_BY_NAME["Terran_Engineering_Bay"],
-                100, 100, "InfantryArmor_L1"),
-    # Armory -- vehicle + ship upgrades.
-    UpgradeSpec("upgrade", 8, UNIT_TYPES_BY_NAME["Terran_Armory"],
-                100, 100, "VehicleWeapons_L1"),
-    UpgradeSpec("upgrade", 1, UNIT_TYPES_BY_NAME["Terran_Armory"],
-                100, 100, "VehiclePlating_L1"),
-    UpgradeSpec("upgrade", 9, UNIT_TYPES_BY_NAME["Terran_Armory"],
-                100, 100, "ShipWeapons_L1"),
-    UpgradeSpec("upgrade", 2, UNIT_TYPES_BY_NAME["Terran_Armory"],
-                150, 150, "ShipPlating_L1"),
-    # Academy -- infantry techs.
-    UpgradeSpec("research",  0, UNIT_TYPES_BY_NAME["Terran_Academy"],
-                100, 100, "StimPacks"),
-    UpgradeSpec("upgrade",  16, UNIT_TYPES_BY_NAME["Terran_Academy"],
-                150, 150, "U-238_Shells"),
-    UpgradeSpec("research",  24, UNIT_TYPES_BY_NAME["Terran_Academy"],
-                100, 100, "Restoration"),
-    UpgradeSpec("research",  30, UNIT_TYPES_BY_NAME["Terran_Academy"],
-                100, 100, "OpticalFlare"),
-    # Machine Shop -- vehicle techs. Prereq: Factory has attached
-    # a Machine_Shop (v5 Pass A handles the attachment). Without it
-    # try_upgrade silent-rejects.
-    UpgradeSpec("research", 5, UNIT_TYPES_BY_NAME["Terran_Machine_Shop"],
-                150, 150, "TankSiegeMode"),
-    UpgradeSpec("research", 3, UNIT_TYPES_BY_NAME["Terran_Machine_Shop"],
-                100, 100, "SpiderMines"),
-    UpgradeSpec("upgrade", 17, UNIT_TYPES_BY_NAME["Terran_Machine_Shop"],
-                100, 100, "IonThrusters"),
-    UpgradeSpec("upgrade", 53, UNIT_TYPES_BY_NAME["Terran_Machine_Shop"],
-                150, 150, "CharonBoosters"),
-    # Control Tower -- Wraith cloak, Apollo Reactor.
-    UpgradeSpec("research", 9, UNIT_TYPES_BY_NAME["Terran_Control_Tower"],
-                150, 150, "CloakingField"),
-    UpgradeSpec("upgrade", 22, UNIT_TYPES_BY_NAME["Terran_Control_Tower"],
-                200, 200, "ApolloReactor"),
+# Protoss upgrade catalog. Enum values from bwenums.h:
+#   UpgradeTypes: Protoss_Ground_Armor=5, Protoss_Air_Armor=6,
+#                 Protoss_Ground_Weapons=13, Protoss_Air_Weapons=14,
+#                 Protoss_Plasma_Shields=15, Singularity_Charge=33,
+#                 Leg_Enhancements=34, Scarab_Damage=35, Reaver_Capacity=36,
+#                 Gravitic_Drive=37, ...
+#   TechTypes:    Psionic_Storm=19, Hallucination=20, Recall=21, Stasis_Field=22
+PROTOSS_UPGRADES: list[UpgradeSpec] = [
+    # Forge upgrades -- available immediately after Forge completes.
+    UpgradeSpec("upgrade", 13, UNIT_TYPES_BY_NAME["Protoss_Forge"],
+                100, 100, "GroundWeapons_L1"),
+    UpgradeSpec("upgrade", 5, UNIT_TYPES_BY_NAME["Protoss_Forge"],
+                100, 100, "GroundArmor_L1"),
+    UpgradeSpec("upgrade", 15, UNIT_TYPES_BY_NAME["Protoss_Forge"],
+                200, 200, "PlasmaShields_L1"),
+    # Cybernetics Core upgrades.
+    UpgradeSpec("upgrade", 14, UNIT_TYPES_BY_NAME["Protoss_Cybernetics_Core"],
+                100, 100, "AirWeapons_L1"),
+    UpgradeSpec("upgrade", 6, UNIT_TYPES_BY_NAME["Protoss_Cybernetics_Core"],
+                150, 150, "AirArmor_L1"),
+    UpgradeSpec("upgrade", 33, UNIT_TYPES_BY_NAME["Protoss_Cybernetics_Core"],
+                150, 150, "SingularityCharge"),
+    # Citadel of Adun -- Zealot speed.
+    UpgradeSpec("upgrade", 34, UNIT_TYPES_BY_NAME["Protoss_Citadel_of_Adun"],
+                150, 150, "LegEnhancements"),
+    # Templar Archives techs.
+    UpgradeSpec("research", 19, UNIT_TYPES_BY_NAME["Protoss_Templar_Archives"],
+                200, 200, "PsionicStorm"),
+    UpgradeSpec("research", 20, UNIT_TYPES_BY_NAME["Protoss_Templar_Archives"],
+                150, 150, "Hallucination"),
+    # Robotics Support Bay -- Reaver.
+    UpgradeSpec("upgrade", 35, UNIT_TYPES_BY_NAME["Protoss_Robotics_Support_Bay"],
+                200, 200, "ScarabDamage"),
 ]
 
 
 def race_catalogs(race: str):
-    if race == "terran":
-        return (TERRAN_BUILDINGS, TERRAN_UNITS, TERRAN_UPGRADES,
-                UNIT_TYPES_BY_NAME["Terran_SCV"],
-                UNIT_TYPES_BY_NAME["Terran_Supply_Depot"],
-                UNIT_TYPES_BY_NAME["Terran_Command_Center"])
-    raise SystemExit(f"[t_v5] race={race} not supported (this is the "
-                     f"Terran agent -- use p_agent_v4 for Protoss)")
+    if race == "protoss":
+        return (PROTOSS_BUILDINGS, PROTOSS_UNITS, PROTOSS_UPGRADES,
+                UNIT_TYPES_BY_NAME["Protoss_Probe"],
+                UNIT_TYPES_BY_NAME["Protoss_Pylon"],
+                UNIT_TYPES_BY_NAME["Protoss_Nexus"])
+    raise SystemExit(f"[p_dbg2] race={race} not supported yet")
 
 
 # --------------------------------------------------------------------
@@ -268,44 +216,6 @@ def own_of_type(units: list[dict], type_id: int, only_complete=True) -> list[dic
             and (not only_complete or u.get("completed") is True)]
 
 
-# Terran mechanical unit types (repairable by SCV). Buildings are
-# ALWAYS mechanical -- checked via the `building` status flag from the
-# observation, not this set. Biological infantry (Marine, Firebat,
-# Medic, Ghost) is intentionally absent: SCVs can't repair them.
-MECHANICAL_UNIT_TYPES: set[int] = {
-    UNIT_TYPES_BY_NAME["Terran_SCV"],
-    UNIT_TYPES_BY_NAME["Terran_Vulture"],
-    UNIT_TYPES_BY_NAME["Terran_Siege_Tank_Tank_Mode"],
-    UNIT_TYPES_BY_NAME["Terran_Siege_Tank_Siege_Mode"],
-    UNIT_TYPES_BY_NAME["Terran_Goliath"],
-    UNIT_TYPES_BY_NAME["Terran_Wraith"],
-    UNIT_TYPES_BY_NAME["Terran_Dropship"],
-    UNIT_TYPES_BY_NAME["Terran_Battlecruiser"],
-    UNIT_TYPES_BY_NAME["Terran_Science_Vessel"],
-    UNIT_TYPES_BY_NAME["Terran_Valkyrie"],
-}
-
-
-def is_repairable(u: dict) -> bool:
-    """True if the observation entry is a friendly, completed,
-    damaged, mechanical unit or building. `u` must come from our
-    own `units` list (the observation's `units[]` is same-player
-    only, so friendliness is implicit).
-
-    Returns False for units that are morphing, still under
-    construction, or at full HP -- no point wasting SCV time.
-    """
-    if not u.get("completed"):
-        return False
-    hp = u.get("hp")
-    hp_max = u.get("hp_max")
-    if hp is None or hp_max is None or hp >= hp_max:
-        return False
-    if u.get("building"):
-        return True
-    return u.get("type") in MECHANICAL_UNIT_TYPES
-
-
 _GAS_ORDERS = {ORDERS_BY_NAME[n] for n in
                ("MoveToGas", "WaitForGas", "HarvestGas", "ReturnGas")}
 _MIN_ORDERS = {ORDERS_BY_NAME[n] for n in
@@ -329,7 +239,7 @@ def verify_pending(pending: dict, obs: dict, stats: Stats,
         age = frame - p.issued_frame
         if cur_count > p.pre_count:
             stats.took[p.label()] += 1
-            print(f"[t_v5] TOOK  {p.label():48s} "
+            print(f"[p_dbg2] TOOK  {p.label():48s} "
                   f"(count {p.pre_count}->{cur_count} after {age}f)")
             to_drop.append(key)
             continue
@@ -337,7 +247,7 @@ def verify_pending(pending: dict, obs: dict, stats: Stats,
             stats.reject[p.label()] += 1
             n = stats.reject[p.label()]
             if n == 1 or n % 5 == 0:
-                print(f"[t_v5] REJECT {p.label():48s} after {age}f. n={n}. "
+                print(f"[p_dbg2] REJECT {p.label():48s} after {age}f. n={n}. "
                       f"pre min={p.pre_min} gas={p.pre_gas} count={p.pre_count}; "
                       f"now min={r['minerals']} gas={r['gas']} count={cur_count}")
             to_drop.append(key)
@@ -376,7 +286,7 @@ async def phase_mine(c: Client, obs: dict, worker_type: int,
                                    target_unit=target["unit_id"])
                     just_assigned.add(w["unit_id"])
                 except Exception as e:
-                    print(f"[t_v5]  gather-gas error: {e}")
+                    print(f"[p_dbg2]  gather-gas error: {e}")
 
     if mfs:
         for w in wu:
@@ -389,7 +299,7 @@ async def phase_mine(c: Client, obs: dict, worker_type: int,
                 await c.gather(unit_id=w["unit_id"], target_unit=m["unit_id"])
                 just_assigned.add(w["unit_id"])
             except Exception as e:
-                print(f"[t_v5]  gather-min error: {e}")
+                print(f"[p_dbg2]  gather-min error: {e}")
 
     return just_assigned
 
@@ -476,7 +386,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
     live_ids = {u["unit_id"] for u in units}
     for wid in list(scouts.keys()):
         if wid not in live_ids:
-            print(f"[t_v5]  SCOUT worker {wid} died; unassigning")
+            print(f"[p_dbg2]  SCOUT worker {wid} died; unassigning")
             scouts.pop(wid, None)
 
     # 2) Assign new scouts up to each mode's target.
@@ -508,7 +418,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
                 wp_started_frame=frame,
                 wp_start_dist=dist_pixels(w["x"], w["y"], tgt[0], tgt[1]),
             )
-            print(f"[t_v5]  SCOUT worker {w['unit_id']} mode={mode} "
+            print(f"[p_dbg2]  SCOUT worker {w['unit_id']} mode={mode} "
                   f"-> wp {wp_idx} {tgt} from ({w['x']},{w['y']}) "
                   f"dist={dist_pixels(w['x'], w['y'], tgt[0], tgt[1]):.0f}")
 
@@ -520,7 +430,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
         # If everything is blacklisted, reset -- terrain may have
         # changed (enemy building destroyed, for example).
         if len(sc.blacklist) >= n:
-            print(f"[t_v5]  SCOUT {sc.worker_id} [{sc.mode}] all "
+            print(f"[p_dbg2]  SCOUT {sc.worker_id} [{sc.mode}] all "
                   f"{n} waypoints blacklisted; resetting blacklist")
             sc.blacklist.clear()
         # Advance, skipping blacklisted.
@@ -568,7 +478,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
         dd_recent = ""
         if len(sc.dist_history) >= 2:
             dd_recent = f" dd={sc.dist_history[0] - sc.dist_history[-1]:+.0f}"
-        print(f"[t_v5/SCOUT] {wid}[{sc.mode}] wp={sc.waypoint_idx} "
+        print(f"[p_dbg/SCOUT-disabled] {wid}[{sc.mode}] wp={sc.waypoint_idx} "
               f"tgt={target} pos=({wx},{wy}) "
               f"d={d:.0f} start_d={sc.wp_start_dist:.0f}"
               f"{dd_recent} age={age}f "
@@ -579,13 +489,13 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             new_idx = next_wp_idx(sc, len(wps))
             reset_scout_wp(sc, new_idx, w, wps)
             sc.arrived_frame = frame
-            print(f"[t_v5]  SCOUT {wid} [{sc.mode}] ARRIVED @{target}; "
+            print(f"[p_dbg2]  SCOUT {wid} [{sc.mode}] ARRIVED @{target}; "
                   f"next wp {new_idx} {wps[new_idx]}")
             try:
                 nxt = wps[new_idx]
                 await c.move(unit_id=wid, x=nxt[0], y=nxt[1])
             except Exception as e:
-                print(f"[t_v5]  scout move error: {e}")
+                print(f"[p_dbg2]  scout move error: {e}")
             continue
 
         # Three independent stuck checks (any triggers a blacklist).
@@ -614,7 +524,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             stuck_reason = f"timeout={age}f>{STUCK_TIMEOUT_FRAMES}"
 
         if stuck_reason is not None:
-            print(f"[t_v5]  SCOUT {wid} [{sc.mode}] STUCK near "
+            print(f"[p_dbg2]  SCOUT {wid} [{sc.mode}] STUCK near "
                   f"({wx},{wy}) wp {sc.waypoint_idx}={target}; "
                   f"reason={stuck_reason}; blacklisting.")
             sc.blacklist.add(sc.waypoint_idx)
@@ -623,10 +533,10 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             try:
                 nxt = wps[new_idx]
                 await c.move(unit_id=wid, x=nxt[0], y=nxt[1])
-                print(f"[t_v5]  SCOUT {wid} [{sc.mode}] -> wp {new_idx} "
+                print(f"[p_dbg2]  SCOUT {wid} [{sc.mode}] -> wp {new_idx} "
                       f"{nxt} (blacklist size {len(sc.blacklist)})")
             except Exception as e:
-                print(f"[t_v5]  scout skip-move error: {e}")
+                print(f"[p_dbg2]  scout skip-move error: {e}")
         else:
             # Re-issue move only if the probe isn't already moving.
             order_name_str = order_name(w["order"])
@@ -635,7 +545,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
                 try:
                     await c.move(unit_id=wid, x=target[0], y=target[1])
                 except Exception as e:
-                    print(f"[t_v5]  scout re-move error: {e}")
+                    print(f"[p_dbg2]  scout re-move error: {e}")
 
     # 4) Harvest visibility -- remember enemies + off-base resources.
     for e in obs.get("enemies", []):
@@ -643,7 +553,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             known_enemies[e["unit_id"]] = KnownEnemy(
                 unit_id=e["unit_id"], type_id=e["type"],
                 x=e["x"], y=e["y"], first_seen_frame=frame)
-            print(f"[t_v5]  SCOUT SPOTTED enemy building "
+            print(f"[p_dbg2]  SCOUT SPOTTED enemy building "
                   f"{unit_type_name(e['type'])} @({e['x']},{e['y']}) "
                   f"unit_id={e['unit_id']}")
 
@@ -661,7 +571,7 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
             dist_home = dist_pixels(n["x"], n["y"], home_x, home_y)
             if dist_home > 1500:
                 kind = "geyser" if n["type"] == 188 else "mineral"
-                print(f"[t_v5]  SCOUT SPOTTED {kind} @({n['x']},{n['y']}) "
+                print(f"[p_dbg2]  SCOUT SPOTTED {kind} @({n['x']},{n['y']}) "
                       f"tile=({n['x']//32},{n['y']//32}) "
                       f"dist_home={dist_home:.0f} unit_id={uid}")
 
@@ -676,9 +586,9 @@ async def phase_scout(c: Client, obs: dict, worker_type: int,
 # actually spreads inward. Two toward_center per one furthest_own,
 # with nearest_own dropped entirely -- when the base is already
 # tightly clustered around home (which it is by default), "nearest_own"
-# just pins new buildings back on top of the CC and undoes any spread
+# just pins new pylons back on top of the Nexus and undoes any spread
 # the other strategies achieved.
-_ANCHOR_STRATEGIES = ["toward_center", "furthest_own", "toward_center"]
+_ANCHOR_STRATEGIES = ["nearest_own", "nearest_own", "nearest_own"]
 
 
 def pick_anchor(units: list[dict], own_type_id: int,
@@ -716,27 +626,30 @@ def pick_anchor(units: list[dict], own_type_id: int,
         c = max(cands, key=lambda u: dist_pixels(u["x"], u["y"],
                                                  home_x, home_y))
         return (c["x"], c["y"])
-    # toward_center: point along vector home -> map center
+    # toward_center: point along vector home -> map center. In
+    # p_agent_debug_v1 this branch is unreachable (all _ANCHOR_STRATEGIES
+    # entries are nearest_own) but we clamp it hard anyway so any
+    # future refactor that hits it can't send buildings toward the
+    # map center. This variant is for stress-testing sync — we want
+    # buildings to stay tight around home, not sprawl.
     cx, cy = map_w // 2, map_h // 2
-    # random distance along the vector, [20%..90%] of the way to center.
-    t = random.uniform(0.2, 0.9)
+    t = random.uniform(0.0, 0.1)  # was 0.2..0.9; clamp to near-home
     ax = int(home_x + t * (cx - home_x))
     ay = int(home_y + t * (cy - home_y))
-    # small jitter so we don't stack on the exact same line every time
-    ax += random.randint(-160, 160)
-    ay += random.randint(-160, 160)
+    ax += random.randint(-48, 48)  # was ±160
+    ay += random.randint(-48, 48)
     return (ax, ay)
 
 
 # --------------------------------------------------------------------
-# Expansion: find a mineral cluster far from all existing CCs.
+# Expansion: find a mineral cluster far from all existing Nexuses.
 # --------------------------------------------------------------------
 
 # A cluster of mineral fields is considered "the same patch" when its
 # fields sit within CLUSTER_MERGE_PX of each other. BW mineral fields
 # at a base sit within ~200 px, so 400 gives generous merge.
 CLUSTER_MERGE_PX = 400
-# Ignore mineral clusters closer than this to any of our CCs --
+# Ignore mineral clusters closer than this to any of our Nexuses --
 # they're at our existing base.
 MIN_EXPANSION_DIST_PX = 1000
 
@@ -795,9 +708,9 @@ def pick_expansion_site(known_resources: dict[int, tuple[int, int, int]],
                         own_nexuses: list[dict],
                         pending_expansion_pts: set[tuple[int, int]]
                         ) -> tuple[int, int] | None:
-    """Return (x, y) of a mineral cluster far from all our CCs.
+    """Return (x, y) of a mineral cluster far from all our Nexuses.
 
-    Skips clusters that have any CC (existing or in a pending
+    Skips clusters that have any Nexus (existing or in a pending
     expansion) within MIN_EXPANSION_DIST_PX. Prefers clusters with more
     mineral fields (already sorted by cluster_resources).
     """
@@ -808,7 +721,7 @@ def pick_expansion_site(known_resources: dict[int, tuple[int, int, int]],
         # Reject clusters with too few mineral fields to be worthwhile.
         if n_min < 4:
             continue
-        # Reject clusters near any existing CC.
+        # Reject clusters near any existing Nexus.
         too_close = False
         for nx in own_nexuses:
             if dist_pixels(cx, cy, nx["x"], nx["y"]) < MIN_EXPANSION_DIST_PX:
@@ -862,11 +775,11 @@ async def try_expand(c: Client, obs: dict,
             center_x=cx, center_y=cy,
             radius_tiles=8, max_results=8)
     except Exception as e:
-        print(f"[t_v5]  expand find_placement error: {e}")
+        print(f"[p_dbg2]  expand find_placement error: {e}")
         return None
     spots = resp.get("spots", [])
     if not spots:
-        print(f"[t_v5]  EXPAND: no placement near cluster ({cx},{cy})")
+        print(f"[p_dbg2]  EXPAND: no placement near cluster ({cx},{cy})")
         return None
     spot = spots[0]
 
@@ -876,11 +789,11 @@ async def try_expand(c: Client, obs: dict,
                       unit_type=nexus_type,
                       tile_x=spot["tile_x"], tile_y=spot["tile_y"])
     except Exception as e:
-        print(f"[t_v5]  expand build cmd error: {e}")
+        print(f"[p_dbg2]  expand build cmd error: {e}")
         return None
 
     pending_expansion_pts.add((cx, cy))
-    print(f"[t_v5] FIRE  EXPAND CC @cluster ({cx},{cy}) "
+    print(f"[p_dbg2] FIRE  EXPAND Nexus @cluster ({cx},{cy}) "
           f"tile=({spot['tile_x']},{spot['tile_y']}) worker={worker['unit_id']}")
     return Pending(
         verb="build", target_type=nexus_type,
@@ -938,7 +851,7 @@ async def try_build(c: Client, obs: dict, spec: BuildingSpec,
     try:
         resp = await c.find_placement(**kwargs)
     except Exception as e:
-        print(f"[t_v5]  find_placement error {unit_type_name(spec.type_id)}: {e}")
+        print(f"[p_dbg2]  find_placement error {unit_type_name(spec.type_id)}: {e}")
         return None
     spots = resp.get("spots", [])
     if not spots:
@@ -950,7 +863,7 @@ async def try_build(c: Client, obs: dict, spec: BuildingSpec,
         await c.build(unit_id=worker["unit_id"], unit_type=spec.type_id,
                       tile_x=spot["tile_x"], tile_y=spot["tile_y"])
     except Exception as e:
-        print(f"[t_v5]  build cmd error {unit_type_name(spec.type_id)}: {e}")
+        print(f"[p_dbg2]  build cmd error {unit_type_name(spec.type_id)}: {e}")
         return None
     return Pending(
         verb="build", target_type=spec.type_id,
@@ -974,7 +887,7 @@ async def try_train_worker(c, obs, worker_type, main_type, cost_min):
     try:
         await c.train(unit_id=p["unit_id"], unit_type=worker_type)
     except Exception as e:
-        print(f"[t_v5]  train worker error: {e}")
+        print(f"[p_dbg2]  train worker error: {e}")
         return None
     return Pending(verb="train", target_type=worker_type,
                    issued_frame=obs["current_frame"],
@@ -995,7 +908,7 @@ async def try_train_unit(c, obs, spec: UnitSpec) -> Pending | None:
     try:
         await c.train(unit_id=p["unit_id"], unit_type=spec.type_id)
     except Exception as e:
-        print(f"[t_v5]  train unit error: {e}")
+        print(f"[p_dbg2]  train unit error: {e}")
         return None
     return Pending(verb="train", target_type=spec.type_id,
                    issued_frame=obs["current_frame"],
@@ -1033,11 +946,11 @@ async def try_upgrade(c: Client, obs: dict,
         else:
             await c.research(unit_id=src["unit_id"], tech=spec.enum_id)
         fired_upgrades.add(key)
-        print(f"[t_v5] FIRE  {spec.kind}:{spec.label} @{src['unit_id']} "
+        print(f"[p_dbg2] FIRE  {spec.kind}:{spec.label} @{src['unit_id']} "
               f"cost={spec.cost_min}/{spec.cost_gas}")
         return True
     except Exception as e:
-        print(f"[t_v5]  {spec.kind} error: {e}")
+        print(f"[p_dbg2]  {spec.kind} error: {e}")
         return False
 
 
@@ -1050,7 +963,7 @@ async def run(c: Client, interval_sec: float,
               worker_train_min: int, pylon_target: int,
               scout_radial: int, scout_zscan: int,
               base_target: int) -> None:
-    print(f"[t_v5] connected slot={c.welcome.slot} "
+    print(f"[p_dbg2] connected slot={c.welcome.slot} "
           f"frame={c.welcome.current_frame}")
 
     map_info = (await c.observe(targets=["map_info"]))["map_info"]
@@ -1069,22 +982,6 @@ async def run(c: Client, interval_sec: float,
     scouts: dict[int, Scout] = {}
     known_enemies: dict[int, KnownEnemy] = {}
     known_resources: dict[int, tuple[int, int, int]] = {}
-    # v5 pass D: per-Vulture Spider Mine count. BW starts each
-    # Vulture with 3 mines; we decrement on every place_mine fire.
-    # Not synced with the sim -- if the client and sim disagree
-    # (dropped fire, killed vulture, unit_id reuse), stale entries
-    # just sit unused. `default 3` covers freshly-trained Vultures.
-    mine_count_by_vulture: dict[int, int] = {}
-    # v5 pass A: parent building unit_ids we've already tried to
-    # attach an addon to. Once tried, don't retry on the same
-    # parent even if the sim silent-rejected -- almost always the
-    # rejection is because the addon slot next to the parent is
-    # blocked by terrain / an adjacent building, and it stays
-    # blocked. Retrying just spams the log with 15 REJECTs and
-    # occasionally succeeds by luck. A future revision could
-    # explicitly lift-and-relocate the parent to a spot with
-    # empty addon slot, but for now: one shot per parent.
-    addon_attempted: set[int] = set()
     waypoints_by_mode: dict[str, list[tuple[int, int]]] = {
         "radial": [], "zscan": [],
     }
@@ -1097,7 +994,7 @@ async def run(c: Client, interval_sec: float,
     anchor_strategy_idx = 0
 
     # Expansion state: which cluster centroids we've already committed
-    # a CC build to. Prevents re-firing on the same cluster while a
+    # a Nexus build to. Prevents re-firing on the same cluster while a
     # build is in progress.
     pending_expansion_pts: set[tuple[int, int]] = set()
 
@@ -1144,10 +1041,10 @@ async def run(c: Client, interval_sec: float,
             waypoints_by_mode["radial"] = radial_waypoints(
                 home_x, home_y, map_w, map_h, n=8)
             waypoints_by_mode["zscan"] = zscan_waypoints(map_w, map_h)
-            print(f"[t_v5] race={race} home=({home_x},{home_y}) "
+            print(f"[p_dbg2] race={race} home=({home_x},{home_y}) "
                   f"map={map_w}x{map_h}")
-            print(f"[t_v5] radial wps: {waypoints_by_mode['radial']}")
-            print(f"[t_v5] zscan wps: {len(waypoints_by_mode['zscan'])} points "
+            print(f"[p_dbg2] radial wps: {waypoints_by_mode['radial']}")
+            print(f"[p_dbg2] zscan wps: {len(waypoints_by_mode['zscan'])} points "
                   f"({waypoints_by_mode['zscan'][:2]}...)")
 
         verify_pending(pending, obs, stats, grace_frames)
@@ -1158,9 +1055,6 @@ async def run(c: Client, interval_sec: float,
         # `upgrading`/`researching` are in-progress indicators (optional).
         obs_upgrades = r.get("upgrades", {})    # str-keyed by JSON
         obs_tech = set(r.get("tech", []))
-        # Hoisted for lift-to-safety (Pass E) + siege (Pass C) +
-        # attack (Priority 8) so all three see the same list.
-        enemies_visible = obs.get("enemies", [])
         for spec in catalog_upgrades:
             key = (spec.kind, spec.enum_id)
             if key in completed_upgrades:
@@ -1169,12 +1063,12 @@ async def run(c: Client, interval_sec: float,
                 lvl = obs_upgrades.get(str(spec.enum_id), 0)
                 if lvl > 0:
                     completed_upgrades.add(key)
-                    print(f"[t_v5] TOOK  upgrade:{spec.label} "
+                    print(f"[p_dbg2] TOOK  upgrade:{spec.label} "
                           f"(level {lvl})")
             else:  # research
                 if spec.enum_id in obs_tech:
                     completed_upgrades.add(key)
-                    print(f"[t_v5] TOOK  research:{spec.label}")
+                    print(f"[p_dbg2] TOOK  research:{spec.label}")
 
         # Compute attack target: nearest known enemy building; else fall
         # back to opposite corner (v2 behavior).
@@ -1199,28 +1093,31 @@ async def run(c: Client, interval_sec: float,
         pyl_c, pyl_ip = count_units(units, supply_type)
         n_upg_inprog = len(r.get("upgrading", {})) + len(r.get("researching", []))
         nx_completed, nx_in_progress = count_units(units, main_type)
-        # SCV-repair summary: count own SCVs currently on Orders::Repair
-        # (order id from ORDERS_BY_NAME) and count damaged mechanical
-        # units/buildings that could use a repair.
-        _SCV = UNIT_TYPES_BY_NAME["Terran_SCV"]
-        _ORD_REPAIR = ORDERS_BY_NAME.get("Repair", 34)
-        repairing = 0
-        damaged_mech = 0
+        # Fighter-parent summary: for each own completed Carrier or
+        # Reaver, sum current fighter_count and fighter_max so the
+        # status line shows "carriers 3 fighters=17/24" -- 17 babies
+        # loaded, 24 possible if all carriers fully saturated.
+        _CARRIER = UNIT_TYPES_BY_NAME["Protoss_Carrier"]
+        _REAVER = UNIT_TYPES_BY_NAME["Protoss_Reaver"]
+        fpc_have = fpc_max = fpr_have = fpr_max = 0
         for pu in units:
-            if pu.get("type") == _SCV and pu.get("order") == _ORD_REPAIR:
-                repairing += 1
-            if is_repairable(pu):
-                damaged_mech += 1
-        print(f"[t_v5] f={frame} min={r['minerals']} gas={r['gas']} "
+            if not pu.get("completed"): continue
+            if pu["type"] == _CARRIER:
+                fpc_have += pu.get("fighter_count", 0) + pu.get("fighter_queued", 0)
+                fpc_max  += pu.get("fighter_max", 0)
+            elif pu["type"] == _REAVER:
+                fpr_have += pu.get("fighter_count", 0) + pu.get("fighter_queued", 0)
+                fpr_max  += pu.get("fighter_max", 0)
+        print(f"[p_dbg2] f={frame} min={r['minerals']} gas={r['gas']} "
               f"sup={r['supply_used']}/{r['supply_max']} "
               f"workers={n_workers}/{worker_target} "
               f"bases={nx_completed}(+{nx_in_progress})/{base_target} "
-              f"depot={pyl_c}(+{pyl_ip})/{pylon_target} "
+              f"pyl={pyl_c}(+{pyl_ip})/{pylon_target} "
               f"combat={n_combat} bldgs={n_bldgs} "
               f"btypes={b_types}/{len(catalog_buildings)} "
               f"utypes={u_types}/{len(catalog_units)} "
               f"upg={len(completed_upgrades)}(+{n_upg_inprog})/{len(catalog_upgrades)} "
-              f"repair={repairing}/dmg={damaged_mech} "
+              f"intcp={fpc_have}/{fpc_max} scarab={fpr_have}/{fpr_max} "
               f"scouts=R{sum(1 for s in scouts.values() if s.mode == 'radial')}/"
               f"Z{sum(1 for s in scouts.values() if s.mode == 'zscan')} "
               f"enemies={len(known_enemies)} "
@@ -1230,13 +1127,11 @@ async def run(c: Client, interval_sec: float,
         pending_workers = {p.worker_id for p in pending.values()
                            if p.worker_id is not None}
 
-        # ---- Priority 0.5: scouting (does NOT reserve budget).
-        scout_ids = await phase_scout(
-            c, obs, worker_type, scouts, waypoints_by_mode,
-            known_enemies, known_resources,
-            target_by_mode=target_by_mode,
-            busy_workers=pending_workers,
-            home_x=home_x, home_y=home_y)
+        # ---- Priority 0.5: scouting DISABLED for p_debug.
+        # Scouting drives workers off the base cluster which creates
+        # unit-position churn on the wire — noise we don't want when
+        # we're trying to isolate sync bugs.
+        scout_ids = set()  # was: await phase_scout(...)
         pending_workers |= scout_ids
 
         # ---- Priority 1: mining.
@@ -1295,13 +1190,13 @@ async def run(c: Client, interval_sec: float,
                                 cost_min=100, cost_gas=0,
                                 worker_id=worker["unit_id"])
                             pending_workers.add(worker["unit_id"])
-                            print(f"[t_v5] FIRE  build:Supply_Depot "
+                            print(f"[p_dbg2] FIRE  build:Pylon "
                                   f"({pyl_total2 + 1}/{pylon_target}) "
                                   f"anchor={anchor_pt}")
                         else:
                             budget["min"] += 100  # refund
                     except Exception as e:
-                        print(f"[t_v5]  supply-depot fire error: {e}")
+                        print(f"[p_dbg2]  pylon fire error: {e}")
                         budget["min"] += 100
                 else:
                     budget["min"] += 100
@@ -1313,12 +1208,12 @@ async def run(c: Client, interval_sec: float,
                                            main_type, worker_train_min)
                 if p is not None:
                     pending[f"train:{worker_type}"] = p
-                    print(f"[t_v5] FIRE  train:SCV ({n_workers + 1}/{worker_target})")
+                    print(f"[p_dbg2] FIRE  train:Probe ({n_workers + 1}/{worker_target})")
                 else:
                     budget["min"] += worker_train_min
 
         # ---- Priority 4: gas structure.
-        gas_bld = UNIT_TYPES_BY_NAME["Terran_Refinery"]
+        gas_bld = UNIT_TYPES_BY_NAME["Protoss_Assimilator"]
         gas_c, gas_ip = count_units(units, gas_bld)
         if gas_c + gas_ip == 0 and f"build:{gas_bld}" not in pending:
             if reserve(100, 0):
@@ -1329,7 +1224,7 @@ async def run(c: Client, interval_sec: float,
                 if p is not None:
                     pending[f"build:{gas_bld}"] = p
                     pending_workers.add(p.worker_id)
-                    print(f"[t_v5] FIRE  build:Refinery")
+                    print(f"[p_dbg2] FIRE  build:Assimilator")
                 else:
                     budget["min"] += 100
 
@@ -1375,70 +1270,20 @@ async def run(c: Client, interval_sec: float,
             if p is not None:
                 pending[key] = p
                 pending_workers.add(p.worker_id)
-                print(f"[t_v5] FIRE  build:{unit_type_name(spec.type_id)}")
+                print(f"[p_dbg2] FIRE  build:{unit_type_name(spec.type_id)}")
                 catalog_build_this_tick += 1
             else:
                 budget["min"] += spec.cost_min
                 budget["gas"] += spec.cost_gas
 
-        # ---- Priority 5.5: Terran addons (v5 pass A).
-        # For each completed parent building without its canonical
-        # addon, fire the `build` verb with the parent building's own
-        # unit_id as the selection and order=36 (PlaceAddon). The sim
-        # computes the addon tile from parent->addon_position; tile_x
-        # /tile_y in our payload are ignored for PlaceAddon but still
-        # required by the wire shape, so we pass the parent's tile.
-        # Rate-limit: 1 per tick.
-        # Attachments: Factory -> Machine_Shop (unlocks Siege Mode,
-        # Spider Mines, Ion Thrusters, Charon Boosters). Starport ->
-        # Control_Tower (unlocks Wraith cloak, Apollo Reactor). CC ->
-        # Comsat_Station (unlocks Scanner Sweep -- not exercised in
-        # this version, just built for coverage).
-        _ADDON_ATTACHMENTS = [
-            # (parent_type, addon_type, addon_min, addon_gas, addon_name)
-            (UNIT_TYPES_BY_NAME["Terran_Factory"],
-             UNIT_TYPES_BY_NAME["Terran_Machine_Shop"], 50, 50, "Machine_Shop"),
-            (UNIT_TYPES_BY_NAME["Terran_Starport"],
-             UNIT_TYPES_BY_NAME["Terran_Control_Tower"], 50, 50, "Control_Tower"),
-            (UNIT_TYPES_BY_NAME["Terran_Command_Center"],
-             UNIT_TYPES_BY_NAME["Terran_Comsat_Station"], 50, 50, "Comsat_Station"),
-        ]
-        addon_fired = False
-        for parent_type, addon_type, amin, agas, aname in _ADDON_ATTACHMENTS:
-            if addon_fired: break
-            done, ip = count_units(units, addon_type)
-            if done + ip > 0: continue
-            # Pick a completed parent that hasn't been tried before.
-            parents = [p for p in own_of_type(units, parent_type)
-                       if p["unit_id"] not in addon_attempted]
-            if not parents: continue
-            if not reserve(amin, agas): continue
-            parent = parents[0]
-            parent_tile_x = parent["x"] // 32
-            parent_tile_y = parent["y"] // 32
-            try:
-                await c.cmd({"verb": "build",
-                             "unit": parent["unit_id"],
-                             "unit_type": addon_type,
-                             "tile_x": parent_tile_x,
-                             "tile_y": parent_tile_y,
-                             "order": 36})  # Orders::PlaceAddon
-                addon_attempted.add(parent["unit_id"])
-                print(f"[t_v5] FIRE  addon:{aname} on "
-                      f"{unit_type_name(parent_type)} {parent['unit_id']}")
-                addon_fired = True
-            except Exception as e:
-                budget["min"] += amin; budget["gas"] += agas
-                print(f"[t_v5]  addon fire error: {e}")
-
         # ---- Priority 6: catalog units (up to 6 fires per tick,
         #      throttled per-type by target_count and pending grace).
         # Each UnitSpec carries target_count -- how many completed +
-        # in-progress copies to maintain. Cheap Barracks infantry get
-        # big targets (8) so an army actually forms; expensive
-        # Battlecruiser / Ghost stay low (1) so they don't monopolise
-        # gas. Pending grace keys per type_id so we don't refire the
-        # same type before the sim shows the new unit in ip; different
+        # in-progress copies to maintain. Cheap Gateway units get big
+        # targets (8) so an army actually forms; expensive Carrier /
+        # Arbiter stay low (2 / 1) so they don't monopolise gas.
+        # Pending grace keys per type_id so we don't refire the same
+        # type before the sim shows the new unit in ip; different
         # types can fire concurrently up to the per-tick cap below.
         catalog_train_this_tick = 0
         CATALOG_TRAIN_PER_TICK = 6
@@ -1452,7 +1297,7 @@ async def run(c: Client, interval_sec: float,
             p = await try_train_unit(c, obs, spec)
             if p is not None:
                 pending[key] = p
-                print(f"[t_v5] FIRE  train:{unit_type_name(spec.type_id)} "
+                print(f"[p_dbg2] FIRE  train:{unit_type_name(spec.type_id)} "
                       f"({completed + ip + 1}/{spec.target_count})")
                 catalog_train_this_tick += 1
             else:
@@ -1472,255 +1317,90 @@ async def run(c: Client, interval_sec: float,
                 budget["min"] += spec.cost_min
                 budget["gas"] += spec.cost_gas
 
-        # ---- Priority 7.4: lift-to-safety (v5 pass E).
-        # For each own lift-capable building at critical HP (< 30 %)
-        # WITH a visible enemy in range, fire `lift` and float back
-        # to home. Repair pass (7.5) can still heal it airborne --
-        # SCVs can repair flying buildings.
-        # Skips re-landing: this v5 doesn't auto-land the building;
-        # a follow-up (v5.1) can add "re-land at safe tile when HP
-        # > 80 %". For now the lifted building just floats near home.
-        # Rate-limit: 1 lift per tick.
-        _LIFT_TYPES = {
-            UNIT_TYPES_BY_NAME["Terran_Command_Center"],
-            UNIT_TYPES_BY_NAME["Terran_Barracks"],
-            UNIT_TYPES_BY_NAME["Terran_Factory"],
-            UNIT_TYPES_BY_NAME["Terran_Starport"],
-            UNIT_TYPES_BY_NAME["Terran_Science_Facility"],
+        # ---- Priority 7.5: refill Carrier/Reaver fighters.
+        # Each Carrier holds up to 8 Interceptors (25 min each) and
+        # each Reaver up to 5 Scarabs (15 min each). The observation
+        # includes fighter_count/fighter_queued/fighter_max per parent
+        # so we fire train_fighter only when a specific parent needs
+        # a refill -- no wasted commands. Cap at 3 fires per tick so
+        # a mass of empty carriers doesn't yank all the minerals in
+        # one tick.
+        FIGHTER_COST_MIN = {
+            UNIT_TYPES_BY_NAME["Protoss_Carrier"]: 25,
+            UNIT_TYPES_BY_NAME["Protoss_Reaver"]: 15,
         }
-        LIFT_ENEMY_RANGE_PX = 600
-        lifted = False
-        for bld in units:
-            if lifted: break
-            if bld.get("type") not in _LIFT_TYPES: continue
-            if not bld.get("completed"): continue
-            if bld.get("flying"): continue          # already airborne
-            hp = bld.get("hp"); hp_max = bld.get("hp_max")
-            if not hp or not hp_max: continue
-            if hp * 10 >= hp_max * 3: continue      # HP >= 30 %, safe
-            # Only lift if there's an enemy nearby -- lifting a
-            # building the sim never intended to be damaged just
-            # freezes production for no reason.
-            near = False
-            for e in enemies_visible:
-                if dist_pixels(e["x"], e["y"],
-                               bld["x"], bld["y"]) <= LIFT_ENEMY_RANGE_PX:
-                    near = True
-                    break
-            if not near: continue
-            try:
-                await c.lift(unit_id=bld["unit_id"], x=home_x, y=home_y)
-                print(f"[t_v5] FIRE  lift "
-                      f"{unit_type_name(bld['type'])} {bld['unit_id']} "
-                      f"hp={hp}/{hp_max} -> retreat to ({home_x},{home_y})")
-                lifted = True
-            except Exception as e:
-                print(f"[t_v5]  lift error: {e}")
-
-        # ---- Priority 7.5: SCV repair on damaged mechanical assets.
-        # Terran's answer to Protoss v4's fighter refill: instead of
-        # topping up interceptor/scarab counts we keep our late-game
-        # mech units and buildings alive. For each damaged mechanical
-        # target, pull the nearest idle SCV and dispatch a repair.
-        # Rate-limited to 3 fires per tick so a hail-of-damage moment
-        # doesn't pull the entire mining fleet off minerals.
-        #
-        # Doesn't reserve budget: minerals + gas are consumed over
-        # time by the repair process, not up-front. The sim silent-
-        # rejects if the SCV can't reach the target or the target is
-        # bio/undamaged/dead by the time the action lands.
-        repair_fires = 0
-        # Skip SCVs already repairing (their order == Repair) or
-        # already engaged in this tick's build/scout/gas pipelines.
-        repair_ord = ORDERS_BY_NAME.get("Repair", 34)
-        busy_scvs = set(pending_workers)
+        fighter_fires = 0
         for pu in units:
-            if pu.get("type") == _SCV and pu.get("order") == repair_ord:
-                busy_scvs.add(pu["unit_id"])
-
-        # Rebuild the damaged list explicitly (the status-line loop
-        # only counted them; we need the entries themselves).
-        damaged = [u for u in units if is_repairable(u)]
-        # Prefer high-value targets first: buildings first, then
-        # tanks / battlecruisers, then everything else. Cheap heuristic
-        # sort by hp_missing descending as a tie-breaker.
-        _HIGH = {
-            UNIT_TYPES_BY_NAME["Terran_Siege_Tank_Tank_Mode"],
-            UNIT_TYPES_BY_NAME["Terran_Siege_Tank_Siege_Mode"],
-            UNIT_TYPES_BY_NAME["Terran_Battlecruiser"],
-            UNIT_TYPES_BY_NAME["Terran_Science_Vessel"],
-        }
-        def _repair_priority(u):
-            is_building = bool(u.get("building"))
-            hp_missing = int(u.get("hp_max", 0)) - int(u.get("hp", 0))
-            tier = 0 if is_building else (1 if u["type"] in _HIGH else 2)
-            return (tier, -hp_missing)
-        damaged.sort(key=_repair_priority)
-
-        # Pool of idle SCVs: not building, not scouting, not gathering
-        # gas (Harvest orders 78-89 range roughly), just standing or
-        # mining minerals. Mining SCVs are fair game -- pulling one for
-        # a repair is cheap short-term.
-        _MINING_ORDERS = {
-            ORDERS_BY_NAME.get("MoveToMinerals", 80),
-            ORDERS_BY_NAME.get("WaitForMinerals", 81),
-            ORDERS_BY_NAME.get("MiningMinerals", 82),
-            ORDERS_BY_NAME.get("ReturnMinerals", 84),
-            ORDERS_BY_NAME.get("Harvest1", 78),
-            ORDERS_BY_NAME.get("Harvest2", 79),
-        }
-        _MINING_ORDERS.discard(None)
-        idle_scvs = [u for u in units
-                     if u.get("type") == _SCV
-                     and u.get("completed")
-                     and u["unit_id"] not in busy_scvs
-                     and (u.get("order") in IDLE_ORDERS
-                          or u.get("order") in _MINING_ORDERS)]
-
-        for tgt in damaged:
-            if repair_fires >= 3:
+            if fighter_fires >= 3:
                 break
-            if not idle_scvs:
-                break
-            # Pick nearest idle SCV to target.
-            scv = min(idle_scvs, key=lambda s: dist_pixels(
-                s["x"], s["y"], tgt["x"], tgt["y"]))
+            if not pu.get("completed"):
+                continue
+            cost = FIGHTER_COST_MIN.get(pu["type"])
+            if cost is None:
+                continue
+            fc = pu.get("fighter_count", 0)
+            fq = pu.get("fighter_queued", 0)
+            fm = pu.get("fighter_max", 0)
+            if fc + fq >= fm:
+                continue
+            if not reserve(cost, 0):
+                continue
             try:
-                await c.repair(unit_id=scv["unit_id"],
-                               target_unit=tgt["unit_id"])
-                print(f"[t_v5] FIRE  repair "
-                      f"scv={scv['unit_id']} -> "
-                      f"{unit_type_name(tgt['type'])} {tgt['unit_id']} "
-                      f"hp={tgt.get('hp')}/{tgt.get('hp_max')}")
-                repair_fires += 1
-                idle_scvs.remove(scv)
-                busy_scvs.add(scv["unit_id"])
+                await c.train_fighter(unit_id=pu["unit_id"])
+                print(f"[p_dbg2] FIRE  train_fighter "
+                      f"{unit_type_name(pu['type'])} {pu['unit_id']} "
+                      f"({fc}+{fq}/{fm})")
+                fighter_fires += 1
             except Exception as e:
-                print(f"[t_v5]  repair error: {e}")
+                print(f"[p_dbg2]  train_fighter error: {e}")
+                budget["min"] += cost
 
-        # ---- Priority 7.7: auto-siege / auto-unsiege (v5 pass C).
-        # Tanks in Tank_Mode with a live enemy in range fire `siege`.
-        # Tanks in Siege_Mode with NO enemy in a wider range fire
-        # `unsiege` (hysteresis avoids spam-toggle when a marine
-        # ping-pongs across the siege/unsiege boundary).
-        # Prereq: Tank_Siege_Mode tech researched (TechTypes id 5,
-        # in obs_tech set). Sim silent-rejects without the tech, but
-        # we skip fires anyway to keep the log clean.
-        _TANK_MODE = UNIT_TYPES_BY_NAME["Terran_Siege_Tank_Tank_Mode"]
-        _SIEGE_MODE = UNIT_TYPES_BY_NAME["Terran_Siege_Tank_Siege_Mode"]
-        _TECH_SIEGE_MODE = 5
-        SIEGE_RANGE_PX = 320   # ~10 tiles -- Siege Mode attack range
-        UNSIEGE_RANGE_PX = 448  # 14 tiles -- must be OUT this far to lift
-        siege_fires = 0
-        if _TECH_SIEGE_MODE in obs_tech:
-            for tank in units:
-                if siege_fires >= 3: break
-                if not tank.get("completed"): continue
-                t_type = tank["type"]
-                if t_type not in (_TANK_MODE, _SIEGE_MODE): continue
-                # Nearest visible enemy distance.
-                if enemies_visible:
-                    ne = min(enemies_visible,
-                             key=lambda e: dist_pixels(
-                                 e["x"], e["y"], tank["x"], tank["y"]))
-                    ne_dist = dist_pixels(
-                        ne["x"], ne["y"], tank["x"], tank["y"])
-                else:
-                    ne_dist = 1_000_000
-                if t_type == _TANK_MODE and ne_dist <= SIEGE_RANGE_PX:
-                    try:
-                        await c.siege(unit_id=tank["unit_id"])
-                        print(f"[t_v5] FIRE  siege tank={tank['unit_id']} "
-                              f"enemy={ne['unit_id']}@{ne_dist}px")
-                        siege_fires += 1
-                    except Exception as e:
-                        print(f"[t_v5]  siege error: {e}")
-                elif t_type == _SIEGE_MODE and ne_dist >= UNSIEGE_RANGE_PX:
-                    try:
-                        await c.unsiege(unit_id=tank["unit_id"])
-                        print(f"[t_v5] FIRE  unsiege tank={tank['unit_id']} "
-                              f"(no enemy within {UNSIEGE_RANGE_PX}px)")
-                        siege_fires += 1
-                    except Exception as e:
-                        print(f"[t_v5]  unsiege error: {e}")
-
-        # ---- Priority 7.8: Vulture Spider Mine drop (v5 pass D).
-        # For each Vulture with mines remaining and Spider_Mines
-        # tech researched, drop a mine at a point along the home->
-        # enemy vector. Progress each vulture's mine placements
-        # further along the vector (30%, 50%, 70%) so we don't stack
-        # all mines on top of each other. `mine_count_by_vulture`
-        # tracks per-unit remaining mines (each Vulture ships with 3).
-        # Sim silent-rejects if the Vulture actually has 0 mines
-        # remaining, but our client-side counter usually agrees.
-        _VULTURE = UNIT_TYPES_BY_NAME["Terran_Vulture"]
-        _TECH_SPIDER_MINES = 3
-        mine_fires = 0
-        if _TECH_SPIDER_MINES in obs_tech and tgt_x is not None:
-            for vult in units:
-                if mine_fires >= 2: break
-                if vult.get("type") != _VULTURE: continue
-                if not vult.get("completed"): continue
-                vid = vult["unit_id"]
-                remaining = mine_count_by_vulture.get(vid, 3)
-                if remaining <= 0: continue
-                # Progress along home -> tgt vector. First drop at
-                # 30 % of the way, second at 50 %, third at 70 %.
-                drop_idx = 3 - remaining   # 0, 1, 2
-                t = 0.30 + drop_idx * 0.20
-                mx = int(home_x + t * (tgt_x - home_x))
-                my = int(home_y + t * (tgt_y - home_y))
-                try:
-                    await c.place_mine(unit_id=vid, x=mx, y=my)
-                    mine_count_by_vulture[vid] = remaining - 1
-                    print(f"[t_v5] FIRE  place_mine vulture={vid} "
-                          f"@({mx},{my}) drop {drop_idx+1}/3")
-                    mine_fires += 1
-                except Exception as e:
-                    print(f"[t_v5]  place_mine error: {e}")
-
-        # ---- Priority 8: attack (idle combat -> nearest known enemy).
+        # ---- Priority 8 (v2): drive-combat-to-center ----
+        # v2 upgrade: SEND combat units out to fight. Goal is to
+        # exercise sync.h's action-fan-out under the attack/move
+        # code paths — those are the paths our 2026-07-13 finding
+        # suggested contain the surviving SyncBreaker bugs.
+        #
+        # Policy:
+        #   * 3/4 of idle combat units: attack-move to map center.
+        #   * 1/4 of idle combat units: attack-move to a random map
+        #     tile (re-rolled per unit per tick).
+        #   * Skip units already on an Attack/AttackMove order —
+        #     don't spam a new destination every tick.
+        cx_map, cy_map = map_w // 2, map_h // 2
+        # Skip units that ALREADY have an attack order in flight.
+        # Guard / PlayerGuard are BW's default idle orders (see
+        # enums.IDLE_ORDERS) so they must NOT be in this set —
+        # they represent "unit is waiting for orders", which is
+        # exactly when we want to fire.
+        _ATTACK_IN_FLIGHT = {
+            ORDERS_BY_NAME.get(n) for n in (
+                "AttackMove", "AttackUnit", "AttackTile",
+                "AttackFixedRange",
+            ) if ORDERS_BY_NAME.get(n) is not None
+        }
+        _attack_fires = 0
         for u in combat_units(units):
-            if u["order"] not in IDLE_ORDERS: continue
+            if _attack_fires >= 12:
+                break
+            # Only re-target units that are actually idle. If a unit
+            # already has an attack order in flight, leave it alone —
+            # otherwise the wire fills with duplicate no-op re-issues.
+            if u.get("order") in _ATTACK_IN_FLIGHT:
+                continue
+            # 1-in-4 goes to a random destination; the rest converge
+            # on the map center.
+            if random.random() < 0.25:
+                tx = random.randint(64, map_w - 64)
+                ty = random.randint(64, map_h - 64)
+            else:
+                tx, ty = cx_map, cy_map
             try:
-                enemies = obs.get("enemies", [])
-                # Prefer enemy in current vision (nearest to unit).
-                if enemies:
-                    t = nearest(u, enemies)
-                    if t is not None:
-                        await c.attack(unit_id=u["unit_id"],
-                                       target_unit=t["unit_id"])
-                        continue
-                # Else attack-move toward known enemy base (or fallback).
-                if tgt_x is not None:
-                    await c.attack(unit_id=u["unit_id"], target_unit=0,
-                                   x=tgt_x, y=tgt_y)
+                await c.attack(unit_id=u["unit_id"],
+                               target_unit=0, x=tx, y=ty)
+                _attack_fires += 1
             except Exception as e:
-                print(f"[t_v5]  attack error: {e}")
-
-        # ---- Priority 9: coverage verbs.
-        if not move_done:
-            idle = [u for u in workers(units)
-                    if u["order"] in IDLE_ORDERS
-                    and u["unit_id"] not in pending_workers]
-            if idle:
-                w = idle[0]
-                dst_x = home_x + random.randint(-200, 200)
-                dst_y = home_y + random.randint(-200, 200)
-                try:
-                    await c.move(unit_id=w["unit_id"], x=dst_x, y=dst_y)
-                    move_done = True
-                except Exception as e:
-                    print(f"[t_v5]  cover move error: {e}")
-        if move_done and not stop_done:
-            cands = [u for u in units if u["order"] not in IDLE_ORDERS
-                     and not u.get("building")]
-            if cands:
-                try:
-                    await c.stop(unit_id=cands[0]["unit_id"])
-                    stop_done = True
-                except Exception as e:
-                    print(f"[t_v5]  cover stop error: {e}")
+                print(f"[p_dbg2]  attack error: {e}")
 
         await asyncio.sleep(interval_sec)
 
@@ -1740,26 +1420,33 @@ async def main(api_key, host, port, url, interval_sec, worker_target,
 
 def entrypoint() -> None:
     p = argparse.ArgumentParser(
-        prog="python3 -m python_agent.agents.t_agent_v5",
-        description="Terran v5: v4 (SCV repair) + addons + siege "
-                    "+ mine drop + lift-to-safety.")
+        prog="python3 -m python_agent.agents.p_agent_debug_v2",
+        description="p_debug: sync stress-test variant of p_agent_v4. "
+                    "Spams production/build actions; NEVER issues attack/move.")
     p.add_argument("api_key")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=6113)
     p.add_argument("--url", default=None,
                    help="full wss://.../agent URL (overrides --host/--port); "
                         "use this to connect through the simsc ALB")
-    p.add_argument("--interval-sec", type=float, default=1.5)
+    p.add_argument("--interval-sec", type=float, default=0.1,
+                   help="tick interval in seconds. p_debug fires as fast as "
+                        "reasonable (default 0.1s = ~10 FIREs/sec) to stress "
+                        "sync at the action-fan-out layer.")
     p.add_argument("--worker-target", type=int, default=40)
     p.add_argument("--supply-slack", type=int, default=8)
     p.add_argument("--worker-train-min", type=int, default=50)
     p.add_argument("--pylon-target", type=int, default=20)
-    p.add_argument("--scout-radial", type=int, default=1,
-                   help="probes doing 8-point radial ring patrol")
-    p.add_argument("--scout-zscan", type=int, default=1,
-                   help="probes doing Z-shape sweep of the whole map")
-    p.add_argument("--base-target", type=int, default=4,
-                   help="target total CC count including main base")
+    # scout flags kept for CLI parity with p_agent_v4 but the pass
+    # is disabled in run(). Defaults set to 0 so anyone reading the
+    # invocation understands scouting is off.
+    p.add_argument("--scout-radial", type=int, default=0,
+                   help="DISABLED in p_debug (kept for CLI parity)")
+    p.add_argument("--scout-zscan", type=int, default=0,
+                   help="DISABLED in p_debug (kept for CLI parity)")
+    p.add_argument("--base-target", type=int, default=2,
+                   help="target total Nexus count including main base. "
+                        "p_debug defaults to 2 to keep buildings clustered.")
     args = p.parse_args()
     try:
         asyncio.run(main(args.api_key, args.host, args.port, args.url,
@@ -1769,7 +1456,7 @@ def entrypoint() -> None:
                          args.scout_radial, args.scout_zscan,
                          args.base_target))
     except KeyboardInterrupt:
-        print("\n[t_v5] stopped")
+        print("\n[p_dbg2] stopped")
 
 
 if __name__ == "__main__":
