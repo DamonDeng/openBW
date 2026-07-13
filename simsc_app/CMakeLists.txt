@@ -1,16 +1,16 @@
 cmake_minimum_required(VERSION 3.16)
 
 # Native macOS Qt6 spectator app. Small on purpose:
-#   - Reuses the header-only game code (bwgame.h, sync.h, etc.) from
-#     the repo root — no separate library to link.
+#   - Reuses the header-only game code (bwgame.h, sync.h, ui/ui.h, etc.)
+#     from the repo root — no library to link.
 #   - Replaces SDL/asio with QWebSocket for transport and QWidget/QImage
 #     for rendering. sync.h talks to the new transport through the
-#     duck-typed template contract, so this app never touches the
-#     asio version at all.
+#     duck-typed template contract, and ui.h talks to the drawing
+#     backend through native_window.h / native_window_drawing.h.
 #
-# Day 1 target: a HEADLESS smoke test — no window yet. Just parses a
-# --url flag, connects via QWebSocket, and prints frame counters as
-# the sync loop advances. Day 2 adds the QWidget game surface.
+# Day 2 target: a real window rendering the game via
+# ui_functions::update(). The Qt drawing backend is a straight
+# reimplementation of ui/sdl2.cpp using QImage and QPainter.
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,22 +26,28 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS
     Core
     Network
     WebSockets
+    Gui
+    Widgets
 )
 
-# UI components are only needed for Day 2+ (widgets, images). Keep the
-# find_package call here so we fail fast if the developer's Qt install
-# is missing them; the Day 1 headless build doesn't actually use them
-# yet, but Day 2 does — no code delta between Day 1 and Day 2 on the
-# CMake side.
-find_package(Qt6 REQUIRED COMPONENTS Gui Widgets)
-
 # Include path for the game headers. Everything from bwgame.h onward
-# is header-only, so we just need the root directory on the include
+# is header-only, so we just need the repo root + ui/ on the include
 # path — no library to link.
-include_directories(..)
+include_directories(.. ../ui)
+
+# The game rendering (ui.h) expects the ui/ compile unit to declare
+# certain macros — see ui/CMakeLists.txt. We're not linking openbw_ui
+# (that's SDL), but ui.h itself is header-only + guarded by these.
+# OPENBW_NO_SDL_IMAGE / OPENBW_NO_SDL_MIXER suppress any include of
+# SDL_image.h / SDL_mixer.h, which we don't have on the Qt path.
+add_definitions(-DOPENBW_ENABLE_UI -DOPENBW_NO_SDL_IMAGE -DOPENBW_NO_SDL_MIXER)
 
 add_executable(simsc_app
     main.cpp
+    qt_native_window.cpp   # Qt implementation of ui/native_window.h
+                           # + ui/native_window_drawing.h + native_sound.h
+                           # (drop-in for ui/sdl2.cpp -- pick one or the
+                           # other, never both).
 )
 
 target_link_libraries(simsc_app
@@ -53,9 +59,9 @@ target_link_libraries(simsc_app
     Qt6::Widgets
 )
 
-# macOS: build as a normal executable in Day 1, .app bundle later.
+# macOS: build as a normal executable in Day 2, .app bundle later.
 # (Bundling requires a plist + icon; not worth doing until the UI
-# work of Day 2/3 makes it worth double-clicking.)
+# work of Day 3 makes it worth double-clicking.)
 set_target_properties(simsc_app PROPERTIES
     MACOSX_BUNDLE FALSE
 )
