@@ -67,6 +67,21 @@ struct args_t {
 	// frames carrying the JSON agent protocol.
 	int ws_port = 6113;
 	uint32_t seed = 42;
+	// Deterministic-repro knobs. Off by default.
+	//
+	// pin_start_seed: replaces the random per-game seed that
+	// send_start_game() puts on the wire. Ties the pre-XOR raw
+	// seed across runs but does NOT prevent client-UID mixing.
+	// Set via --pin-start-seed.
+	//
+	// fixed_initial_rand: bypasses the seed-XOR-UID mixing and
+	// uses fixed_initial_rand_value directly as the initial LCG
+	// state. This is what you want for byte-exact soak repro.
+	// Set via --fixed-initial-rand <hex>.
+	bool pin_start_seed = false;
+	uint32_t start_seed = 0;
+	bool fixed_initial_rand = false;
+	uint32_t fixed_initial_rand_value = 0;
 	// Default 0: server starts the sim immediately and late-joining
 	// observers catch up via id_catchup_data. Set >0 if you want the
 	// server to hold the pre-game lobby until N observers have finished
@@ -148,6 +163,28 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--map") && i + 1 < argc) a.map_path = argv[++i];
 		else if ((eq("--port") || eq("--obs-port")) && i + 1 < argc) a.port = std::atoi(argv[++i]);
 		else if (eq("--seed") && i + 1 < argc) a.seed = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
+		else if (eq("--pin-start-seed") && i + 1 < argc) {
+			// Pin the wire-side start_game seed. Same value across
+			// runs => identical id_start_game payload; the classic
+			// UID-XOR still mixes in and produces a different final
+			// initial_rand unless --fixed-initial-rand is also set.
+			a.pin_start_seed = true;
+			a.start_seed = (uint32_t)std::strtoul(argv[++i], nullptr, 0);
+		}
+		else if (eq("--fixed-initial-rand") && i + 1 < argc) {
+			// Byte-exact deterministic repro: set the initial LCG
+			// state to this exact 32-bit value, bypassing the
+			// seed-XOR-UID mixing entirely. Accepts hex (0x-prefixed
+			// or bare hex like the value printed in GAME_START).
+			a.fixed_initial_rand = true;
+			// strtoul with base=0 handles 0x prefix; bare hex like
+			// "63bbfad3" would parse as decimal though, so try hex
+			// first for values without prefix.
+			const char* v = argv[++i];
+			char* end = nullptr;
+			a.fixed_initial_rand_value =
+				(uint32_t)std::strtoul(v, &end, 16);
+		}
 		else if (eq("--wait-observers") && i + 1 < argc) a.wait_observers = std::atoi(argv[++i]);
 		else if (eq("--users") && i + 1 < argc) a.users_path = argv[++i];
 		else if (eq("--user") && i + 1 < argc) a.user_specs.push_back(argv[++i]);
@@ -195,7 +232,22 @@ args_t parse_args(int argc, char** argv) {
 				"                     Observers connect to ws://host:PORT/observer\n"
 				"                     ?key=API_KEY and speak sync.h via WS binary\n"
 				"                     frames. --port is a deprecated alias.\n"
-				"  --seed             RNG seed (default: 42)\n"
+				"  --seed             RNG seed (default: 42). Historical\n"
+				"                     note: this value did NOT reach the sim\n"
+				"                     until 2026-07-13; see --pin-start-seed\n"
+				"                     and --fixed-initial-rand for reproducible\n"
+				"                     runs.\n"
+				"  --pin-start-seed <n> Pin the wire-side start_game seed to\n"
+				"                     <n> so runs share the pre-mix seed.\n"
+				"                     Client UIDs still mix in — use\n"
+				"                     --fixed-initial-rand for byte-exact\n"
+				"                     repro.\n"
+				"  --fixed-initial-rand <hex>  Bypass the seed-XOR-UID mixing\n"
+				"                     entirely and set the initial LCG state\n"
+				"                     directly. Value is hex like the\n"
+				"                     `initial_rand=XXXX` line the server\n"
+				"                     prints at startup. Byte-exact repro\n"
+				"                     across runs.\n"
 				"  --wait-observers N wait for N observers to connect before\n"
 				"                     starting the game (default: 0). With 0,\n"
 				"                     the game starts immediately and late\n"
@@ -322,6 +374,16 @@ int main(int argc, char** argv) {
 	for (size_t i = 0; i < 8; ++i) setup_info.create_melee_units_for_player[i] = true;
 	sync_st.setup_info = &setup_info;
 	sync_st.latency = 2;
+
+	// Wire deterministic-repro flags into sync_state. Off by default.
+	if (args.pin_start_seed) {
+		sync_st.fixed_start_seed_set = true;
+		sync_st.fixed_start_seed = args.start_seed;
+	}
+	if (args.fixed_initial_rand) {
+		sync_st.fixed_initial_rand = true;
+		sync_st.fixed_initial_rand_value = args.fixed_initial_rand_value;
+	}
 
 	// Give the local (server) client a name so the sync handshake is happy.
 	sync_st.local_client->name = "openbw_server";

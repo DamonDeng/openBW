@@ -132,6 +132,24 @@ struct sync_state {
 	// XOR'd with all client UIDs at that moment.
 	uint32_t initial_rand_state = 0;
 
+	// Deterministic-repro knobs. Both default to "off" (use random /
+	// uid-XOR path) so ordinary games are unaffected.
+	//
+	// fixed_start_seed: overrides the random seed that send_start_game()
+	// puts on the wire. Set from server main via --seed (was previously
+	// unused). Not sufficient on its own for byte-exact repro because
+	// start_game() then XORs it with the concatenation of all client UIDs
+	// (which vary per connection).
+	//
+	// fixed_initial_rand: when true, the server BYPASSES the UID-XOR step
+	// and uses fixed_initial_rand_value directly as the LCG state. This
+	// gives bit-exact repro across runs at the cost of anti-replay
+	// mixing. Enabled by --fixed-initial-rand <hex> on the server CLI.
+	bool fixed_start_seed_set = false;
+	uint32_t fixed_start_seed = 0;
+	bool fixed_initial_rand = false;
+	uint32_t fixed_initial_rand_value = 0;
+
 	// Optional per-connection authentication hook. If set, every incoming
 	// remote client must send id_auth as its first sync message; the check
 	// is called with the raw key bytes. Return non-null (an opaque user
@@ -1228,9 +1246,19 @@ struct sync_functions: action_functions {
 		void send_start_game() {
 			writer<5> w;
 			w.put<uint8_t>(sync_messages::id_start_game);
-			uint32_t seed = 0;
-			for (uint32_t v : sync_state::uid_t::generate().vals) {
-				seed ^= v;
+			// If the caller pinned a fixed seed for deterministic
+			// replay (see start_game(server, fixed_seed) below and
+			// server main.cpp --seed handling), use that verbatim.
+			// Otherwise generate one from a fresh uid_t for the
+			// classic anti-replay behavior.
+			uint32_t seed;
+			if (sync_st.fixed_start_seed_set) {
+				seed = sync_st.fixed_start_seed;
+			} else {
+				seed = 0;
+				for (uint32_t v : sync_state::uid_t::generate().vals) {
+					seed ^= v;
+				}
 			}
 			w.put<uint32_t>(seed);
 			send(w);
@@ -1471,6 +1499,15 @@ struct sync_functions: action_functions {
 		}
 
 		void start_game(uint32_t seed) {
+			// Bypass UID-XOR mix when the caller has pinned an exact
+			// initial LCG state via --fixed-initial-rand. Used by
+			// deterministic soak-test repros where identical bytes
+			// across runs matter more than anti-replay mixing.
+			if (sync_st.fixed_initial_rand) {
+				start_game_impl(sync_st.fixed_initial_rand_value,
+				                /*broadcast=*/true);
+				return;
+			}
 			a_string seed_str;
 			for (auto& v : sync_st.clients) seed_str += v.uid.str();
 			uint32_t rand_state = seed ^ data_loading::crc32_t()((const uint8_t*)seed_str.data(), seed_str.size());
