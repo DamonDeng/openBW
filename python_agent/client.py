@@ -57,6 +57,7 @@ class Client:
         port: int = 6113,
         path: str = "/agent",
         url: str | None = None,
+        action_log_path: str | None = None,
     ) -> None:
         # Two connection modes:
         #   1. Legacy host+port+path -> ws://host:port/path?key=…
@@ -77,6 +78,17 @@ class Client:
         # cmd-ack back to an observe caller.
         self._pending: dict[str, asyncio.Future[dict]] = {}
         self._reader_task: asyncio.Task | None = None
+        # Optional action-issue log. When action_log_path is set, every
+        # outgoing 'cmd' message writes one line here BEFORE ws.send,
+        # so the trace survives even if the client crashes mid-send.
+        # Format:
+        #   AGENT_ISSUE_CLIENT<TAB>t_mono_ns=<n><TAB>rid=<hex><TAB>slot=<n><TAB>verb=<v><TAB>payload=<json>
+        # Join to server-side AGENT_ISSUE via `rid`, then to sim-side
+        # AGENT_SCHED_LOCAL / SEND / APPLY via slot+bytes.
+        self._action_log = None
+        if action_log_path:
+            # Line-buffered so a crash still flushes partials.
+            self._action_log = open(action_log_path, "a", buffering=1)
 
     # ---- lifecycle ----
     async def __aenter__(self) -> "Client":
@@ -106,6 +118,12 @@ class Client:
         if self._ws:
             await self._ws.close()
             self._ws = None
+        if self._action_log:
+            try:
+                self._action_log.close()
+            except Exception:
+                pass
+            self._action_log = None
 
     # ---- reader loop ----
     async def _reader_loop(self) -> None:
@@ -139,6 +157,22 @@ class Client:
         loop = asyncio.get_event_loop()
         fut: asyncio.Future[dict] = loop.create_future()
         self._pending[rid] = fut
+        # Action-issue log: capture cmd sends BEFORE ws.send so a
+        # client crash still leaves the trace. Skip non-cmd messages
+        # (observe / query) — those don't affect sim state.
+        if self._action_log and msg.get("type") == "cmd":
+            cmd = msg.get("cmd") or {}
+            verb = cmd.get("verb", "")
+            slot = self.welcome.slot if self.welcome else -1
+            # time.monotonic_ns is jitter-free relative to itself,
+            # good for ordering events across an agent's own send
+            # stream. Wall-clock isn't needed for replay determinism.
+            import time as _time
+            self._action_log.write(
+                f"AGENT_ISSUE_CLIENT\tt_mono_ns={_time.monotonic_ns()}"
+                f"\trid={rid}\tslot={slot}\tverb={verb}"
+                f"\tpayload={json.dumps(cmd, separators=(',', ':'))}\n"
+            )
         await self._ws.send(json.dumps(msg))
         return await fut
 

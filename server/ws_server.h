@@ -145,6 +145,14 @@ struct ws_connection : std::enable_shared_from_this<ws_connection> {
 	observe_queue* obs_queue = nullptr;
 	query_queue* q_queue = nullptr;
 	std::atomic<int>* server_current_frame = nullptr;
+	// Optional action-issue log hook. Invoked once per accepted
+	// handle_cmd, right after the ack is composed but before the
+	// action lands on the sim thread's command queue. Used to
+	// correlate a client-side JSON send (via its `id` == rid) with
+	// the sim-side AGENT_SCHED_LOCAL / AGENT_SCHED_SEND / AGENT_APPLY
+	// rows that fire later. Set on the parent ws_server and
+	// propagated at accept-time; nullptr when not enabled.
+	std::function<void(const std::string& log_line)>* action_log_fn = nullptr;
 	// So the sim thread can post its serialized observation back to our
 	// io_service for delivery over the wire. Owned by ws_server.
 	asio::io_service* our_io = nullptr;
@@ -471,11 +479,38 @@ struct ws_connection : std::enable_shared_from_this<ws_connection> {
 				return;
 			}
 		}
+		uint32_t queued_at = server_current_frame ? (uint32_t)(server_current_frame->load() + 1) : 0;
 		nlohmann::json ack;
 		ack["type"] = "ack";
 		ack["id"] = id;
-		ack["queued_at_frame"] = server_current_frame ? server_current_frame->load() + 1 : 0;
+		ack["queued_at_frame"] = queued_at;
 		send_text(ack.dump());
+
+		// Action-queue log: emit the correlation row so the client's
+		// send (which logs the same `id` as `rid`) can be joined
+		// deterministically to the sim-side events. Kept dense — one
+		// row per accepted cmd. Format:
+		//   AGENT_ISSUE\trid=<hex>\talias=<a>\tslot=<n>\tqueued_at_frame=<f>\tverb=<v>\tpayload=<compact-json>
+		if (action_log_fn && *action_log_fn) {
+			std::string verb;
+			auto vit = it->find("verb");
+			if (vit != it->end() && vit->is_string()) verb = vit->get<std::string>();
+			// Compact single-line dump of the whole cmd payload.
+			std::string payload_json = it->dump();
+			char header[256];
+			int n = std::snprintf(header, sizeof(header),
+				"AGENT_ISSUE\trid=%s\talias=%s\tslot=%d"
+				"\tqueued_at_frame=%u\tverb=%s\tpayload=",
+				id.c_str(),
+				alias.empty() ? "-" : alias.c_str(),
+				slot, queued_at, verb.c_str());
+			std::string line;
+			line.reserve((n > 0 ? (size_t)n : 0) + payload_json.size() + 1);
+			line.append(header, header + (n > 0 ? n : 0));
+			line.append(payload_json);
+			line.push_back('\n');
+			(*action_log_fn)(line);
+		}
 	}
 
 	void handle_observe(const nlohmann::json& j, const std::string& id) {
@@ -546,6 +581,11 @@ public:
 		: registry(reg), queue(q), obs_queue(oq), q_queue(qq),
 		  current_frame(current_frame), acceptor(io) {}
 
+	// Optional. If set, every accepted cmd emits one AGENT_ISSUE
+	// row via this callback. See ws_connection::handle_cmd. Runs on
+	// the WS worker thread — the callback must be thread-safe.
+	std::function<void(const std::string& log_line)> action_log_fn;
+
 	void start(uint16_t port) {
 		asio::ip::tcp::endpoint ep(asio::ip::tcp::v4(), port);
 		acceptor.open(ep.protocol());
@@ -581,6 +621,7 @@ private:
 					conn->q_queue = &q_queue;
 					conn->our_io = &io;
 					conn->server_current_frame = &current_frame;
+					conn->action_log_fn = &action_log_fn;
 					conn->start();
 				}
 				accept_next();

@@ -32,6 +32,7 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -440,7 +441,15 @@ int main(int argc, char** argv) {
 			return 1;
 		}
 		fprintf(stderr, "[srv] sync-log -> %s\n", args.sync_log_path.c_str());
+		// Sync-log writers can come from two threads:
+		//   - sim thread (regular TICK / INVENTORY / AGENT_* rows)
+		//   - WS worker thread (AGENT_ISSUE rows from handle_cmd)
+		// Wrap the ofstream in a small mutex so their writes don't
+		// interleave mid-line. Static so the closure captures the
+		// same instance for both threads.
+		static std::mutex sync_log_mu;
 		sync_st.sync_log = [f](const bwgame::a_string& s) {
+			std::lock_guard<std::mutex> lk(sync_log_mu);
 			f->write(s.data(), (std::streamsize)s.size());
 			f->flush();
 		};
@@ -655,6 +664,17 @@ int main(int argc, char** argv) {
 	if (!args.no_agents && registry.size() > 0) {
 		ws = std::make_unique<openbw_agents::ws_server>(
 			registry, cmd_queue, obs_queue, q_queue, current_frame_atomic);
+		// When --sync-log is set, also emit AGENT_ISSUE rows into the
+		// same file so agent-side send events can be joined to the
+		// sim-side AGENT_SCHED_LOCAL / SEND / APPLY rows via the rid.
+		// Sync_log's own mutex (set up above) serializes writes across
+		// this WS thread and the sim thread.
+		if (sync_st.sync_log) {
+			auto sync_log_ref = sync_st.sync_log;  // std::function copy
+			ws->action_log_fn = [sync_log_ref](const std::string& line) {
+				sync_log_ref(bwgame::a_string(line.c_str()));
+			};
+		}
 		ws->start((uint16_t)args.ws_port);
 	} else if (!args.no_agents) {
 		fprintf(stderr, "[srv] agent WS requires --users or --user; skipping (or pass --no-agents).\n");

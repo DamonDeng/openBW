@@ -1543,11 +1543,13 @@ async def run(c: Client, interval_sec: float,
 
 async def main(api_key, host, port, url, interval_sec, worker_target,
                supply_slack, worker_train_min, pylon_target,
-               scout_radial, scout_zscan, base_target):
+               scout_radial, scout_zscan, base_target, action_log):
     if url:
         client_kwargs = {"api_key": api_key, "url": url}
     else:
         client_kwargs = {"api_key": api_key, "host": host, "port": port}
+    if action_log:
+        client_kwargs["action_log_path"] = action_log
     async with Client(**client_kwargs) as c:
         await run(c, interval_sec, worker_target, supply_slack,
                   worker_train_min, pylon_target,
@@ -1582,6 +1584,9 @@ def entrypoint() -> None:
     p.add_argument("--base-target", type=int, default=2,
                    help="target total CC count including main base. "
                         "t_debug defaults to 2 to keep buildings clustered.")
+    p.add_argument("--action-log", default=None,
+                   help="file to append AGENT_ISSUE_CLIENT rows to. See "
+                        "python_agent/client.py for the format.")
     args = p.parse_args()
     try:
         asyncio.run(main(args.api_key, args.host, args.port, args.url,
@@ -1589,7 +1594,7 @@ def entrypoint() -> None:
                          args.supply_slack, args.worker_train_min,
                          args.pylon_target,
                          args.scout_radial, args.scout_zscan,
-                         args.base_target))
+                         args.base_target, args.action_log))
     except KeyboardInterrupt:
         print("\n[t_dbg2] stopped")
 
