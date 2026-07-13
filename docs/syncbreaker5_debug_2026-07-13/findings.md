@@ -1,15 +1,38 @@
-# SyncBreaker #5 — RESOLVED (2026-07-13, same day, one-line fix)
+# SyncBreaker #5 — RESOLVED (2026-07-13, TWO fixes)
 
-**Update: fixed in a follow-up commit later this session. sync.h
-`sync_functions::next_frame` now short-circuits on
-`!sync_st.game_started`; the observer's `st.current_frame` stays
-pinned at 0 during pre-game just like the server's. Post-fix the
-observer's LCG chain matches the server's byte-for-byte at every
-INVENTORY snapshot (verified through frame 4500 on the repro
-config). The 19-frame phase-shift documented below was the root
-cause of what appeared to be a downstream late-join replay bug —
-turns out there was never a late-join scenario, just an
-observer-side pre-game sim drift.**
+**Two-commit fix:**
+
+1. **`268372a`** — `if (!sync_st.game_started) return;` gate on
+   sync_functions::next_frame. Eliminated the 19-frame pre-game
+   drift. Passed INVENTORY diff on early frames but a subtle
+   1-frame `st.current_frame` off-by-one remained: the tick where
+   game_started flipped inside sync() still ran action_functions::
+   next_frame on the observer, while server's game-start tick
+   happened inside a raw sync() call in its pre-game busy loop
+   (no action_functions::next_frame). Observer's st.current_frame
+   ended up at 1 while server's stayed at 0; every subsequent
+   AGENT_APPLY landed at sim_frame N on server but N+1 on observer,
+   so unit positions / iscript / build validity walked different
+   paths under real gameplay. User reported "no combat units,
+   no buildings" on Qt window after long games -- SB#5 back but
+   milder.
+
+2. **Follow-up commit** (this file's parent commit) — replaced the
+   post-sync gate with `bool was_running = sync_st.game_started;
+   sync(server); if (!was_running) return;`. Defers the
+   sim-advance for the transition tick too so observer matches
+   server byte-for-byte. Also relaxed
+   `execute_scheduled_actions`'s `sync_frame == target_frame`
+   guard to `>=` so late-arriving actions (target_frame in the
+   past by the time id_agent_action arrives on the observer)
+   still fire instead of being stuck in the queue -- otherwise
+   the was_running gate would drop the first few actions.
+
+Post-fix: 264 AGENT_APPLY on server / 264 on observer, first
+apply at sim_frame=34 on BOTH sides with lcg=49dfb154 on both.
+LCG matches byte-identical at every LCG_TICK through 3000
+frames. INVENTORY at 300/600/900/1200/1500: identical to the
+byte between server and observer including lcg field.
 
 The rest of this file is preserved as the investigation trail.
 

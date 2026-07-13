@@ -371,7 +371,21 @@ struct sync_functions: action_functions {
 		for (auto i = sync_st.clients.begin(); i != sync_st.clients.end();) {
 			sync_state::client_t* c = &*i;
 			++i;
-			while (!c->scheduled_actions.empty() && (uint32_t)sync_st.sync_frame == c->scheduled_actions.front().frame) {
+			// Fire on >= (was ==) so a late-arriving action whose
+			// target_frame is already in the past still applies
+			// instead of getting stuck in the queue forever. Server
+			// never sees this case (its actions come from the
+			// authoritative command queue, always scheduled with
+			// target_frame > sync_frame). Observer can see it when
+			// an id_agent_action wire message arrives from the server
+			// after our sync_frame has already advanced past the
+			// carried target_frame -- which happens under any
+			// per-tick timing skew (message-arrival jitter, thread
+			// scheduling, WS frame batching). The ordering guarantee
+			// we care about (all clients agree on the sequence of
+			// actions applied) is preserved because the FIFO order
+			// of scheduled_actions is preserved.
+			while (!c->scheduled_actions.empty() && (uint32_t)sync_st.sync_frame >= c->scheduled_actions.front().frame) {
 				auto act = c->scheduled_actions.front();
 				c->scheduled_actions.pop_front();
 				c->buffer_begin = act.data_end;
@@ -455,7 +469,6 @@ struct sync_functions: action_functions {
 
 	template<typename server_T>
 	void next_frame(server_T& server) {
-		sync(server);
 		// Don't advance the sim until the game has actually started.
 		// Server's pre-game busy-loop uses raw sync() and holds
 		// st.current_frame at 0 until sync_st.game_started flips.
@@ -478,7 +491,20 @@ struct sync_functions: action_functions {
 		// can arrive and flip game_started to true. See
 		// docs/syncbreaker5_debug_2026-07-13/findings.md for the
 		// full trace showing the 19-frame offset.
-		if (!sync_st.game_started) return;
+		//
+		// We also defer the *transition tick* (the one where sync()
+		// flips game_started true) so the observer's st.current_frame
+		// matches the server's exactly. The server's game-start tick
+		// happens inside its pre-game busy-loop's raw sync() call --
+		// no action_functions::next_frame runs there. The observer's
+		// tick where game_started flips must skip its own sim advance
+		// to match. To also allow late-arriving actions (target_frame
+		// already in the past by the time we receive them) to still
+		// fire, execute_scheduled_actions uses a >= guard rather than
+		// == on sync_frame vs target_frame.
+		bool was_running = sync_st.game_started;
+		sync(server);
+		if (!was_running) return;
 		action_functions::next_frame();
 		// LCG snapshot every sim frame (was every 30 -- bumped for a
 		// bisect-the-race investigation). Cost: 1 short line per frame
