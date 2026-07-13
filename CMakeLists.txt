@@ -10,6 +10,10 @@ set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 # openbw_ui builds as a library and the observer is off unless enabled.
 option(OPENBW_BUILD_OBSERVER "Build the openbw_observer SDL2 spectator client" ON)
 option(OPENBW_BUILD_SERVER   "Build the openbw_server headless authoritative sim" ON)
+# Qt6 desktop spectator app (M5.b). Off by default so headless-server
+# CI images don't need to pull Qt.
+option(OPENBW_BUILD_SIMSC_APP
+	"Build the Qt6 simsc_app desktop spectator (macOS-first)" OFF)
 
 # ui/CMakeLists.txt hard-requires SDL2 (openbw_ui and openbw_observer target
 # both live there). Only descend if we actually intend to build them --
@@ -20,4 +24,7 @@ if (OPENBW_BUILD_OBSERVER)
 endif()
 if (OPENBW_BUILD_SERVER)
 	add_subdirectory(server)
+endif()
+if (OPENBW_BUILD_SIMSC_APP)
+	add_subdirectory(simsc_app)
 endif()
