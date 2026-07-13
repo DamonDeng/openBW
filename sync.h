@@ -224,6 +224,26 @@ struct sync_state {
 	// when the first id_agent_action for a slot arrives.
 	std::array<client_t*, 8> virtual_clients_by_slot{};
 
+	// SyncBreaker #8 fix (2026-07-14): observer-side pending batches.
+	// Each entry is one id_agent_action_batch wire message decoded into
+	// its target frame and ordered slot+bytes pairs, waiting to fire
+	// atomically when the observer's sync_frame reaches target_frame.
+	// Server never populates this (server has no incoming batches).
+	//
+	// We keep the whole payload (slot + bytes) rather than routing each
+	// entry into a per-slot scheduled_actions queue -- the WHOLE POINT
+	// of the batch protocol is to preserve intra-tick ordering, which
+	// per-slot queues would destroy.
+	struct pending_batch_action {
+		uint8_t slot;
+		a_vector<uint8_t> data;
+	};
+	struct pending_batch {
+		uint32_t target_frame;
+		a_vector<pending_batch_action> entries;
+	};
+	std::deque<pending_batch> pending_batches;
+
 };
 
 // Hex-dump the first up-to-`max` bytes of `data` into a comma-separated
@@ -353,12 +373,53 @@ namespace sync_messages {
 		// will apply it on the same frame the server does. This is how
 		// agent-issued commands reach observers who are already connected
 		// (late joiners get the equivalent via id_catchup_data).
-		id_agent_action
+		//
+		// Legacy path -- retained for compatibility with older observer
+		// builds; new servers use id_agent_action_batch below for live
+		// broadcasts, where intra-tick ordering matters.
+		id_agent_action,
+		// Server -> observer: a batched broadcast of ALL agent actions
+		// applied on the server during ONE sim tick, in the exact order
+		// the server applied them. Payload:
+		//   [uint32_t server_frame]
+		//   [uint16_t n_actions]
+		//   Repeated n_actions times:
+		//     [uint8_t slot]
+		//     [uint16_t action_len]
+		//     [action bytes ...]
+		//
+		// The observer applies the whole batch atomically when its own
+		// sync_frame reaches server_frame + latency. Because the wire
+		// message carries the server's original serialization order,
+		// the observer walks it in that exact order -- no dependence
+		// on vc-insertion-order in sync_st.clients or on WS
+		// binary-frame delivery ordering per action.
+		//
+		// SyncBreaker #8 (2026-07-14) root cause: when actions came
+		// individually via id_agent_action, the observer routed each
+		// to its per-slot virtual client's scheduled_actions queue
+		// then execute_scheduled_actions iterated by CLIENT rather
+		// than by arrival order. If slot 1's vc was created before
+		// slot 0's on a given observer (lazy insertion, first
+		// id_agent_action wins), slot 1's actions applied first --
+		// opposite of the server's slot-major drain order. The batch
+		// message eliminates that class of race entirely.
+		id_agent_action_batch
 	};
 	enum {
 		id_game_started_escape = 0xdc
 	};
 }
+
+// Namespace-level view type used by broadcast_agent_action_batch callers
+// (e.g. server/main.cpp). See id_agent_action_batch enum comment for
+// the wire format. `data` is caller-owned and must live for the
+// duration of the broadcast call.
+struct action_batch_entry {
+	int slot;
+	const uint8_t* data;
+	size_t size;
+};
 
 struct sync_functions: action_functions {
 	sync_state& sync_st;
@@ -1114,6 +1175,68 @@ struct sync_functions: action_functions {
 				funcs.schedule_action(vc, r.get_n(n), n);
 				break;
 			}
+			case sync_messages::id_agent_action_batch: {
+				// SyncBreaker #8 fix: server-tick batched agent actions.
+				// Payload:
+				//   [uint32_t server_frame]
+				//   [uint16_t count]
+				//   Repeated:
+				//     [uint8_t slot]
+				//     [uint16_t action_len]
+				//     [action bytes]
+				//
+				// We do NOT route these into per-slot scheduled_actions
+				// (that reintroduces the intra-tick ordering race this
+				// batch protocol exists to eliminate). Instead we stash
+				// the whole batch in sync_st.pending_batches keyed by
+				// its target_frame, and drain it as one atomic unit
+				// inside process_messages when our sync_frame reaches
+				// that target.
+				uint32_t server_frame = r.template get<uint32_t>();
+				uint16_t count = r.template get<uint16_t>();
+				if (count == 0) break;
+				sync_state::pending_batch batch;
+				batch.target_frame = server_frame + sync_st.latency;
+				batch.entries.reserve(count);
+				bool ok = true;
+				for (uint16_t i = 0; i < count; ++i) {
+					if (r.left() < 3) { ok = false; break; }
+					uint8_t slot = r.template get<uint8_t>();
+					uint16_t action_len = r.template get<uint16_t>();
+					if (r.left() < action_len) { ok = false; break; }
+					sync_state::pending_batch_action e;
+					e.slot = slot;
+					e.data.resize(action_len);
+					r.get_bytes(e.data.data(), action_len);
+					batch.entries.push_back(std::move(e));
+				}
+				if (!ok) {
+					// Malformed batch. Drop it and log so we notice.
+					// Killing the client here is too aggressive during
+					// initial rollout; instead we abandon this one.
+					if (sync_st.sync_log) {
+						char buf[128];
+						snprintf(buf, sizeof(buf),
+							"AGENT_BATCH_RECV\tstatus=malformed"
+							"\tserver_frame=%u\tclaimed_count=%u",
+							server_frame, (unsigned)count);
+						sync_log_line(sync_st, 'O', a_string(buf));
+					}
+					break;
+				}
+				if (sync_st.sync_log) {
+					char buf[192];
+					snprintf(buf, sizeof(buf),
+						"AGENT_BATCH_RECV\tserver_frame=%u"
+						"\ttarget_frame=%u\tcount=%u",
+						server_frame,
+						(unsigned)batch.target_frame,
+						(unsigned)batch.entries.size());
+					sync_log_line(sync_st, 'O', a_string(buf));
+				}
+				sync_st.pending_batches.push_back(std::move(batch));
+				break;
+			}
 			default:
 				if (!client->has_uid) kill_client(client);
 				else {
@@ -1572,6 +1695,44 @@ struct sync_functions: action_functions {
 			}
 		}
 
+		// SyncBreaker #8 fix: broadcast every agent action applied on this
+		// server tick as a SINGLE wire message, preserving exact intra-tick
+		// order. See id_agent_action_batch enum comment. `entries` is a
+		// slice of (slot, bytes) pairs; the caller (typically server/main.cpp
+		// after cmd_queue.drain) is expected to build it in the order the
+		// server itself scheduled the actions (slot-major, FIFO within slot).
+		// See namespace-level bwgame::action_batch_entry for the type.
+		template<typename Container>
+		void broadcast_agent_action_batch(const Container& entries) {
+			size_t count = 0;
+			for (const auto& e : entries) {
+				if (e.size > 0 && e.slot >= 0 && e.slot <= 7) ++count;
+			}
+			if (count == 0) return;
+			auto d = server.new_message();
+			d.template put<uint8_t>((uint8_t)sync_messages::id_agent_action_batch);
+			d.template put<uint32_t>((uint32_t)sync_st.sync_frame);
+			d.template put<uint16_t>((uint16_t)count);
+			for (const auto& e : entries) {
+				if (e.size == 0 || e.slot < 0 || e.slot > 7) continue;
+				// action_len is u16 -- BW actions are all tiny (max
+				// ~256 bytes for a select). Guard the cast anyway.
+				uint16_t len = e.size > 0xffff ? 0xffff : (uint16_t)e.size;
+				d.template put<uint8_t>((uint8_t)e.slot);
+				d.template put<uint16_t>(len);
+				d.put(e.data, len);
+			}
+			server.send_message(d, nullptr);
+
+			if (sync_st.sync_log) {
+				char buf[128];
+				snprintf(buf, sizeof(buf),
+					"AGENT_BATCH_SEND\tserver_frame=%u\tcount=%zu",
+					(uint32_t)sync_st.sync_frame, count);
+				sync_log_line(sync_st, 'S', a_string(buf));
+			}
+		}
+
 		void start_game(uint32_t seed) {
 			// `seed` is the wire value from id_start_game and is
 			// ALREADY MIXED with the server's own client UIDs by
@@ -1751,6 +1912,90 @@ struct sync_functions: action_functions {
 				--sync_st.game_starting_countdown;
 				if (sync_st.game_starting_countdown == 0) {
 					start_game(sync_st.start_game_seed);
+				}
+			}
+
+			// SyncBreaker #8 fix: drain any pending id_agent_action_batch
+			// payloads whose target_frame has come due. We apply the
+			// whole batch atomically in wire order (server's original
+			// intra-tick serialization order). Bypasses per-vc
+			// scheduled_actions to avoid the vc-insertion-order race
+			// that the batch protocol exists to prevent.
+			//
+			// Runs BEFORE execute_scheduled_actions below so that any
+			// legacy id_agent_action entries still in per-vc queues
+			// fire after the batch -- matches the general rule that
+			// batches carry ALL agent actions the server broadcast for
+			// that tick. In steady state pending_batches is O(latency)
+			// entries deep and this loop is a few iterations at most.
+			if (sync_st.game_started && !sync_st.pending_batches.empty()) {
+				while (!sync_st.pending_batches.empty()
+				    && (int32_t)((uint32_t)sync_st.sync_frame
+				                 - sync_st.pending_batches.front().target_frame)
+				       >= 0)
+				{
+					auto batch = std::move(sync_st.pending_batches.front());
+					sync_st.pending_batches.pop_front();
+					uint32_t server_frame =
+						batch.target_frame - sync_st.latency;
+					for (auto& e : batch.entries) {
+						int slot = (int)e.slot;
+						if (slot < 0 || slot > 7) continue;
+						// Create-or-fetch vc, same shape as the
+						// legacy id_agent_action path.
+						sync_state::client_t* vc =
+							sync_st.virtual_clients_by_slot[slot];
+						if (!vc) {
+							sync_st.clients.emplace_back();
+							vc = &sync_st.clients.back();
+							vc->local_id = sync_st.next_client_id++;
+							vc->uid = sync_state::uid_t::generate();
+							vc->has_uid = true;
+							vc->has_auth = true;
+							vc->has_greeted = true;
+							vc->game_started = true;
+							vc->player_slot = slot;
+							vc->frame = server_frame;
+							sync_st.virtual_clients_by_slot[slot] = vc;
+						}
+						vc->frame = server_frame;
+						data_loading::data_reader_le rr(
+							e.data.data(),
+							e.data.data() + e.data.size());
+						if (sync_st.sync_log) {
+							char buf[192];
+							snprintf(buf, sizeof(buf),
+								"AGENT_APPLY\tslot=%d\tsim_frame=%d"
+								"\ttarget_frame=%u\tvc_frame=%u"
+								"\tlcg=%08x\tn_bytes=%zu\tbytes=",
+								slot, (int)st.current_frame,
+								(unsigned)batch.target_frame,
+								(unsigned)vc->frame,
+								(unsigned)st.lcg_rand_state,
+								e.data.size());
+							a_string body = buf;
+							body += sync_log_bytes(e.data.data(),
+								e.data.size());
+							sync_log_line(sync_st, 'O', body);
+						}
+						try {
+							funcs.read_action(slot, rr);
+						} catch (bwgame::exception& ex) {
+							if (sync_st.sync_log) {
+								char buf[256];
+								snprintf(buf, sizeof(buf),
+									"AGENT_BATCH_APPLY_ERROR\tslot=%d"
+									"\ttarget_frame=%u\terror=%.100s",
+									slot,
+									(unsigned)batch.target_frame,
+									ex.what());
+								sync_log_line(sync_st, 'O', a_string(buf));
+							}
+							// Continue with the rest of the batch;
+							// one bad action shouldn't stop the whole
+							// tick's replay.
+						}
+					}
 				}
 			}
 
@@ -2114,6 +2359,16 @@ struct sync_functions: action_functions {
 		const uint8_t* data, size_t size)
 	{
 		get_syncer(server).broadcast_agent_action(slot, data, size);
+	}
+
+	// SyncBreaker #8 fix: prefer this over broadcast_agent_action() for
+	// live per-tick broadcasts. `entries` is a range of action_batch_entry
+	// (slot, data, size) preserving server-side ordering.
+	template<typename server_T, typename Container>
+	void broadcast_agent_action_batch(server_T& server,
+		const Container& entries)
+	{
+		get_syncer(server).broadcast_agent_action_batch(entries);
 	}
 
 	template<typename server_T>

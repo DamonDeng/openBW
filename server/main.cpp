@@ -703,15 +703,30 @@ int main(int argc, char** argv) {
 
 		// Drain pending agent commands in slot order (0 -> 7, FIFO within
 		// each slot). Each command was pre-encoded by ws_server into one
-		// or more BW action blobs (select + verb, typically). We do two
-		// things per blob:
-		//   1) schedule_action on the local virtual client so the server's
-		//      own sim applies it via execute_scheduled_actions.
-		//   2) broadcast_agent_action to every connected observer so their
-		//      sim schedules the same bytes on their own virtual client
-		//      and stays frame-for-frame with the server. Without step 2,
-		//      live observers would silently drift out of sync as soon as
-		//      the first agent command fires.
+		// or more BW action blobs (select + verb, typically).
+		//
+		// SyncBreaker #8 fix (2026-07-14): buffer ALL of this tick's
+		// actions into one batch and broadcast them together with
+		// broadcast_agent_action_batch, preserving the strict slot-major
+		// FIFO-within-slot order the server itself applies them in. The
+		// old code called broadcast_agent_action() per action, which
+		// produced N separate wire messages. That was correct on the
+		// wire but the observer's per-vc scheduled_actions queues + the
+		// order it iterated sync_st.clients could reorder intra-tick
+		// actions -- a real divergence source under load. See task #144
+		// and the id_agent_action_batch enum comment in sync.h.
+		//
+		// Local server sim still uses schedule_action per action -- its
+		// own execute_scheduled_actions runs immediately below, and its
+		// client-list ordering was already correct because start_game
+		// sorts by player_slot up-front (a property the observer's
+		// lazily-created vc list doesn't share).
+		// Own-the-bytes buffer so pointers stay valid through the batch
+		// broadcast that fires after drain() returns. cmd_queue.drain
+		// hands us pointers into deques it swap-owns internally; those
+		// deques are destroyed at drain-return time.
+		struct owned_action { int slot; std::vector<uint8_t> data; };
+		std::vector<owned_action> batch_owned;
 		cmd_queue.drain([&](int slot, const uint8_t* data, size_t size) {
 			auto* vc = virtual_clients[slot];
 			if (!vc) return;
@@ -719,8 +734,17 @@ int main(int argc, char** argv) {
 			// check doesn't stall on this "client".
 			vc->frame = (uint32_t)sync_st.sync_frame;
 			funcs.schedule_action(vc, data, size);
-			funcs.broadcast_agent_action(server, slot, data, size);
+			batch_owned.push_back({slot,
+				std::vector<uint8_t>(data, data + size)});
 		});
+		if (!batch_owned.empty()) {
+			std::vector<bwgame::action_batch_entry> batch_view;
+			batch_view.reserve(batch_owned.size());
+			for (auto& e : batch_owned) {
+				batch_view.push_back({e.slot, e.data.data(), e.data.size()});
+			}
+			funcs.broadcast_agent_action_batch(server, batch_view);
+		}
 
 		// Drain pending observe requests: build the observation JSON on
 		// the sim thread (safe -- we own state here), then hand it back
