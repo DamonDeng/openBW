@@ -257,3 +257,79 @@ The natural bisection is a series of `_debug_v3.<verb>` variants
 that enable exactly ONE of those passes on top of v2. If v3.scout
 diverges but v3.repair doesn't, we've pinned scout as the culprit.
 
+
+---
+
+## Follow-up 3: deterministic-repro soak with fixed initial_rand
+
+`scripts/soak_repro_yesterday.sh` config + `--fixed-initial-rand
+deadbeef`. Full t_agent_v5 + p_agent_v4, default intervals,
+player-role observers (per-slot fog).
+
+- Server confirmed `initial_rand=deadbeef` on GAME_START (byte-
+  exact LCG stream).
+- Terran got wiped by the Protoss economy advantage. Game ended
+  early at server frame 22,627.
+- Verified `--fixed-initial-rand` is deterministic across runs
+  (two separate server launches with the same value both printed
+  the same `initial_rand=deadbeef`).
+
+TICK-line diff:
+
+| pair                      | overlapping frames | diverged |
+|---------------------------|-------------------:|---------:|
+| obs_terran vs server      |             22,117 |    **0** |
+| obs_protoss vs server     |             22,118 |    **0** |
+| obs_terran vs obs_protoss |             22,125 |    **0** |
+
+## Where SyncBreaker #5 actually lives
+
+Cumulative today across all four soaks:
+
+| soak                          | frames  | diverged |
+|-------------------------------|--------:|---------:|
+| v1 peaceful T-v-P             | 31,218  |        0 |
+| v2 combat T-v-P               | 43,782  |        0 |
+| v2 combat P-v-P               | 45,033  |        0 |
+| yesterday-config + fixed rand | 22,117  |        0 |
+| **total**                     |**142,150**|      0 |
+
+Zero state-hash divergence in ~1.5 hours of aggregated game
+time across four distinct configs.
+
+Yesterday's frame-24862 divergence did NOT reproduce under
+`--fixed-initial-rand`. That means the bug is not deterministic
+with respect to the LCG state. Remaining hypotheses:
+
+1. **Action-arrival timing race.** Python `asyncio.sleep(1.5)`
+   isn't jitter-free; which frame an agent action lands on can
+   vary across runs even with identical sim state. Yesterday
+   the Protoss agent fired 8 actions in one server frame, and
+   the observer's TICK for that frame diverged. If the sim
+   applies actions in a non-deterministic order when they share
+   a target_frame + slot, that'd match the pattern.
+
+2. **OS-scheduler / socket-buffer variance.** TCP delivery
+   ordering between agent → server and server → observer isn't
+   guaranteed frame-perfect. If sync.h has any code that
+   depends on delivery order rather than the timestamp stamped
+   in id_agent_action, that'd bite here.
+
+3. **Genuinely transient.** Some environmental race that
+   fires <1-in-N runs. Would show up eventually in soak testing
+   but not on demand.
+
+Next capability needed: **action-queue logging on both agent
+and server sides**. Capture for each `id_agent_action` the
+(source slot, action bytes, sim frame when scheduled locally,
+sim frame when broadcast by server, sim frame when applied on
+each observer). Replay that recorded stream deterministically
+into a second run and see if the divergence reproduces.
+
+## Provisional verdict
+
+Under everything we can currently test with byte-exact repro,
+sync.h is clean. The observer is safe for workshop use with
+current code. Yesterday's finding is reclassified from "known
+sync.h bug" to "one-off, non-reproducible, capture more data
+next time it surfaces."
