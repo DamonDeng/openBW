@@ -2153,16 +2153,17 @@ struct ui_functions: ui_util_functions {
 					// Horizontal: two fingers moving RIGHT scrolls the
 					//   view right (screen_pos.x decreases) -- matches
 					//   left/right feel of native document scrolling.
-					// Vertical: two fingers moving DOWN moves the view
-					//   DOWN so the map appears to scroll up under the
-					//   viewport (screen_pos.y increases with downward
-					//   scroll gesture). This is inverted from the
-					//   macOS "natural scrolling" convention because
-					//   for a MAP camera the user thinks of the wheel
-					//   as steering the camera, not the content.
+					// Vertical: two fingers moving DOWN pulls the map
+					//   DOWN under the viewport (screen_pos.y decreases,
+					//   camera looks UP). Matches macOS natural-
+					//   scrolling: fingers drag the content, not the
+					//   camera. Qt and WASM observers are our delivery
+					//   targets and testers preferred this direction
+					//   there; the native SDL observer inherits the
+					//   same behavior from this shared handler.
 					constexpr float PIXELS_PER_LINE = 48.0f;
 					screen_pos.x -= (int)(e.wheel_x * PIXELS_PER_LINE);
-					screen_pos.y += (int)(e.wheel_y * PIXELS_PER_LINE);
+					screen_pos.y -= (int)(e.wheel_y * PIXELS_PER_LINE);
 					// Clamp so we don't scroll off the map. Allow half a
 					// screen of overscan so the user can center a corner.
 					int max_x = (int)game_st.map_width  - (int)view_width  / 2;
