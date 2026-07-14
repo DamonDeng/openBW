@@ -48,7 +48,12 @@ add_executable(simsc_app
                            # + ui/native_window_drawing.h + native_sound.h
                            # (drop-in for ui/sdl2.cpp -- pick one or the
                            # other, never both).
+    resources.qrc          # embeds assets/*.png into the binary; AUTORCC
+                           # (via CMAKE_AUTORCC below) turns .qrc -> .cpp.
 )
+
+# Auto-run rcc on any .qrc listed in the target's sources.
+set_property(TARGET simsc_app PROPERTY AUTORCC ON)
 
 target_link_libraries(simsc_app
     PRIVATE

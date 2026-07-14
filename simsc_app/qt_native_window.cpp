@@ -166,6 +166,13 @@ public:
 		setAttribute(Qt::WA_NoSystemBackground);
 		setFocusPolicy(Qt::StrongFocus);
 		setMouseTracking(true);
+		// Retail-style HUD chrome: left-half of Terran console panel.
+		// Baked-in alpha (transparent viewport + retail black slots).
+		// Placed at (-2, 293) so the console's minimap slot (x=6..133
+		// inside the source PNG, per the extraction analysis) lands
+		// exactly on top of openBW's native minimap position
+		// (map_screen_x=4 in ui/ui.h:1602). See docs on hud layout.
+		hud_console.load(":/hud/tconsole_left.png");
 	}
 
 	// Persistent RGBA framebuffer -- what SDL_GetWindowSurface returns
@@ -179,6 +186,14 @@ public:
 	// blit_scaled / fill code paths -- those use QColor / QPainter,
 	// which see the ARGB32 format correctly regardless.
 	QImage framebuffer;
+
+	// Retail SC1 console HUD art (left half of tconsole.pcx, with
+	// baked alpha for the game viewport + retail overpaint slots).
+	// Loaded once from ":/hud/tconsole_left.png" in the ctor and
+	// composited over `framebuffer` at paint time. Constant across
+	// the app's lifetime — no reload on race change (v1 uses Terran
+	// chrome for all races; Protoss/pconsole is a follow-up).
+	QImage hud_console;
 
 	// Queue of pending events awaiting peek_message() drain.
 	std::deque<native_window::event_t> events;
@@ -198,8 +213,32 @@ protected:
 		QPainter p(this);
 		if (framebuffer.isNull()) {
 			p.fillRect(rect(), Qt::black);
-		} else {
-			p.drawImage(0, 0, framebuffer);
+			return;
+		}
+		p.drawImage(0, 0, framebuffer);
+		// HUD overlay: bottom-left retail Terran console chrome.
+		// Placed at x=-2 so the console's minimap slot (x=6 inside
+		// the source PNG) lines up with openBW's native minimap
+		// draw position (map_screen_x=4, per ui/ui.h:1602). The
+		// two off-screen columns are outer chrome, unnoticeable.
+		if (!hud_console.isNull()) {
+			const int hud_x = -2;
+			const int hud_y = height() - hud_console.height();
+			p.drawImage(hud_x, hud_y, hud_console);
+			// The console's minimap slot (source PNG x=6..133,
+			// y=55..182 within the trimmed 406×187 asset) is opaque
+			// RGB(8,8,8) — a designed-to-be-overpainted placeholder.
+			// openBW has already drawn the real 128×128 minimap into
+			// the framebuffer at (4, height-4-128). Re-blit exactly
+			// that region on top of the HUD so the real minimap shows
+			// through the slot. Same trick retail BW's engine used to
+			// composite the live minimap over the console PNG.
+			const int mm_size = 128;
+			const int mm_x = 4;
+			const int mm_y = height() - 4 - mm_size;
+			p.drawImage(QRect(mm_x, mm_y, mm_size, mm_size),
+			            framebuffer,
+			            QRect(mm_x, mm_y, mm_size, mm_size));
 		}
 	}
 

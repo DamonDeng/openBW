@@ -1,0 +1,13 @@
+<!--
+  Qt resource bundle for simsc_app.
+
+  Assets referenced as ":/hud/<name>.png" get embedded into the
+  compiled binary via Qt's rcc so we don't have to ship + locate
+  files at runtime.
+-->
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/hud">
+    <file alias="tconsole_left.png">assets/tconsole_left.png</file>
+  </qresource>
+</RCC>
