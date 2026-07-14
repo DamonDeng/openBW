@@ -21,6 +21,14 @@ cmake-build-*/
 observer_log.txt
 log.txt
 
+# Soak-run evidence: raw sync-log dumps + agent stdout, tens of MB
+# per run. The insights are captured in commit messages + memory
+# notes; the raw dumps stay on disk for local re-analysis only.
+docs/soak_qt_20_*/
+
+# Local scratch: stray agent log files from ad-hoc runs.
+logs/
+
 # Editor / OS cruft
 .DS_Store
 .vscode/
