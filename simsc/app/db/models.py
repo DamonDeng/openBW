@@ -39,8 +39,11 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     # Cognito's stable, immutable subject claim (UUID). Our primary
-    # identity across identity-provider events.
-    cognito_sub: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # identity across identity-provider events. NULL for bot users
+    # created via POST /api/admin/users; a Postgres partial unique
+    # index (`uq_users_cognito_sub_not_null`, migration 0004) keeps
+    # non-null values unique.
+    cognito_sub: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     # Human-facing handle. From Cognito's `preferred_username` on first
     # login; never derived from email.
     alias: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)

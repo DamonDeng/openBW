@@ -61,7 +61,7 @@ def resolve_and_provision(
         )
         db.add(user)
         db.flush()  # get user.id
-        plain = _mint_key(db, user, label="first-login")
+        plain = mint_key(db, user, label="first-login")
         db.commit()
         reveal_cache.put(claims.sub, plain)
         return user, plain
@@ -74,7 +74,7 @@ def resolve_and_provision(
         ).limit(1)
     ).first()
     if not has_active:
-        plain = _mint_key(db, user, label="post-seed")
+        plain = mint_key(db, user, label="post-seed")
         db.commit()
         reveal_cache.put(claims.sub, plain)
         return user, plain
@@ -85,7 +85,9 @@ def resolve_and_provision(
     return user, plain
 
 
-def _mint_key(db: Session, user: User, label: str) -> str:
+def mint_key(db: Session, user: User, label: str) -> str:
+    """Insert a new active API key for `user` and return the plain
+    text. Caller is responsible for `db.commit()`."""
     plain = generate_api_key()
     key = ApiKey(user_id=user.id, key_hash=hash_api_key(plain), label=label)
     db.add(key)
