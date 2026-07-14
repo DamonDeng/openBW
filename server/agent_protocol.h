@@ -30,6 +30,10 @@ enum : uint8_t {
 	ACT_BUILD = 12,
 	ACT_STOP = 26,
 	ACT_TRAIN = 31,
+	ACT_UNLOAD_ALL = 40,     // payload: u8 queue. Kicks all passengers out of the
+	                         // selected transport/bunker at retail unload cadence.
+	ACT_UNLOAD = 41,         // payload: u16 target_unit. Ejects one specific
+	                         // passenger from the selected transport/bunker.
 	ACT_UNIT_MORPH = 35,     // payload: u16 unit_type. Zerg Larva -> unit,
 	                         // Hydralisk -> Lurker, Mutalisk -> Guardian/Devourer.
 	ACT_UNSIEGE = 37,        // payload: u8 queue. Terran Siege Tank -> Tank Mode.
@@ -199,6 +203,76 @@ inline std::optional<encode_error> encode_command(
 		put_u16(b, (uint16_t)bwgame::UnitTypes::None);
 		put_u8(b, (uint8_t)bwgame::Orders::Repair);
 		put_u8(b, 0);                            // queue = false
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
+	// --- Load (passenger -> transport/bunker) ---
+	// {"verb":"load","unit":<passenger_id>,"target_unit":<transport_id>}
+	// Retail BW uses the right-click path, which the agent protocol
+	// doesn't expose. We piggyback ACT_ORDER + Orders::EnterTransport,
+	// same as `repair` does with Orders::Repair. Silent-reject inside
+	// the sim if the target doesn't provide space, the passenger type
+	// can't enter (SCV cannot enter Bunker; Marine/Firebat/Ghost can),
+	// or the two units are on different teams.
+	if (verb == "load") {
+		auto* u = need("unit"); auto* t = need("target_unit");
+		if (!u || !t) return encode_error{"load: needs unit, target_unit"};
+		uint16_t unit_id = u->get<uint16_t>();
+		uint16_t target_id = t->get<uint16_t>();
+		if (target_id == 0)
+			return encode_error{"load: target_unit must not be 0"};
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, ACT_ORDER);
+		put_i16(b, 0); put_i16(b, 0);            // position ignored
+		put_u16(b, target_id);
+		put_u16(b, (uint16_t)bwgame::UnitTypes::None);
+		put_u8(b, (uint8_t)bwgame::Orders::EnterTransport);
+		put_u8(b, 0);                            // queue = false
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
+	// --- Unload one passenger ---
+	// {"verb":"unload","unit":<transport_id>,"target_unit":<passenger_id>}
+	// Selects the transport/bunker, then issues ACT_UNLOAD with the
+	// specific passenger to eject. Engine handler at actions.h:1117
+	// (read_action_unload -> action_unload).
+	if (verb == "unload") {
+		auto* u = need("unit"); auto* t = need("target_unit");
+		if (!u || !t) return encode_error{"unload: needs unit, target_unit"};
+		uint16_t transport_id = u->get<uint16_t>();
+		uint16_t passenger_id = t->get<uint16_t>();
+		if (passenger_id == 0)
+			return encode_error{"unload: target_unit must not be 0"};
+
+		out.push_back(make_select(transport_id));
+
+		action_blob b;
+		put_u8(b, ACT_UNLOAD);
+		put_u16(b, passenger_id);
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
+	// --- Unload all passengers ---
+	// {"verb":"unload_all","unit":<transport_id>,"queue":false}
+	// Kicks every passenger out at retail unload cadence (not
+	// instantaneous). Engine handler at actions.h:1111.
+	if (verb == "unload_all") {
+		auto* u = need("unit");
+		if (!u) return encode_error{"unload_all: needs unit"};
+		uint16_t transport_id = u->get<uint16_t>();
+		bool queue = cmd.value("queue", false);
+
+		out.push_back(make_select(transport_id));
+
+		action_blob b;
+		put_u8(b, ACT_UNLOAD_ALL);
+		put_u8(b, queue ? 1 : 0);
 		out.push_back(std::move(b));
 		return std::nullopt;
 	}

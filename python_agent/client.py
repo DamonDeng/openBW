@@ -296,6 +296,31 @@ class Client:
         Sim rejects silently at capacity."""
         return await self.cmd({"verb": "train_fighter", "unit": unit_id})
 
+    async def load(self, unit_id: int, target_unit: int) -> dict:
+        """Order `unit_id` (a passenger — e.g. Marine) to enter
+        `target_unit` (a transport or bunker). Sim silent-rejects if
+        the target doesn't provide space, the passenger type can't
+        enter (SCV cannot enter Bunker; Marine/Firebat/Ghost can),
+        or the two units are on different teams. After a successful
+        load the passenger's `transport_id` field in the observation
+        will point at target_unit."""
+        return await self.cmd({"verb": "load", "unit": unit_id,
+                               "target_unit": target_unit})
+
+    async def unload(self, unit_id: int, target_unit: int) -> dict:
+        """Eject one specific passenger from a transport or bunker.
+        `unit_id` is the CONTAINER (whose action queue drives the
+        unload); `target_unit` is the passenger being kicked out.
+        Note the swapped semantics vs `load`."""
+        return await self.cmd({"verb": "unload", "unit": unit_id,
+                               "target_unit": target_unit})
+
+    async def unload_all(self, unit_id: int) -> dict:
+        """Evacuate every passenger from a transport/bunker at retail
+        unload cadence (not instantaneous). Useful when the container
+        is about to die."""
+        return await self.cmd({"verb": "unload_all", "unit": unit_id})
+
     async def repair(self, unit_id: int, target_unit: int) -> dict:
         """Terran SCV repair: order the SCV to repair a friendly
         damaged mechanical unit or building. Sim rejects silently on
