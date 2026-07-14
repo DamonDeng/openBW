@@ -36,6 +36,17 @@ from app.services import k8s_client
 AIBOT = "AIBot"
 NONE_SLOT = "None"
 
+# Closed vocabulary of game-speed presets. The seven canonical BW
+# speeds plus two simsc extensions used for automated testing.
+# openbw_server (server/main.cpp) knows all nine names and maps them
+# to ms/frame; here we only need to validate.
+GAME_SPEEDS = (
+    "slowest", "slower", "slow", "normal",
+    "fast", "faster", "fastest",
+    "superfast", "turbosuper",
+)
+DEFAULT_GAME_SPEED = "fastest"
+
 # 4-hour TTL on pending invitations, per M4 decisions.
 INVITATION_TTL = timedelta(hours=4)
 
@@ -110,6 +121,7 @@ def create(
     map_name: str,
     races: list[str],
     player_aliases: list[str | None],
+    game_speed: str = DEFAULT_GAME_SPEED,
 ) -> Game:
     """Create a game. If any slot points at a *different* real user,
     the game enters pending_invitations. Otherwise (only creator +
@@ -121,6 +133,11 @@ def create(
             status.HTTP_400_BAD_REQUEST,
             f"races ({len(races)}) and player_aliases ({len(player_aliases)}) "
             f"length mismatch",
+        )
+    if game_speed not in GAME_SPEEDS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"game_speed must be one of {list(GAME_SPEEDS)}, got {game_speed!r}",
         )
     # End-user rule: they must be a player. Admins are exempt.
     real = _real_players(player_aliases)
@@ -162,6 +179,7 @@ def create(
         map=map_name,
         races=resolved_races,
         player_aliases=list(player_aliases),
+        game_speed=game_speed,
         state="pending_invitations" if invitees else "running",
     )
     db.add(game)
@@ -204,6 +222,7 @@ def _launch(db: Session, game: Game) -> None:
         map_name=game.map,
         races=game.races,
         user_hashes=user_hashes,
+        game_speed=game.game_speed,
     )
     game.pod_name = handles.pod_name
     game.ingress_name = handles.ingress_name

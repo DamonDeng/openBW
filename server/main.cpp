@@ -113,7 +113,9 @@ struct args_t {
 	// ms/frame. Retail BW ships seven speeds: slowest=167, slower=111,
 	// slow=83, normal=67, fast=56, faster=48, fastest=42. Campaign
 	// defaults to fast; multiplayer defaults to fastest. We pick fastest
-	// as our default so agent iteration is snappy.
+	// as our default so agent iteration is snappy. We also ship two
+	// non-BW extensions used for automated testing: superfast=20 and
+	// turbosuper=10 (see docs — simsc soaks run at 10 by convention).
 	int tick_ms = 42;
 
 	// Per-slot race override. -1 means "use map default". Indices are
@@ -125,13 +127,16 @@ struct args_t {
 
 // Named speeds (matches retail BW's ms/frame table).
 inline int speed_name_to_ms(const std::string& name) {
-	if (name == "slowest") return 167;
-	if (name == "slower")  return 111;
-	if (name == "slow")    return 83;
-	if (name == "normal")  return 67;
-	if (name == "fast")    return 56;
-	if (name == "faster")  return 48;
-	if (name == "fastest") return 42;
+	if (name == "slowest")   return 167;
+	if (name == "slower")    return 111;
+	if (name == "slow")      return 83;
+	if (name == "normal")    return 67;
+	if (name == "fast")      return 56;
+	if (name == "faster")    return 48;
+	if (name == "fastest")   return 42;
+	// simsc extensions beyond BW's canonical seven, for testing:
+	if (name == "superfast") return 20;
+	if (name == "turbosuper")return 10;
 	return -1;
 }
 
@@ -216,9 +221,9 @@ args_t parse_args(int argc, char** argv) {
 				if (as_int <= 0 || as_int > 1000) {
 					fprintf(stderr,
 						"error: --game-speed must be one of "
-						"slowest/slower/slow/normal/fast/faster/fastest, "
-						"or an integer number of ms/frame (1-1000). "
-						"got %s\n", v.c_str());
+						"slowest/slower/slow/normal/fast/faster/fastest/"
+						"superfast/turbosuper, or an integer number of "
+						"ms/frame (1-1000). got %s\n", v.c_str());
 					std::exit(1);
 				}
 				a.tick_ms = as_int;
@@ -281,6 +286,8 @@ args_t parse_args(int argc, char** argv) {
 				"                     name: slowest, slower, slow, normal,\n"
 				"                     fast, faster, fastest (default:\n"
 				"                     fastest = 42 ms/frame ~ 24 FPS).\n"
+				"                     simsc extensions: superfast (20 ms)\n"
+				"                     and turbosuper (10 ms) for testing.\n"
 				"                     Retail BW campaign uses 'fast' (56).\n"
 				"  --race N=RACE      override slot N's race, one of\n"
 				"                     zerg/terran/protoss. Repeat for\n"

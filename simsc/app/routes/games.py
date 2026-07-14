@@ -57,6 +57,7 @@ class GameOut(BaseModel):
     map: str
     races: list[str]
     player_aliases: list[Optional[str]]
+    game_speed: str
     state: str
     invitations: list[InvitationOut]
     pod_phase: Optional[str] = None
@@ -91,6 +92,7 @@ def _to_out(
         map=game.map,
         races=game.races,
         player_aliases=game.player_aliases,
+        game_speed=game.game_speed,
         state=game.state,
         invitations=[
             InvitationOut(
@@ -117,6 +119,10 @@ class CreateGameIn(BaseModel):
     races: list[str] = Field(..., min_length=2, max_length=8)
     # Slot list. Real alias, "AIBot", or None. Length matches races.
     player_aliases: list[Optional[str]] = Field(..., min_length=2, max_length=8)
+    # Optional sim tick pacing preset; validated in games_service.create
+    # against the closed vocabulary (`GAME_SPEEDS`). Default matches
+    # openbw_server's baked-in default of 42 ms/frame.
+    game_speed: str = "fastest"
 
 
 @router.post("", response_model=GameOut)
@@ -126,7 +132,8 @@ def create_game_route(
     db: Session = Depends(get_db),
 ) -> GameOut:
     game = games_service.create(
-        db, user, body.map, body.races, body.player_aliases
+        db, user, body.map, body.races, body.player_aliases,
+        game_speed=body.game_speed,
     )
     return _to_out(db, game, user, include_pod_phase=True)
 

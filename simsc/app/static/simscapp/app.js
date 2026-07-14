@@ -268,6 +268,25 @@
       zerg: t('create_game.race_zerg'),
     };
 
+    // Sim tick pacing. Must exactly match `GAME_SPEEDS` in
+    // simsc/app/services/games.py; the server validates.
+    const gameSpeeds = [
+      'slowest', 'slower', 'slow', 'normal',
+      'fast', 'faster', 'fastest',
+      'superfast', 'turbosuper',
+    ];
+    const speedLabels = {
+      slowest:    t('create_game.speed_slowest'),
+      slower:     t('create_game.speed_slower'),
+      slow:       t('create_game.speed_slow'),
+      normal:     t('create_game.speed_normal'),
+      fast:       t('create_game.speed_fast'),
+      faster:     t('create_game.speed_faster'),
+      fastest:    t('create_game.speed_fastest'),
+      superfast:  t('create_game.speed_superfast'),
+      turbosuper: t('create_game.speed_turbosuper'),
+    };
+
     // Rebuild dropdowns whenever map changes
     const backdrop = document.createElement('div');
     backdrop.className = 'modal-backdrop';
@@ -279,7 +298,11 @@
           ${maps.map(m => `<option value="${m.filename}" data-players="${m.player_count}">${m.filename}</option>`).join('')}
         </select>
         <p class="meta" id="players-hint" style="margin-top:6px"></p>
-        <div id="slots"></div>
+        <label class="form-label" style="margin-top:10px">${t('create_game.speed_label')}</label>
+        <select id="game-speed-select" style="width:100%">
+          ${gameSpeeds.map(s => `<option value="${s}"${s==='fastest'?' selected':''}>${speedLabels[s]}</option>`).join('')}
+        </select>
+        <div id="slots" style="margin-top:10px"></div>
         <div class="error hidden" id="modal-error"></div>
         <div class="btn-row">
           <button id="modal-cancel">${t('create_game.cancel_button')}</button>
@@ -291,9 +314,13 @@
     const mapSel = backdrop.querySelector('#map-select');
     const slotsEl = backdrop.querySelector('#slots');
     const playersHint = backdrop.querySelector('#players-hint');
+    const speedSel = backdrop.querySelector('#game-speed-select');
 
     // Draft support: restore last inputs after a decline
     if (draft && draft.map) mapSel.value = draft.map;
+    if (draft && draft.game_speed && gameSpeeds.includes(draft.game_speed)) {
+      speedSel.value = draft.game_speed;
+    }
 
     function rebuildSlots() {
       const opt = mapSel.selectedOptions[0];
@@ -351,13 +378,14 @@
     backdrop.querySelector('#modal-cancel').onclick = () => backdrop.remove();
     backdrop.querySelector('#modal-create').onclick = async () => {
       const map = mapSel.value;
+      const game_speed = speedSel.value;
       const races = Array.from(slotsEl.querySelectorAll('.slot-race')).map(s => s.value);
       const player_aliases = Array.from(slotsEl.querySelectorAll('.slot-player')).map(s => {
         if (s.value === '__none') return null;
         if (s.value === '__aibot') return 'AIBot';
         return s.value;
       });
-      const draft = { map, races, player_aliases };
+      const draft = { map, races, player_aliases, game_speed };
       state.lastDraft = draft;
 
       const btn = backdrop.querySelector('#modal-create');
@@ -365,7 +393,7 @@
       try {
         await api('/api/games', {
           method: 'POST',
-          body: JSON.stringify({ map, races, player_aliases }),
+          body: JSON.stringify({ map, races, player_aliases, game_speed }),
         });
         state.lastDraft = null;
         backdrop.remove();

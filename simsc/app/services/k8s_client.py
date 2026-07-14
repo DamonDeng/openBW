@@ -60,6 +60,7 @@ def create_game(
     map_name: str,
     races: list[str],
     user_hashes: list[tuple[str, str, int]],
+    game_speed: str = "fastest",
 ) -> GameHandles:
     """Create Pod + Service + Ingress for one game.
 
@@ -69,6 +70,9 @@ def create_game(
                    same alias/slot are OK — they bind multiple keys
                    to the same player identity. Passed as repeated
                    `--user-hash alias:sha256hex:player:slot` args.
+      game_speed: name of a --game-speed preset. See openbw_server
+                  --help for the list; validated at the API layer
+                  (`services.games.GAME_SPEEDS`).
     """
     _init()
     pod_name = f"{game_id}-pod"
@@ -83,7 +87,7 @@ def create_game(
     # --- args ---
     args = [
         "--map", f"/opt/openbw/data/{map_name}",
-        "--game-speed", "42",
+        "--game-speed", game_speed,
         "--any-ws-path",  # ALB path-routes to us; accept any WS path.
     ]
     for i, race in enumerate(races):

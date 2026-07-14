@@ -93,6 +93,14 @@ class Game(Base):
     # Per-slot alias. Entries: real alias, "AIBot" (treated as empty
     # for M4), or None (empty). Length matches races.
     player_aliases: Mapped[list[Optional[str]]] = mapped_column(JSON, nullable=False)
+    # Sim tick pacing: one of the nine names defined in
+    # `services/games.py::GAME_SPEEDS`. Stored as name (not ms) so
+    # future re-tunings of the name→ms table don't retro-change
+    # finished games. Default "fastest" matches openbw_server's
+    # baked-in default (42 ms/frame).
+    game_speed: Mapped[str] = mapped_column(
+        String(16), default="fastest", nullable=False
+    )
     # Pod / ingress names — set once the game transitions to running.
     pod_name: Mapped[Optional[str]] = mapped_column(String(63))
     ingress_name: Mapped[Optional[str]] = mapped_column(String(63))
