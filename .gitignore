@@ -5,6 +5,10 @@ original_resources/
 # Contents are secrets and machine-specific; never commit.
 test_resources/
 
+# Local dev tools + their extracted output. Contents include
+# Blizzard-owned art assets (MPQ dumps); never commit.
+project_tools/
+
 # AWS account details, IAM keys, isengard creds, cluster names, and
 # any other tenant-specific configuration. Machine- and account-
 # specific; contains secrets; never commit.
