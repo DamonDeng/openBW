@@ -123,6 +123,14 @@ struct args_t {
 	// slots; slots 8..11 are reserved (neutral/rescue/etc.).
 	// race_t values match game_types.h: 0=zerg, 1=terran, 2=protoss.
 	std::array<int8_t, 8> race_overrides{{-1,-1,-1,-1,-1,-1,-1,-1}};
+
+	// Per-slot starting-resource override (--resources N=MIN,GAS).
+	// -1 in either field means "use map default" (typically 50/0 for
+	// melee). Applied after load_map_file returns, before the sync
+	// handshake / agent WS accepts, so agents observe the seeded
+	// value from their very first tick. Indices are 0..7.
+	std::array<int, 8>  initial_minerals{{-1,-1,-1,-1,-1,-1,-1,-1}};
+	std::array<int, 8>  initial_gas{{-1,-1,-1,-1,-1,-1,-1,-1}};
 };
 
 // Named speeds (matches retail BW's ms/frame table).
@@ -138,6 +146,31 @@ inline int speed_name_to_ms(const std::string& name) {
 	if (name == "superfast") return 20;
 	if (name == "turbosuper")return 10;
 	return -1;
+}
+
+// Parse "N=MIN,GAS" (e.g., "0=5000,3000") into (slot, minerals, gas).
+// Returns false on malformed input. Both values must be >= 0 and fit
+// in a 32-bit int (retail's income cap is ~50k/50k, no reason to seed
+// above that). Slot in 0..7.
+inline bool parse_resources_override(const std::string& v, int& slot,
+                                     int& minerals, int& gas) {
+	auto eq_pos = v.find('=');
+	if (eq_pos == std::string::npos) return false;
+	std::string lhs = v.substr(0, eq_pos);
+	std::string rhs = v.substr(eq_pos + 1);
+	if (lhs.empty() || rhs.empty()) return false;
+	slot = std::atoi(lhs.c_str());
+	if (slot < 0 || slot > 7) return false;
+	auto comma = rhs.find(',');
+	if (comma == std::string::npos) return false;
+	std::string m_str = rhs.substr(0, comma);
+	std::string g_str = rhs.substr(comma + 1);
+	if (m_str.empty() || g_str.empty()) return false;
+	minerals = std::atoi(m_str.c_str());
+	gas      = std::atoi(g_str.c_str());
+	if (minerals < 0 || gas < 0) return false;
+	if (minerals > 1000000 || gas > 1000000) return false;
+	return true;
 }
 
 // Parse "N=NAME" (e.g., "0=protoss") into (slot, race_id). Returns
@@ -210,6 +243,19 @@ args_t parse_args(int argc, char** argv) {
 				std::exit(1);
 			}
 			a.race_overrides[slot] = race_id;
+		}
+		else if (eq("--resources") && i + 1 < argc) {
+			std::string v = argv[++i];
+			int slot, minerals, gas;
+			if (!parse_resources_override(v, slot, minerals, gas)) {
+				fprintf(stderr,
+					"error: --resources expects <slot>=<minerals>,<gas>, "
+					"slot in 0..7 and both values in 0..1000000. got %s\n",
+					v.c_str());
+				std::exit(1);
+			}
+			a.initial_minerals[slot] = minerals;
+			a.initial_gas[slot]      = gas;
 		}
 		else if (eq("--game-speed") && i + 1 < argc) {
 			std::string v = argv[++i];
@@ -295,7 +341,14 @@ args_t parse_args(int argc, char** argv) {
 				"                     --race 1=terran). Overrides the race\n"
 				"                     the map assigned to that slot. Only\n"
 				"                     meaningful on melee maps where\n"
-				"                     starting units are spawned by race.\n",
+				"                     starting units are spawned by race.\n"
+				"  --resources N=M,G  override slot N's starting resources\n"
+				"                     to M minerals and G gas (both int,\n"
+				"                     0..1000000). Applied post-map-load,\n"
+				"                     before the sim starts, so agents\n"
+				"                     see it from frame 0. Unspecified\n"
+				"                     slots keep the map's default (50/0\n"
+				"                     for melee). Repeat per slot.\n",
 				argv[0]);
 			std::exit(0);
 		} else {
@@ -375,9 +428,44 @@ int main(int argc, char** argv) {
 		};
 		loader.load_map_file(a_string(args.map_path.c_str()), setup_f);
 	}
+
 	action_state action_st;
 	sync_state sync_st;
 	sync_functions funcs(st, action_st, sync_st);
+
+	// Per-slot starting-resource overrides. The map/setup_info flow
+	// has already seeded st.current_minerals/current_gas (typically
+	// 0 for melee, or setup_info.starting_minerals when
+	// resource_type=1). We overwrite the server's local sim state
+	// AND mirror the override into sync_st.initial_slot_minerals/
+	// initial_slot_gas so catchup_provider can ship them to any
+	// late-joining observer. Without the observer-side plumbing
+	// the observer's local sim would start at map-default (0/0)
+	// and its HUD would show 0 while the server had 5000 — the
+	// bug that motivated this whole plumb-through.
+	// total_*_gathered mirrors the seed value so the sim's income
+	// bookkeeping stays self-consistent (otherwise the first mine
+	// would show negative income relative to the visible balance).
+	// See bwgame.h ~21882 for the corresponding retail seed and
+	// catchup_bundle_t::slot_minerals for the wire path.
+	for (size_t i = 0; i < 8; ++i) {
+		if (args.initial_minerals[i] >= 0) {
+			int m = args.initial_minerals[i];
+			st.current_minerals[i]           = m;
+			st.total_minerals_gathered[i]    = m;
+			sync_st.initial_slot_minerals[i] = m;
+			fprintf(stderr,
+				"[srv] slot %zu starting minerals override: %d\n", i, m);
+		}
+		if (args.initial_gas[i] >= 0) {
+			int g = args.initial_gas[i];
+			st.current_gas[i]           = g;
+			st.total_gas_gathered[i]    = g;
+			sync_st.initial_slot_gas[i] = g;
+			fprintf(stderr,
+				"[srv] slot %zu starting gas override: %d\n", i, g);
+		}
+	}
 	game_load_functions::setup_info_t setup_info;
 	for (size_t i = 0; i < 8; ++i) setup_info.create_melee_units_for_player[i] = true;
 	sync_st.setup_info = &setup_info;
@@ -426,6 +514,16 @@ int main(int argc, char** argv) {
 		// the lcg_rand(144) call that server made, desyncing the RNG.
 		for (int i = 0; i < 12; ++i) {
 			b.slot_races[i] = (uint8_t)sync_st.initial_slot_races[i];
+		}
+		// Per-slot starting-resource overrides. sync_st keeps these
+		// as sentinel arrays (-1 == "no override"); the observer's
+		// handle_catchup applies non-negative entries to
+		// st.current_minerals/gas + total_*_gathered after
+		// start_game_local finishes. See catchup_bundle_t::
+		// slot_minerals docs and sync_state::initial_slot_minerals.
+		for (int i = 0; i < 12; ++i) {
+			b.slot_minerals[i] = sync_st.initial_slot_minerals[i];
+			b.slot_gas[i]      = sync_st.initial_slot_gas[i];
 		}
 		size_t total = 0;
 		for (auto& chunk : replay_saver.history) total += chunk.size();

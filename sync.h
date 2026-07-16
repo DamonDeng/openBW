@@ -113,6 +113,16 @@ struct sync_state {
 	std::array<race_t, 12> initial_slot_races;
 	std::array<int, 12> initial_slot_controllers;
 	std::array<race_t, 12> picked_races;
+	// Per-slot resource snapshot captured at the same "first
+	// sync_next_frame" boundary as initial_slot_races, so that
+	// late-joining observers can reconstruct the pre-tick-0
+	// balances the server booted with (typically the map default,
+	// or whatever --resources / a future lobby verb overrode them
+	// to). -1 sentinel means "no override active for this slot"
+	// (observer keeps its own map-load default). See
+	// catchup_bundle_t::slot_minerals for the wire path.
+	std::array<int32_t, 12> initial_slot_minerals{{-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1}};
+	std::array<int32_t, 12> initial_slot_gas{{-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1}};
 
 	bool game_type_melee = false;
 
@@ -194,6 +204,21 @@ struct sync_state {
 		// observer writes them into its own st.players before calling
 		// start_game_local. Value at index i is the race enum id.
 		std::array<uint8_t, 12> slot_races;
+
+		// Authoritative per-slot starting resources at the moment the
+		// server's sim started (frame 0 minerals + gas). Same reason
+		// as slot_races: the server may have been launched with
+		// --resources N=M,G to seed non-map-default balances, but
+		// the observer's map load has no way to see that. We ship
+		// the pair here so the observer can write them into its own
+		// st.current_minerals/current_gas AFTER start_game_local
+		// runs and BEFORE it replays action history. If both are
+		// -1 the observer keeps whatever its map load produced (the
+		// legacy path). Values are 32-bit signed to match the sim
+		// state; -1 sentinel means "not overridden".
+		std::array<int32_t, 12> slot_minerals;
+		std::array<int32_t, 12> slot_gas;
+
 		a_vector<uint8_t> action_bytes;
 	};
 	std::function<catchup_bundle_t()> catchup_provider;
@@ -1046,6 +1071,18 @@ struct sync_functions: action_functions {
 								for (int i = 0; i < 12; ++i) {
 									cw.put<uint8_t>(bundle.slot_races[i]);
 								}
+								// Per-slot starting resources (see
+								// catchup_bundle_t::slot_minerals docs).
+								// 12 signed 32-bit values each for
+								// minerals then gas; -1 sentinel means
+								// "keep whatever the observer's map
+								// load produced".
+								for (int i = 0; i < 12; ++i) {
+									cw.put<int32_t>(bundle.slot_minerals[i]);
+								}
+								for (int i = 0; i < 12; ++i) {
+									cw.put<int32_t>(bundle.slot_gas[i]);
+								}
 								cw.put<uint32_t>((uint32_t)bundle.action_bytes.size());
 								cw.put_bytes(bundle.action_bytes.data(), bundle.action_bytes.size());
 								send(cw, client->h);
@@ -1289,6 +1326,20 @@ struct sync_functions: action_functions {
 			for (int i = 0; i < 12; ++i) {
 				slot_races[i] = r.template get<uint8_t>();
 			}
+			// Per-slot starting-resource overrides shipped alongside
+			// slot_races. -1 sentinels mean "keep the map default";
+			// non-negative values override st.current_minerals/gas
+			// AFTER start_game_local has set up the sim (so the
+			// override lands on the same state the server saw when
+			// it applied its own --resources flag).
+			std::array<int32_t, 12> slot_minerals{};
+			std::array<int32_t, 12> slot_gas{};
+			for (int i = 0; i < 12; ++i) {
+				slot_minerals[i] = r.template get<int32_t>();
+			}
+			for (int i = 0; i < 12; ++i) {
+				slot_gas[i] = r.template get<int32_t>();
+			}
 			// Apply to st.players BEFORE start_game_local runs. Guard on
 			// !game_started: if the observer is somehow reconnecting to
 			// a game it already had bootstrapped, we don't want to stomp
@@ -1317,6 +1368,28 @@ struct sync_functions: action_functions {
 			// installs starting units, initial resources, races, etc.
 			if (!sync_st.game_started) {
 				start_game_local(rand_state);
+			}
+
+			// Apply per-slot resource overrides post-bootstrap so
+			// observer's current_minerals/gas match what the server
+			// wrote via --resources (or via a future control-plane
+			// lobby message). This has to run AFTER start_game_local
+			// because bwgame's load path zeroes current_* early; it
+			// runs BEFORE we replay any action history so
+			// mineral-spending actions see the right balance.
+			// See catchup_bundle_t::slot_minerals docs for why.
+			// total_*_gathered mirrors the seed value to keep the
+			// sim's income bookkeeping self-consistent with the
+			// balance agents observe from frame 0.
+			for (int i = 0; i < 12; ++i) {
+				if (slot_minerals[i] >= 0) {
+					st.current_minerals[i]        = slot_minerals[i];
+					st.total_minerals_gathered[i] = slot_minerals[i];
+				}
+				if (slot_gas[i] >= 0) {
+					st.current_gas[i]        = slot_gas[i];
+					st.total_gas_gathered[i] = slot_gas[i];
+				}
 			}
 
 			// Feed the action stream through execute_actions, alternating
