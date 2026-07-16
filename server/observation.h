@@ -79,6 +79,45 @@ inline void serialize_unit(nlohmann::json& out, const bwgame::state_functions& f
 	if (u->status_flags & bwgame::unit_t::status_flag_cloaked)        out["cloaked"] = true;
 	if (u->status_flags & bwgame::unit_t::status_flag_grounded_building) out["building"] = true;
 
+	// Transport / bunker passenger state.
+	//
+	// Without this an agent has no way to tell a Marine is already
+	// inside a Bunker, so idle-passenger loops keep re-firing `load`
+	// every tick. See issue 2026-07-14-observation-missing-bunker-
+	// load-state.md in ../simsc_agent_builder/issues/ for the failure
+	// mode this fixes.
+	//
+	// Two forms:
+	//   * boolean flags on the passenger ("loaded", "in_bunker")
+	//     mirror the two status bits directly;
+	//   * "transport_id" on the passenger + "loaded_units" array on
+	//     the container give agents the graph they need to compute
+	//     "how full is this bunker" and "which container holds this
+	//     marine" without extra queries.
+	bool is_loaded    = (u->status_flags & bwgame::unit_t::status_flag_loaded)    != 0;
+	bool is_in_bunker = (u->status_flags & bwgame::unit_t::status_flag_in_bunker) != 0;
+	if (is_loaded)    out["loaded"]    = true;
+	if (is_in_bunker) out["in_bunker"] = true;
+	if ((is_loaded || is_in_bunker) && u->connected_unit) {
+		out["transport_id"] =
+			(unsigned)funcs.get_unit_id(u->connected_unit).raw_value;
+	}
+	// Container side: iterate loaded_units() (filter range that
+	// skips freed slot indices) and emit passenger unit_ids. The
+	// array is only present when non-empty so quiet units (most
+	// combat units) stay small on the wire.
+	{
+		auto passengers = funcs.loaded_units(u);
+		auto it = passengers.begin();
+		if (it != passengers.end()) {
+			auto arr = nlohmann::json::array();
+			for (const bwgame::unit_t* p : passengers) {
+				arr.push_back((unsigned)funcs.get_unit_id(p).raw_value);
+			}
+			out["loaded_units"] = std::move(arr);
+		}
+	}
+
 	// Carrier / Reaver fighter counts. Interceptors and Scarabs are
 	// owned by a parent Carrier/Reaver -- the parent link isn't on
 	// the wire (they look like ordinary units otherwise), so exposing
