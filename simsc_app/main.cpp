@@ -266,7 +266,7 @@ int main(int argc, char** argv) {
 	// (The SDL observer does the same thing with a 1 ms sleep loop.)
 	sim_timer.setInterval(10);
 	QObject::connect(&sim_timer, &QTimer::timeout, &app,
-		[&funcs, &server, &sync_st, &ui, &loop_st]() {
+		[&funcs, &server, &sync_st, &ui, &loop_st, &wnd]() {
 		funcs.next_frame(server);
 
 		if (!loop_st.rand_logged && sync_st.game_started
@@ -292,6 +292,26 @@ int main(int argc, char** argv) {
 			ui::log("[simsc_app] viewing perspective: slot=%d\n",
 				(int)sync_st.viewing_slot);
 			loop_st.last_slot = sync_st.viewing_slot;
+		}
+
+		// Push per-slot resource readouts into the HUD.
+		// Spectator / no-slot -> hide (-1). Supply values in the sim
+		// are stored as fp1 at 2× the retail displayed value (see
+		// bwgame.h:2228), so we halve after integer_part().
+		{
+			native_window::hud_state_t hs;
+			int slot = ui.viewing_slot;
+			if (slot >= 0 && slot < 8 && sync_st.game_started) {
+				int r = (int)ui.st.players[slot].race;
+				if (r < 0 || r > 2) r = 1;  // fall back to terran table
+				hs.minerals    = ui.st.current_minerals[slot];
+				hs.gas         = ui.st.current_gas[slot];
+				hs.supply_used =
+				    ui.st.supply_used[slot][r].integer_part() / 2;
+				hs.supply_max  =
+				    ui.st.supply_available[slot][r].integer_part() / 2;
+			}
+			wnd.set_hud_state(hs);
 		}
 
 		// Diagnostic: print local sim frame every 300 sim frames. Lets us

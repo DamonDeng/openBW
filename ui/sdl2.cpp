@@ -219,6 +219,12 @@ void window::update_surface() {
 	return impl->update_surface();
 }
 
+void window::set_hud_state(const hud_state_t&) {
+	// SDL observer has no HUD blit yet; readouts are dropped here
+	// intentionally. See ui/font_bitmap.h + qt_native_window.cpp
+	// for the Qt path that actually paints them.
+}
+
 window::operator bool() const {
 	return (bool)*impl;
 }

@@ -61,6 +61,7 @@
 #include "native_sound.h"
 
 #include "common.h"
+#include "font_bitmap.h"
 
 #include <QtCore/QCoreApplication>
 #include <QtCore/QEvent>
@@ -78,6 +79,7 @@
 #include <QtWidgets/QWidget>
 
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -195,6 +197,12 @@ public:
 	// chrome for all races; Protoss/pconsole is a follow-up).
 	QImage hud_console;
 
+	// Latest numeric readouts forwarded from main.cpp each frame.
+	// Fields set to -1 mean "hide" — the paintEvent skips drawing
+	// them (used for spectator perspective where per-slot numbers
+	// don't apply). See native_window::hud_state_t docs.
+	native_window::hud_state_t hud_state{};
+
 	// Queue of pending events awaiting peek_message() drain.
 	std::deque<native_window::event_t> events;
 
@@ -239,6 +247,64 @@ protected:
 			p.drawImage(QRect(mm_x, mm_y, mm_size, mm_size),
 			            framebuffer,
 			            QRect(mm_x, mm_y, mm_size, mm_size));
+
+			// Numeric HUD readouts drawn on top of the console chrome.
+			// Icons live in HUD-local coords (170, 98/119/140); text
+			// starts 4 px right of icon. Widget-space X = hud_x + 170
+			// + icon_w + gap = -2 + 170 + 14 + 4 = 186. Y baselines
+			// offset from HUD top-left by icon-y + 3 (visually
+			// centered on the 14-px icon with 8-px glyphs).
+			if (hud_state.minerals >= 0 || hud_state.gas >= 0 ||
+			    hud_state.supply_used >= 0) {
+				const int text_x = 186;
+				const int text_y_min = hud_y + 101;
+				const int text_y_gas = hud_y + 122;
+				const int text_y_sup = hud_y + 143;
+
+				// Bright white text with a black 1-px drop shadow —
+				// matches retail readouts' contrast against the
+				// mid-gray chrome panel. AARRGGBB.
+				const uint32_t fg     = 0xFFFFFFFFu;
+				const uint32_t shadow = 0xFF000000u;
+
+				// We paint directly into the widget-owned QImage
+				// framebuffer of QPainter's target — but QPainter is
+				// on `this`, so instead we work into a small side
+				// QImage (Format_ARGB32) and drawImage() it. Zero
+				// alloc per frame? Static per-widget cache would be
+				// nice; for now, a fresh 96x12 buffer is small.
+				auto paint_num = [&](int x, int y, const char* s) {
+					if (!s || !*s) return;
+					int w = bw_hud_font::measure_text(s) + 2;
+					if (w < 8) w = 8;
+					const int h = 10;
+					QImage buf(w, h, QImage::Format_ARGB32);
+					buf.fill(Qt::transparent);
+					bw_hud_font::draw_text_rgba(
+					    buf.bits(), buf.bytesPerLine(),
+					    0, 1, s, fg, shadow, w, h);
+					p.drawImage(x, y, buf);
+				};
+
+				char sbuf[32];
+				if (hud_state.minerals >= 0) {
+					std::snprintf(sbuf, sizeof(sbuf), "%d",
+					              hud_state.minerals);
+					paint_num(text_x, text_y_min, sbuf);
+				}
+				if (hud_state.gas >= 0) {
+					std::snprintf(sbuf, sizeof(sbuf), "%d",
+					              hud_state.gas);
+					paint_num(text_x, text_y_gas, sbuf);
+				}
+				if (hud_state.supply_used >= 0 &&
+				    hud_state.supply_max >= 0) {
+					std::snprintf(sbuf, sizeof(sbuf), "%d/%d",
+					              hud_state.supply_used,
+					              hud_state.supply_max);
+					paint_num(text_x, text_y_sup, sbuf);
+				}
+			}
 		}
 	}
 
@@ -445,6 +511,10 @@ struct window_impl {
 		if (widget) widget->update();
 	}
 
+	void set_hud_state(const hud_state_t& s) {
+		if (widget) widget->hud_state = s;
+	}
+
 	explicit operator bool() const { return widget != nullptr; }
 
 	QImage* framebuffer() {
@@ -466,6 +536,7 @@ bool window::show_cursor(bool show)   { return impl->show_cursor(show); }
 bool window::get_key_state(int sc)    { return impl->get_key_state(sc); }
 bool window::get_mouse_button_state(int b) { return impl->get_mouse_button_state(b); }
 void window::update_surface()         { impl->update_surface(); }
+void window::set_hud_state(const hud_state_t& s) { impl->set_hud_state(s); }
 window::operator bool() const         { return (bool)*impl; }
 
 } // namespace native_window

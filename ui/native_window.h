@@ -41,6 +41,19 @@ namespace native_window {
 		float wheel_y = 0.0f;
 	};
 
+	// Numeric HUD readouts shown alongside the retail console icons.
+	// The observer's main loop refreshes these each frame from the
+	// sim state; the window backend paints them into its HUD strip
+	// during the next paintEvent. Fields set to -1 mean "hide this
+	// readout" (used for spectator perspective where per-slot
+	// numbers don't apply).
+	struct hud_state_t {
+		int minerals = -1;
+		int gas = -1;
+		int supply_used = -1;
+		int supply_max = -1;
+	};
+
 	struct window {
 		std::unique_ptr<window_impl> impl;
 		window();
@@ -54,6 +67,10 @@ namespace native_window {
 		bool get_key_state(int scancode);
 		bool get_mouse_button_state(int button);
 		void update_surface();
+		// Update the numeric readouts drawn alongside the HUD icons.
+		// Currently honored by the Qt backend; SDL/WASM ignore it
+		// until they grow their own HUD blit.
+		void set_hud_state(const hud_state_t& s);
 		explicit operator bool() const;
 	};
 }
