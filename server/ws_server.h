@@ -472,9 +472,48 @@ struct ws_connection : std::enable_shared_from_this<ws_connection> {
 		}
 		// Push each blob into the slot queue in encoding order (select
 		// first, then verb). The sim thread will call schedule_action on
-		// them, preserving order within the slot.
-		for (auto& b : blobs) {
-			if (!queue || !queue->push(slot, std::move(b))) {
+		// them, preserving order within the slot. Only the LAST blob
+		// carries is_terminal=true — the apply-site hook emits the
+		// closed-loop "result" message on that blob's apply (see
+		// docs/agent_command_status_codes.md).
+		//
+		// The deliver closure below captures a shared_ptr `self` so
+		// this connection stays alive across the sim -> io_context
+		// hop. If the WS closes between schedule and apply the JSON
+		// is silently dropped (the client can't hear it anyway).
+		std::string verb_str;
+		{
+			auto vit = it->find("verb");
+			if (vit != it->end() && vit->is_string()) {
+				verb_str = vit->get<std::string>();
+			}
+		}
+		auto self = shared_from_this();
+		for (size_t i = 0; i < blobs.size(); ++i) {
+			bool terminal = (i + 1 == blobs.size());
+			std::function<void(int, uint32_t)> deliver;
+			if (terminal) {
+				std::string rid_captured = id;
+				std::string verb_captured = verb_str;
+				deliver = [self, rid_captured = std::move(rid_captured),
+				           verb_captured = std::move(verb_captured)]
+				          (int status, uint32_t applied_at_frame) {
+					if (!self->our_io) return;
+					nlohmann::json j;
+					j["type"] = "result";
+					j["id"] = rid_captured;
+					j["status"] = status;
+					j["applied_at_frame"] = applied_at_frame;
+					j["verb"] = verb_captured;
+					std::string body = j.dump();
+					self->our_io->post([self, body = std::move(body)]() {
+						self->send_text(body);
+					});
+				};
+			}
+			if (!queue || !queue->push(slot, std::move(blobs[i]),
+			                           id, verb_str, terminal,
+			                           std::move(deliver))) {
 				send_error(id, "queue push failed (invalid slot?)");
 				return;
 			}

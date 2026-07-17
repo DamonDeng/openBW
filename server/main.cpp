@@ -763,6 +763,29 @@ int main(int argc, char** argv) {
 	openbw_agents::query_queue q_queue;
 	std::atomic<int> current_frame_atomic{0};
 
+	// Closed-loop cmd-result tracking. One heap record per tracked
+	// terminal blob. Address is stamped as the tag on the
+	// scheduled_action via schedule_action_tagged; sync.h hands it
+	// back at apply time through funcs.on_action_applied. We invoke
+	// deliver(status, frame) and free.
+	//
+	// Not exposed as a struct member of anything -- the pointer flows
+	// via the void* tag path in sync.h, so it stays a POD-ish record
+	// owned by these two lambdas.
+	struct pending_result {
+		std::string rid;
+		std::string verb;
+		int slot;
+		std::function<void(int status, uint32_t applied_at_frame)> deliver;
+	};
+	funcs.on_action_applied = [](void* tag, int status, uint32_t frame) {
+		if (!tag) return;
+		std::unique_ptr<pending_result> pr(
+			static_cast<pending_result*>(tag));
+		if (pr->deliver) pr->deliver(status, frame);
+		// pr goes out of scope -> delete.
+	};
+
 	// Start the agent WS server unless disabled. Agent WS needs auth --
 	// either --users or --user must have loaded at least one user.
 	std::unique_ptr<openbw_agents::ws_server> ws;
@@ -832,15 +855,31 @@ int main(int argc, char** argv) {
 		// deques are destroyed at drain-return time.
 		struct owned_action { int slot; std::vector<uint8_t> data; };
 		std::vector<owned_action> batch_owned;
-		cmd_queue.drain([&](int slot, const uint8_t* data, size_t size) {
+		cmd_queue.drain([&](int slot, openbw_agents::queued_cmd& q) {
 			auto* vc = virtual_clients[slot];
 			if (!vc) return;
 			// Keep virtual client's frame counter aligned so sync's lag
 			// check doesn't stall on this "client".
 			vc->frame = (uint32_t)sync_st.sync_frame;
-			funcs.schedule_action(vc, data, size);
-			batch_owned.push_back({slot,
-				std::vector<uint8_t>(data, data + size)});
+			// Closed-loop cmd-result tracking. If the producer supplied
+			// a deliver callback (only on the terminal blob of a
+			// tracked JSON command), heap-allocate a pending_result
+			// that owns the callback and stamp its address as the tag
+			// on the scheduled_action. sync.h's on_action_applied
+			// hook (wired below) hands the tag back at apply time; we
+			// invoke deliver(status, frame) and delete the record.
+			// Non-terminal blobs (a preceding select) get no tag —
+			// they still apply but silently.
+			if (q.deliver) {
+				auto* pr = new pending_result{
+					q.rid, q.verb, slot, std::move(q.deliver)};
+				funcs.schedule_action_tagged(
+					vc, q.bytes.data(), q.bytes.size(),
+					static_cast<void*>(pr));
+			} else {
+				funcs.schedule_action(vc, q.bytes.data(), q.bytes.size());
+			}
+			batch_owned.push_back({slot, q.bytes});
 		});
 		if (!batch_owned.empty()) {
 			std::vector<bwgame::action_batch_entry> batch_view;

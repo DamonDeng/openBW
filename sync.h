@@ -29,6 +29,14 @@ struct sync_state {
 		uint32_t frame;
 		size_t data_begin;
 		size_t data_end;
+		// Opaque tag threaded through by the producer (main.cpp) so the
+		// apply-site hook can correlate this blob back to the client-
+		// supplied "id" (rid) for the closed-loop cmd-result path. Zero
+		// cost when unused. Observer builds never set it; the server's
+		// virtual-client schedule_action path fills it via a dedicated
+		// overload (schedule_agent_action_tagged). See
+		// docs/agent_command_status_codes.md.
+		void* tag = nullptr;
 	};
 
 	int latency = 2;
@@ -452,6 +460,21 @@ struct sync_functions: action_functions {
 
 	std::function<void(int player_slot, data_loading::data_reader_le&)> on_custom_action;
 
+	// Closed-loop command-result hook. Invoked once per scheduled_action
+	// at apply time (inside execute_scheduled_actions, immediately after
+	// read_action returns or throws). The tag is whatever was set on the
+	// scheduled_action by the producer of that action (server main.cpp
+	// wires a pending-result pointer through schedule_action_tagged).
+	// Observers and any producer that didn't set a tag pass nullptr, in
+	// which case the callback should no-op cheaply.
+	//
+	// Status codes: 0 APPLIED, 1 REFUSED, 2 THROWN, 3 SLOT_INACTIVE.
+	// See docs/agent_command_status_codes.md.
+	//
+	// Runs on the sim thread. The callback is expected to hop back to
+	// the ws io_context if it wants to write to the network.
+	std::function<void(void* tag, int status, uint32_t applied_at_frame)> on_action_applied;
+
 	template<typename action_F>
 	void execute_scheduled_actions(action_F&& action_f) {
 		for (auto i = sync_st.clients.begin(); i != sync_st.clients.end();) {
@@ -523,7 +546,7 @@ struct sync_functions: action_functions {
 				bool is_observer_side = (sync_st.auth_check == nullptr);
 				if (is_observer_side) {
 					try {
-						if (!action_f(c, r)) break;
+						if (!action_f(c, r, act.tag)) break;
 					} catch (bwgame::exception& e) {
 						size_t n = act.data_end - act.data_begin;
 						if (sync_st.sync_log) {
@@ -545,7 +568,7 @@ struct sync_functions: action_functions {
 						// Continue the loop -- try the next scheduled action.
 					}
 				} else {
-					if (!action_f(c, r)) break;
+					if (!action_f(c, r, act.tag)) break;
 				}
 			}
 		}
@@ -825,6 +848,25 @@ struct sync_functions: action_functions {
 	bool schedule_action(sync_state::client_t* client, const uint8_t* data, size_t data_size) {
 		data_loading::data_reader_le r(data, data + data_size);
 		return schedule_action(client, r);
+	}
+
+	// Variant that stamps a producer-owned tag on the resulting
+	// scheduled_action entry. The tag is opaque to sync.h; the
+	// on_action_applied callback hands it back to the producer at
+	// apply time so it can correlate this specific blob to whatever
+	// external tracking it maintains (for openbw_server that's the
+	// pending closed-loop cmd-result record). The tag lifetime is
+	// the caller's responsibility -- typical usage is a heap object
+	// the producer new's before schedule and delete's inside its
+	// on_action_applied callback.
+	bool schedule_action_tagged(sync_state::client_t* client,
+	                            const uint8_t* data, size_t data_size,
+	                            void* tag) {
+		bool ok = schedule_action(client, data, data_size);
+		if (ok && !client->scheduled_actions.empty()) {
+			client->scheduled_actions.back().tag = tag;
+		}
+		return ok;
 	}
 
 	template<size_t max_size, bool default_little_endian = true>
@@ -2073,7 +2115,7 @@ struct sync_functions: action_functions {
 			}
 
 			if (sync_st.game_started) {
-				funcs.execute_scheduled_actions([this](sync_state::client_t* client, auto& r) {
+				funcs.execute_scheduled_actions([this](sync_state::client_t* client, auto& r, void* tag) {
 					if (client->game_started) {
 						if (client->player_slot != -1) {
 							int sync_message_id = r.template get<uint8_t>();
@@ -2124,7 +2166,30 @@ struct sync_functions: action_functions {
 								replay_saver_functions(*sync_st.save_replay).add_action(st.current_frame, client->player_slot, r.get_n(n), n);
 								r.seek(t);
 							}
-							funcs.read_action(client->player_slot, r);
+							// Closed-loop cmd-result hook: capture the bool
+							// return of read_action (previously discarded)
+							// so agents can distinguish APPLIED from
+							// sim-side REFUSED. Only fires when a tag is
+							// present, i.e. this action came in via
+							// schedule_action_tagged from an agent WS
+							// command; other actions (id_agent_action from
+							// peers, replay etc.) have tag=nullptr and no
+							// caller is waiting on a result.
+							bool applied = false;
+							int status = 0; // 0 APPLIED
+							try {
+								applied = funcs.read_action(client->player_slot, r);
+								status = applied ? 0 /*APPLIED*/ : 1 /*REFUSED*/;
+							} catch (...) {
+								status = 2 /*THROWN*/;
+								if (tag && funcs.on_action_applied) {
+									funcs.on_action_applied(tag, status, (uint32_t)st.current_frame);
+								}
+								throw;
+							}
+							if (tag && funcs.on_action_applied) {
+								funcs.on_action_applied(tag, status, (uint32_t)st.current_frame);
+							}
 							if (st.players.at(client->player_slot).controller != player_t::controller_occupied) {
 								if (client != sync_st.local_client) this->kill_client(client);
 								else this->clear_scheduled_actions(client);
@@ -2140,7 +2205,7 @@ struct sync_functions: action_functions {
 					return true;
 				});
 			} else {
-				funcs.execute_scheduled_actions([this](sync_state::client_t* client, auto& r) {
+				funcs.execute_scheduled_actions([this](sync_state::client_t* client, auto& r, void* /*tag*/) {
 					int id = r.template get<uint8_t>();
 					switch (id) {
 					case sync_messages::id_game_info:
