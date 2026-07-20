@@ -14,6 +14,10 @@ option(OPENBW_BUILD_SERVER   "Build the openbw_server headless authoritative sim
 # CI images don't need to pull Qt.
 option(OPENBW_BUILD_SIMSC_APP
 	"Build the Qt6 simsc_app desktop spectator (macOS-first)" OFF)
+# Standalone preprocessing binaries under tools/ (e.g. static_map_parser).
+# Off by default; opt in when generating a static map registry.
+option(OPENBW_BUILD_TOOLS
+	"Build openbw preprocessing tools (static_map_parser, ...)" OFF)
 
 # ui/CMakeLists.txt hard-requires SDL2 (openbw_ui and openbw_observer target
 # both live there). Only descend if we actually intend to build them --
@@ -27,4 +31,7 @@ if (OPENBW_BUILD_SERVER)
 endif()
 if (OPENBW_BUILD_SIMSC_APP)
 	add_subdirectory(simsc_app)
+endif()
+if (OPENBW_BUILD_TOOLS)
+	add_subdirectory(tools)
 endif()
