@@ -26,7 +26,12 @@ INCLUDES=(
 # warning the Phase 2 build showed.
 DEFINES=(
     -DOPENBW_NO_SDL_MIXER
-    -DOPENBW_NO_SDL_IMAGE
+    # SDL_image IS enabled: we need it to decode the retail HUD console
+    # PNG (simsc_app/assets/tconsole_left.png) that ships embedded in
+    # the wasm module via --embed-file below. Cost is ~80KB of extra
+    # code for the PNG decoder; the alternative was preloading a
+    # 300KB raw-RGBA blob, which is worse for the download size we
+    # already pay on every cold browser session.
     -DOPENBW_ENABLE_UI
 )
 
@@ -38,6 +43,19 @@ FLAGS=(
 
 EMSCRIPTEN_FLAGS=(
     -sUSE_SDL=2
+    # SDL_image with PNG support only. The tconsole_left.png asset for
+    # the HUD chrome is small (18KB) but PNG-encoded; decoding at
+    # startup avoids shipping a 300KB raw-RGBA embedded blob.
+    -sUSE_SDL_IMAGE=2
+    -sSDL2_IMAGE_FORMATS=["png"]
+    # Bake the console PNG straight into the wasm module. This is
+    # different from the MPQ path (Blizzard-owned bytes; user-supplied
+    # via IndexedDB) — the HUD chrome is our own asset and small
+    # enough to ship inline. Path inside the emscripten VFS is
+    # /simsc_assets/tconsole_left.png (see load_hud_console_png in
+    # ui/sdl2.cpp).
+    --embed-file
+    simsc_app/assets/tconsole_left.png@/simsc_assets/tconsole_left.png
     # 256MB fixed. Growth (-sALLOW_MEMORY_GROWTH) creates a resizable
     # ArrayBuffer that trips Firefox's TextDecoder in emscripten 6.0.2
     # (same Phase 1 issue). 256MB is enough headroom for one live game.

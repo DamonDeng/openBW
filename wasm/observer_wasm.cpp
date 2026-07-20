@@ -292,6 +292,28 @@ extern "C" void wasm_frame() {
 		st.last_logged_slot = st.sync_st->viewing_slot;
 	}
 
+	// HUD numeric readouts. Mirrors simsc_app/main.cpp — for the
+	// active viewing slot, push minerals / gas / supply into the
+	// window impl so the SDL blit path can paint them alongside the
+	// retail console chrome. Spectator (slot=-1) leaves fields at -1
+	// so the readouts hide. See docs on the fp1 2x supply convention
+	// (bwgame.h ~ 2228).
+	{
+		native_window::hud_state_t hs;
+		int slot = st.ui->viewing_slot;
+		if (slot >= 0 && slot < 8 && st.sync_st->game_started) {
+			int r = (int)st.ui->st.players[slot].race;
+			if (r < 0 || r > 2) r = 1;  // fall back to terran table
+			hs.minerals    = st.ui->st.current_minerals[slot];
+			hs.gas         = st.ui->st.current_gas[slot];
+			hs.supply_used =
+			    st.ui->st.supply_used[slot][r].integer_part() / 2;
+			hs.supply_max  =
+			    st.ui->st.supply_available[slot][r].integer_part() / 2;
+		}
+		st.ui->wnd.set_hud_state(hs);
+	}
+
 	st.ui->update();
 
 	if (!st.first_frame_logged) {

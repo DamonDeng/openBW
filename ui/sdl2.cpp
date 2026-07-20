@@ -3,6 +3,7 @@
 #include "native_sound.h"
 
 #include "common.h"
+#include "font_bitmap.h"
 #include "SDL.h"
 #ifndef OPENBW_NO_SDL_IMAGE
 #include "SDL_image.h"
@@ -12,6 +13,7 @@
 #endif
 
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <csignal>
@@ -42,10 +44,29 @@ struct window_impl {
 
 	SDL_Window* window = nullptr;
 
+	// Retail Terran console chrome. Loaded once on first update_surface
+	// from either the emscripten-embedded path (/simsc_assets/...) or the
+	// on-disk simsc_app/assets/... path when running natively (SDL_image
+	// build). Owning pointer; freed on destroy(). See docs on the HUD
+	// layout in simsc_app/qt_native_window.cpp.
+	//
+	// Rendered every frame via update_surface(). If load fails (no
+	// SDL_image, or file missing), stays null and the HUD is skipped —
+	// the observer runs as before this change, just without chrome.
+	SDL_Surface* hud_console = nullptr;
+	bool hud_load_attempted = false;
+
+	// Numeric readouts pushed once per frame by the observer's main
+	// loop (mirror of the Qt path at simsc_app/main.cpp). Fields set
+	// to -1 mean "hide" — used for spectator perspective and until
+	// the first set_hud_state call.
+	hud_state_t hud_state{};
+
 	window_impl() {
 		sdl_init();
 	}
 	~window_impl() {
+		if (hud_console) SDL_FreeSurface(hud_console);
 		if (window) SDL_DestroyWindow(window);
 	}
 	
@@ -166,10 +187,144 @@ struct window_impl {
 		return mouse_button_state.at(button) ? true : false;
 	}
 	
+	// Attempt to load the retail HUD console PNG. Silently returns null
+	// if SDL_image isn't linked or the asset can't be found -- in that
+	// case update_surface() falls back to the pre-HUD render path.
+	SDL_Surface* try_load_hud_png() {
+#ifdef OPENBW_NO_SDL_IMAGE
+		return nullptr;
+#else
+		// Two search paths so this works both under emscripten (where
+		// the asset is --embed-file'd at /simsc_assets/...) and under
+		// a native SDL build launched from the repo root.
+		static const char* candidates[] = {
+			"/simsc_assets/tconsole_left.png",
+			"simsc_app/assets/tconsole_left.png",
+			nullptr,
+		};
+		for (const char** p = candidates; *p; ++p) {
+			SDL_Surface* s = IMG_Load(*p);
+			if (s) {
+				log("[hud] loaded console PNG from %s (%dx%d)\n",
+				    *p, s->w, s->h);
+				return s;
+			}
+		}
+		log("[hud] no console PNG found; HUD chrome disabled\n");
+		return nullptr;
+#endif
+	}
+
 	void update_surface() {
+		if (!hud_load_attempted) {
+			hud_load_attempted = true;
+			hud_console = try_load_hud_png();
+		}
+		if (hud_console && window) {
+			SDL_Surface* ws = SDL_GetWindowSurface(window);
+			if (ws) {
+				// Console is 640x187 with an opaque "minimap slot"
+				// region (RGB 8,8,8) that the retail engine used to
+				// designate a spot to be overpainted with the live
+				// minimap. Our ui.h has already drawn the real
+				// minimap into ws at (4, height-4-128). Composite
+				// order:
+				//   1. Snapshot the minimap 128x128 patch out of ws
+				//      so we can re-blit it on top of the HUD.
+				//   2. Blit the HUD (covers minimap).
+				//   3. Re-blit the snapshotted minimap patch.
+				// Mirrors qt_native_window.cpp:212-243.
+				const int mm_size = 128;
+				const int mm_x = 4;
+				const int mm_y = ws->h - 4 - mm_size;
+				const int hud_x = -2;
+				const int hud_y = ws->h - hud_console->h;
+
+				// (1) Copy the minimap patch. Use CreateRGBSurfaceWith
+				// FormatFrom-style approach: allocate a matching
+				// surface and BlitSurface into it.
+				SDL_Surface* mm_snap = SDL_CreateRGBSurface(
+					0, mm_size, mm_size,
+					ws->format->BitsPerPixel,
+					ws->format->Rmask, ws->format->Gmask,
+					ws->format->Bmask, ws->format->Amask);
+				if (mm_snap) {
+					SDL_Rect src_r{mm_x, mm_y, mm_size, mm_size};
+					SDL_Rect dst_r{0, 0, mm_size, mm_size};
+					SDL_BlitSurface(ws, &src_r, mm_snap, &dst_r);
+				}
+
+				// (2) Blit HUD chrome over the game framebuffer.
+				SDL_Rect dst{hud_x, hud_y, hud_console->w, hud_console->h};
+				// Alpha is baked into the PNG (viewport is fully
+				// transparent). Ensure BLEND is on.
+				SDL_SetSurfaceBlendMode(hud_console, SDL_BLENDMODE_BLEND);
+				SDL_BlitSurface(hud_console, nullptr, ws, &dst);
+
+				// (3) Restore the real minimap over the HUD's
+				// designed-overpaint slot.
+				if (mm_snap) {
+					SDL_Rect dst_r{mm_x, mm_y, mm_size, mm_size};
+					SDL_BlitSurface(mm_snap, nullptr, ws, &dst_r);
+					SDL_FreeSurface(mm_snap);
+				}
+
+				// (4) Numeric readouts. Text positions mirror the Qt
+				// widget-space layout at qt_native_window.cpp:
+				//   Minerals: (186, hud_y + 101)
+				//   Gas:      (186, hud_y + 122)
+				//   Supply:   (186, hud_y + 143)
+				// -1 = hide (spectator perspective).
+				if (hud_state.minerals >= 0 || hud_state.gas >= 0 ||
+				    hud_state.supply_used >= 0) {
+					// Lock the surface so we can bang RGBA pixels
+					// straight into it. Format may be RGB888 or
+					// RGBA8888; we pack into a 32-bit AARRGGBB and
+					// let SDL_MapRGBA sort it out... actually
+					// draw_text_rgba assumes Qt's BGRA byte order.
+					// SDL window surfaces on emscripten are RGBA8888
+					// (little-endian: bytes are R,G,B,A). We pass
+					// argb=0xFFFFFFFF (all bits set) so byte order
+					// doesn't matter for the fg color; the shadow
+					// (0xFF000000) similarly is byte-order-neutral
+					// for the color channels since it's all zeros.
+					if (SDL_LockSurface(ws) == 0) {
+						uint8_t* px = (uint8_t*)ws->pixels;
+						size_t pitch = (size_t)ws->pitch;
+						const uint32_t fg     = 0xFFFFFFFFu;
+						const uint32_t shadow = 0xFF000000u;
+						char buf[32];
+						if (hud_state.minerals >= 0) {
+							std::snprintf(buf, sizeof(buf), "%d",
+							              hud_state.minerals);
+							bw_hud_font::draw_text_rgba(
+								px, pitch, 186, hud_y + 101, buf,
+								fg, shadow, ws->w, ws->h);
+						}
+						if (hud_state.gas >= 0) {
+							std::snprintf(buf, sizeof(buf), "%d",
+							              hud_state.gas);
+							bw_hud_font::draw_text_rgba(
+								px, pitch, 186, hud_y + 122, buf,
+								fg, shadow, ws->w, ws->h);
+						}
+						if (hud_state.supply_used >= 0 &&
+						    hud_state.supply_max >= 0) {
+							std::snprintf(buf, sizeof(buf), "%d/%d",
+							              hud_state.supply_used,
+							              hud_state.supply_max);
+							bw_hud_font::draw_text_rgba(
+								px, pitch, 186, hud_y + 143, buf,
+								fg, shadow, ws->w, ws->h);
+						}
+						SDL_UnlockSurface(ws);
+					}
+				}
+			}
+		}
 		SDL_UpdateWindowSurface(window);
 	}
-	
+
 	explicit operator bool() const {
 		return window != nullptr;
 	}
@@ -219,10 +374,8 @@ void window::update_surface() {
 	return impl->update_surface();
 }
 
-void window::set_hud_state(const hud_state_t&) {
-	// SDL observer has no HUD blit yet; readouts are dropped here
-	// intentionally. See ui/font_bitmap.h + qt_native_window.cpp
-	// for the Qt path that actually paints them.
+void window::set_hud_state(const hud_state_t& s) {
+	if (impl) impl->hud_state = s;
 }
 
 window::operator bool() const {
