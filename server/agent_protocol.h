@@ -46,6 +46,11 @@ enum : uint8_t {
 	                         // (that uses ACT_BUILD with order=DroneStartBuild=25).
 	ACT_DEFAULT_ORDER = 20,
 	ACT_ORDER = 21,
+	ACT_BURROW = 44,    // payload: u8 queue. Zerg ground unit -> burrowed
+	                    // (Zerglings, Hydralisks, Drones, Defilers, Lurker eggs;
+	                    // Lurkers use morph_building path instead). Silent-reject
+	                    // if Burrowing tech not researched or unit already burrowed.
+	ACT_UNBURROW = 45,  // payload: u8 queue. Reverse of burrow.
 	ACT_RESEARCH = 48,  // payload: TechTypes u8
 	ACT_UPGRADE = 50,   // payload: UpgradeTypes u8
 };
@@ -77,6 +82,55 @@ inline action_blob make_select(uint16_t unit_id) {
 	put_u8(b, 1); // count
 	put_u16(b, unit_id);
 	return b;
+}
+
+// Map a TechTypes id (from bwenums.h) to the Orders::Cast* id the sim
+// expects on an ACT_ORDER payload. Returns 0 (Orders::Die, an
+// impossible cast target) for techs that aren't cast-invocable
+// (e.g. Stim_Packs uses ACT_STIM_PACK, Tank_Siege_Mode uses
+// ACT_SIEGE, Burrowing uses ACT_BURROW).
+//
+// Kept as a plain switch instead of a std::map so it stays
+// compile-time evaluatable and header-inlineable.
+inline uint8_t tech_to_cast_order(uint16_t tech) {
+	using T = bwgame::TechTypes;
+	using O = bwgame::Orders;
+	switch ((int)tech) {
+		// --- Terran ---
+		case (int)T::Lockdown:         return (uint8_t)O::CastLockdown;
+		case (int)T::EMP_Shockwave:    return (uint8_t)O::CastEMPShockwave;
+		case (int)T::Scanner_Sweep:    return (uint8_t)O::CastScannerSweep;
+		case (int)T::Defensive_Matrix: return (uint8_t)O::CastDefensiveMatrix;
+		case (int)T::Irradiate:        return (uint8_t)O::CastIrradiate;
+		case (int)T::Yamato_Gun:       return (uint8_t)O::FireYamatoGun;
+		case (int)T::Restoration:      return (uint8_t)O::CastRestoration;
+		case (int)T::Optical_Flare:    return (uint8_t)O::CastOpticalFlare;
+		// Nuclear Strike is not exposed here: it isn't a TechTypes
+		// entry (it's a WeaponTypes) and the launch pipeline is
+		// engine-driven from the Nuclear Silo. Ghost NukePaint would
+		// need its own verb.
+
+		// --- Zerg ---
+		case (int)T::Infestation:      return (uint8_t)O::CastInfestation;
+		case (int)T::Spawn_Broodlings: return (uint8_t)O::CastSpawnBroodlings;
+		case (int)T::Dark_Swarm:       return (uint8_t)O::CastDarkSwarm;
+		case (int)T::Plague:           return (uint8_t)O::CastPlague;
+		case (int)T::Consume:          return (uint8_t)O::CastConsume;
+		case (int)T::Ensnare:          return (uint8_t)O::CastEnsnare;
+		case (int)T::Parasite:         return (uint8_t)O::CastParasite;
+
+		// --- Protoss ---
+		case (int)T::Psionic_Storm:    return (uint8_t)O::CastPsionicStorm;
+		case (int)T::Hallucination:    return (uint8_t)O::CastHallucination;
+		case (int)T::Recall:           return (uint8_t)O::CastRecall;
+		case (int)T::Stasis_Field:     return (uint8_t)O::CastStasisField;
+		case (int)T::Disruption_Web:   return (uint8_t)O::CastDisruptionWeb;
+		case (int)T::Mind_Control:     return (uint8_t)O::CastMindControl;
+		case (int)T::Feedback:         return (uint8_t)O::CastFeedback;
+		case (int)T::Maelstrom:        return (uint8_t)O::CastMaelstrom;
+
+		default: return 0;
+	}
 }
 
 // Encode a JSON command into a sequence of BW action blobs, ready to
@@ -580,6 +634,69 @@ inline std::optional<encode_error> encode_command(
 		return std::nullopt;
 	}
 
+	// --- Burrow / Unburrow (Zerg ground unit toggle) ---
+	// {"verb":"burrow","unit":<zerg_ground_id>,"queue":false}
+	// {"verb":"unburrow","unit":<zerg_ground_id>,"queue":false}
+	// action_burrow / action_unburrow in actions.h:902 validate:
+	//   - selection contains a burrow-capable Zerg ground unit
+	//   - Burrowing tech is researched
+	//   - unit isn't already in the target state
+	// Silent-reject otherwise. Dedicated ACT_BURROW / ACT_UNBURROW
+	// opcodes; no ACT_ORDER needed. Mirrors the siege/unsiege shape.
+	if (verb == "burrow" || verb == "unburrow") {
+		auto* u = need("unit");
+		if (!u) return encode_error{verb + ": needs unit"};
+		uint16_t unit_id = u->get<uint16_t>();
+		bool queue = cmd.value("queue", false);
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, verb == "burrow" ? ACT_BURROW : ACT_UNBURROW);
+		put_u8(b, queue ? 1 : 0);
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
+	// --- Cast (spell caster issues a targeted or point spell) ---
+	// {"verb":"cast","unit":<caster_id>,"tech":<TechTypes int>,
+	//  "target_unit":<id>}                 -- unit-targeted spell
+	// {"verb":"cast","unit":<caster_id>,"tech":<TechTypes int>,
+	//  "x":<int16>,"y":<int16>}            -- position-targeted spell
+	// Payload shape matches move/attack: ACT_ORDER with a Cast* order
+	// id, plus x/y, target_unit, target_unit_type=None, queue=false.
+	// Both point and unit forms are accepted; missing fields default
+	// to 0 (BW treats target_unit=0 as "no unit target"). The engine
+	// runs unit_can_use_tech (action_order at actions.h:475), so
+	// insufficient-energy, tech-not-researched, wrong-caster-type, and
+	// out-of-range are all silent-rejected sim-side. See
+	// tech_to_cast_order above for the supported tech list.
+	if (verb == "cast") {
+		auto* u = need("unit"); auto* t = need("tech");
+		if (!u || !t) return encode_error{"cast: needs unit, tech"};
+		uint16_t unit_id = u->get<uint16_t>();
+		uint16_t tech    = t->get<uint16_t>();
+		uint8_t order_id = tech_to_cast_order(tech);
+		if (order_id == 0)
+			return encode_error{"cast: no cast order for tech " +
+			                    std::to_string(tech)};
+		uint16_t target_unit = cmd.value("target_unit", 0);
+		int16_t px = (int16_t)cmd.value("x", 0);
+		int16_t py = (int16_t)cmd.value("y", 0);
+
+		out.push_back(make_select(unit_id));
+
+		action_blob b;
+		put_u8(b, ACT_ORDER);
+		put_i16(b, px); put_i16(b, py);
+		put_u16(b, target_unit);
+		put_u16(b, (uint16_t)bwgame::UnitTypes::None);
+		put_u8(b, order_id);
+		put_u8(b, 0);  // queue = false
+		out.push_back(std::move(b));
+		return std::nullopt;
+	}
+
 	return encode_error{"unknown verb: " + verb};
 }
 
@@ -614,6 +731,12 @@ inline std::optional<encode_error> encode_command(
 //                                                          //   (Hatch->Lair->Hive, Creep_Colony->Sunken/Spore)
 //       {"verb":"build", "unit":42, "unit_type":142,       // Zerg: Drone -> building
 //                          "tile_x":24, "tile_y":30, "order":25} //   order=25 (DroneStartBuild)
+//       {"verb":"burrow",   "unit":42, "queue":false}       // Zerg ground unit -> burrowed
+//       {"verb":"unburrow", "unit":42, "queue":false}       // Zerg burrowed unit -> surface
+//       {"verb":"cast", "unit":42, "tech":14,               // e.g. Dark_Swarm at position
+//                        "x":1024, "y":768}
+//       {"verb":"cast", "unit":42, "tech":13,               // e.g. Spawn_Broodlings at target unit
+//                        "target_unit":800}
 //
 // Server -> client (sent per frame while any command is being executed):
 //   {"type":"welcome", "slot":N, "current_frame":F}    // sent on WS open
