@@ -1319,9 +1319,20 @@ template<typename data_files_loader_T = data_files_loader<>>
 data_files_loader_T data_files_directory(a_string path) {
 	if (!path.empty() && path[path.size() - 1] != '/' && path[path.size() - 1] != '\\') path += '/';
 	data_files_loader_T r;
-	r.add_mpq_file(path + "Patch_rt.mpq");
-	r.add_mpq_file(path + "BrooDat.mpq");
-	r.add_mpq_file(path + "StarDat.mpq");
+	// Prefer *.slim.mpq (built by tools/slim_mpq, dropping sound/,
+	// music/, smk/) when present; fall back to the full retail
+	// archives. Slim files must sit next to the originals. The
+	// originals are never modified or deleted by the build script.
+	auto add_slim_or_full = [&](const char* base) {
+		a_string slim = path + base + ".slim.mpq";
+		a_string full = path + base + ".mpq";
+		FILE* f = fopen(slim.c_str(), "rb");
+		if (f) { fclose(f); r.add_mpq_file(std::move(slim)); }
+		else   { r.add_mpq_file(std::move(full)); }
+	};
+	add_slim_or_full("Patch_rt");
+	add_slim_or_full("BrooDat");
+	add_slim_or_full("StarDat");
 	return r;
 }
 

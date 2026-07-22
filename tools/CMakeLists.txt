@@ -14,3 +14,9 @@ add_executable(openbw_static_map_parser ./static_map_parser.cpp)
 # bwgame.h and friends sit in the openbw top-level dir; server/sha256.h
 # is one level down.
 target_include_directories(openbw_static_map_parser PRIVATE ..)
+
+# slim_mpq: produce a slim StarDat.mpq (etc.) that excludes files
+# matching drop prefixes (sound/, music/, smk/). Reuses openBW's own
+# MPQ reader + writer helpers. Not linked into server / observer.
+add_executable(slim_mpq ./slim_mpq.cpp)
+target_include_directories(slim_mpq PRIVATE ..)
