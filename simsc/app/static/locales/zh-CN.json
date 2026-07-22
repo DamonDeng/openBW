@@ -41,6 +41,7 @@
     "cancel": "取消",
     "delete": "删除",
     "open_observer": "打开观战",
+    "open_observer_slim": "打开观战 (免上传)",
     "waiting_for": "等待:{aliases}",
     "state_pending": "等待中",
     "state_running": "进行中",

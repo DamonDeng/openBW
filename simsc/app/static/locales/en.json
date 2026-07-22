@@ -41,6 +41,7 @@
     "cancel": "Cancel",
     "delete": "Delete",
     "open_observer": "Open observer",
+    "open_observer_slim": "Open observer (self-contained)",
     "waiting_for": "waiting for: {aliases}",
     "state_pending": "pending",
     "state_running": "running",

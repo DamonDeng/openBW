@@ -1,0 +1,195 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>openBW WASM observer (self-contained)</title>
+<style>
+  body { margin: 0; background: #111; color: #eee;
+         font-family: system-ui, sans-serif; }
+  #ui   { padding: 8px 12px; background: #1a1a1a; border-bottom: 1px solid #333; }
+  #ui label { margin-right: 8px; }
+  #ui input { background: #222; color: #eee; border: 1px solid #444;
+              padding: 3px 6px; margin-right: 12px; }
+  #ui button { background: #2c6; color: #000; border: 0; padding: 6px 14px;
+               cursor: pointer; font-weight: 600; }
+  #canvas-wrap { padding: 0; }
+  canvas { display: block; margin: 0 auto; background: #000; }
+  #status { padding: 4px 12px; font-family: monospace; font-size: 12px;
+            color: #9d9; background: #151515; }
+  #console-box { padding: 6px 12px; font-family: monospace; font-size: 11px;
+                 color: #bbb; background: #0d0d0d; max-height: 160px;
+                 overflow-y: auto; white-space: pre-wrap; border-top: 1px solid #333; }
+  .note { padding: 4px 12px; background: #14231a; color: #8fc; font-size: 12px;
+          border-bottom: 1px solid #333; font-family: monospace; }
+</style>
+</head>
+<body>
+
+<div class="note">
+  Self-contained build: slim MPQs + default maps are baked into the .data blob.
+  No file selection needed. Original .mpq files stay on your machine untouched.
+</div>
+
+<div id="ui">
+  <label>server <input id="host" size="14" value="127.0.0.1" /></label>
+  <label>port   <input id="port" size="6"  value="6114" /></label>
+  <label>key    <input id="key"  size="24" value="" placeholder="(optional)" /></label>
+  <label>map    <input id="map"  size="34" value="original_resources/(2)Bottleneck.scm" /></label>
+  <label>races  <input id="races" size="26" value="" placeholder="e.g. protoss,terran" title="Comma-separated per-slot races; must match server --race args" /></label>
+  <button id="connect">connect</button>
+</div>
+
+<div id="ui" style="border-top: 1px solid #333;">
+  <b style="color:#9d9;margin-right:12px;">debug:</b>
+  <button id="btn-pause"   title="freeze the sim; WS keeps queuing">pause</button>
+  <button id="btn-step"    title="advance one sim frame (also: click the canvas)">step</button>
+  <button id="btn-step10"  title="advance 10 sim frames">step 10</button>
+  <button id="btn-play"    title="resume normal playback">play</button>
+  <button id="btn-snap"    title="dump observer state to console">snapshot</button>
+  <button id="btn-log"     title="download the wasm sync-log for diffing against server_sync.log">download sync log</button>
+  <span id="pause-status" style="margin-left:12px;color:#f96;"></span>
+</div>
+
+<div id="status">idle. Fill in host/port/key/map and click connect.</div>
+
+<div id="canvas-wrap">
+  <canvas id="canvas" width="1280" height="800" tabindex="1"></canvas>
+</div>
+
+<div id="console-box"></div>
+
+<script>
+  // URL-driven auto-connect: same as observer_shell.html.
+  const params = new URLSearchParams(location.search);
+  if (params.has('host'))  document.getElementById('host').value  = params.get('host');
+  if (params.has('port'))  document.getElementById('port').value  = params.get('port');
+  if (params.has('key'))   document.getElementById('key').value   = params.get('key');
+  if (params.has('map'))   document.getElementById('map').value   = params.get('map');
+  if (params.has('races')) document.getElementById('races').value = params.get('races');
+
+  const consoleBox = document.getElementById('console-box');
+  function appendLog(text) {
+    consoleBox.textContent += text + '\n';
+    consoleBox.scrollTop = consoleBox.scrollHeight;
+  }
+
+  window.OPENBW_MAP   = document.getElementById('map').value;
+  window.OPENBW_HOST  = document.getElementById('host').value;
+  window.OPENBW_PORT  = parseInt(document.getElementById('port').value, 10);
+  window.OPENBW_KEY   = document.getElementById('key').value;
+  window.OPENBW_RACES = document.getElementById('races').value;
+
+  window.OPENBW_PAUSED = false;
+  window.OPENBW_STEP   = 0;
+  const pauseStatus = document.getElementById('pause-status');
+  function refreshPauseStatus() {
+    pauseStatus.textContent = window.OPENBW_PAUSED
+      ? '⏸ paused  (STEP=' + window.OPENBW_STEP + ')'
+      : '';
+  }
+  document.getElementById('btn-pause').addEventListener('click', () => {
+    window.OPENBW_PAUSED = true;  refreshPauseStatus();
+  });
+  document.getElementById('btn-play').addEventListener('click', () => {
+    window.OPENBW_PAUSED = false; window.OPENBW_STEP = 0;
+    refreshPauseStatus();
+  });
+  document.getElementById('btn-step').addEventListener('click', () => {
+    window.OPENBW_PAUSED = true; window.OPENBW_STEP += 1;
+    refreshPauseStatus();
+  });
+  document.getElementById('btn-step10').addEventListener('click', () => {
+    window.OPENBW_PAUSED = true; window.OPENBW_STEP += 10;
+    refreshPauseStatus();
+  });
+  document.getElementById('btn-snap').addEventListener('click', () => {
+    if (window.Module && window.Module.ccall) {
+      window.Module.ccall('openbw_snapshot', null, [], []);
+    } else {
+      appendLog('[shell] snapshot: wasm module not ready yet');
+    }
+  });
+  document.getElementById('btn-log').addEventListener('click', () => {
+    if (!window.Module || !window.Module.ccall || !window.Module.HEAPU8) {
+      appendLog('[shell] sync-log: wasm module not ready yet');
+      return;
+    }
+    const size = window.Module.ccall('openbw_sync_log_size', 'number', [], []);
+    if (size === 0) {
+      appendLog('[shell] sync-log is empty (game may not have started)');
+      return;
+    }
+    const ptr = window.Module.ccall('openbw_sync_log_ptr', 'number', [], []);
+    const bytes = new Uint8Array(window.Module.HEAPU8.buffer, ptr, size).slice();
+    const blob = new Blob([bytes], {type: 'text/plain'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    a.href = url;
+    a.download = 'wasm_obs_sync_' + stamp + '.log';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    appendLog('[shell] downloaded sync-log (' + size + ' bytes)');
+  });
+  document.getElementById('canvas').addEventListener('click', () => {
+    if (window.OPENBW_PAUSED) {
+      window.OPENBW_STEP += 1;
+      refreshPauseStatus();
+    }
+  });
+  document.getElementById('canvas').addEventListener('keydown', (e) => {
+    if (e.code === 'Space')       {
+      window.OPENBW_PAUSED = !window.OPENBW_PAUSED;
+      window.OPENBW_STEP = 0;
+      refreshPauseStatus();
+      e.preventDefault();
+    } else if (e.code === 'ArrowRight') {
+      window.OPENBW_PAUSED = true;
+      window.OPENBW_STEP += e.shiftKey ? 10 : 1;
+      refreshPauseStatus();
+      e.preventDefault();
+    }
+  });
+
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    print:    (t) => { console.log(t);   appendLog(t); },
+    printErr: (t) => { console.warn(t);  appendLog(t); },
+    onRuntimeInitialized: function() {
+      document.getElementById('status').textContent = 'wasm running';
+    },
+    setStatus: function(t) {
+      const s = document.getElementById('status');
+      if (t) s.textContent = t;
+    },
+    monitorRunDependencies: function(left) {
+      const s = document.getElementById('status');
+      s.textContent = left > 0 ? ('loading assets ('+left+' remaining)…') : 'assets loaded';
+    },
+  };
+
+  function launch() {
+    window.OPENBW_MAP   = document.getElementById('map').value;
+    window.OPENBW_HOST  = document.getElementById('host').value;
+    window.OPENBW_PORT  = parseInt(document.getElementById('port').value, 10);
+    window.OPENBW_KEY   = document.getElementById('key').value;
+    window.OPENBW_RACES = document.getElementById('races').value;
+    document.getElementById('status').textContent = 'launching…';
+    if (window.__openbwLaunched) return;
+    window.__openbwLaunched = true;
+    const s = document.createElement('script');
+    // NOTE: this is the ONLY functional difference from
+    // observer_shell.html -- we load the slim (self-contained)
+    // build's JS glue.
+    s.src = 'observer_wasm_slim.js';
+    document.body.appendChild(s);
+  }
+  document.getElementById('connect').addEventListener('click', launch);
+
+  if (params.has('host')) launch();
+</script>
+
+</body>
+</html>

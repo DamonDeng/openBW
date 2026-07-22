@@ -172,8 +172,18 @@
     // with just ?game=<id>. The shell reads the API key from
     // localStorage (same origin, same tab-group) and calls
     // /api/games/{id} for details. The key is NEVER in the URL.
-    const observerBtn = g.observer_url
-      ? `<a class="btn primary" data-observer="${g.game_id}">${t('games.open_observer')}</a>`
+    //
+    // Two variants, both point at the same running game:
+    //   * open_observer      -> /simscapp/observer.html
+    //     Requires the user to select their local BW MPQ folder
+    //     the first time (bytes cached in IndexedDB thereafter).
+    //     Full retail audio + assets.
+    //   * open_observer_slim -> /simscapp/observer_slim.html
+    //     Slim MPQs + 44 stock maps baked into the wasm .data blob;
+    //     no file selection ever needed. Silent (sound assets dropped).
+    const observerBtns = g.observer_url
+      ? `<a class="btn primary" data-observer="${g.game_id}">${t('games.open_observer')}</a>
+         <a class="btn primary" data-observer-slim="${g.game_id}">${t('games.open_observer_slim')}</a>`
       : '';
     let actions = '';
     if (kind === 'invitation') {
@@ -187,7 +197,7 @@
         <span class="meta">${t('games.waiting_for', { aliases: pendingAliases })}</span>
         <button class="danger" data-act="cancel">${t('games.cancel')}</button>`;
     } else if (g.state === 'running') {
-      actions = `${observerBtn}
+      actions = `${observerBtns}
         <button class="danger" data-act="delete">${t('games.delete')}</button>`;
     } else {
       actions = `<button class="danger" data-act="delete">${t('games.delete')}</button>`;
@@ -210,6 +220,17 @@
         const url = '/simscapp/observer.html?game=' +
           encodeURIComponent(btn.dataset.observer);
         window.open(url, 'simsc_observer_' + btn.dataset.observer,
+          'width=1400,height=920');
+      };
+    });
+    card.querySelectorAll('[data-observer-slim]').forEach(btn => {
+      btn.onclick = (e) => {
+        e.preventDefault();
+        const url = '/simscapp/observer_slim.html?game=' +
+          encodeURIComponent(btn.dataset.observerSlim);
+        // Separate window name from the upload variant so both can
+        // stay open side-by-side on the same game.
+        window.open(url, 'simsc_observer_slim_' + btn.dataset.observerSlim,
           'width=1400,height=920');
       };
     });
