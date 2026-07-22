@@ -364,6 +364,9 @@ it from an `observe()` response, not by counting.
 {"type":"ack",         "id":"m1", "queued_at_frame":43}
 {"type":"error",       "id":"m1", "message":"..."}
 {"type":"observation", "id":"o1", "slot":0, "current_frame":123,
+ "game_state":{"victory_state":[0,2,0,0,0,0,0,0,0,0,0,0],     // per-slot; 0=playing,
+                                                              //   1=dropped, 2=defeated, >=3=won
+               "my_slot":0, "my_victory_state":0},            //   always emitted
  "resources": {"minerals":50,"gas":0,"supply_used":8,"supply_max":20,...},
  "units":     [{"unit_id":3684, "type":64, "x":3832, "y":2440,
                 "hp":20, "hp_max":20, "shields":20, "shields_max":20,

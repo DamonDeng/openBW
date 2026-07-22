@@ -157,6 +157,38 @@ inline std::string build_observation(
 
 	const auto& st = funcs.st;
 
+	// --- game_state (always-on, tiny) ---
+	//
+	// Emits the engine's per-player victory_state so agents can tell
+	// when they, or an opponent, have been eliminated / won without
+	// having to infer it from "no enemies visible + some unit types
+	// suddenly appearing under owner=11 (Neutral)".
+	//
+	// Value semantics (see bwgame.h:18944 / :13051 / :13060 / :13172):
+	//   0     still playing
+	//   1     dropped (disconnected -- disconnect happens outside the
+	//          sim so this is rare in server mode)
+	//   2     defeated (eliminated by melee trigger: no buildings +
+	//          no worker-capable units alive; all their units are
+	//          transferred to Neutral by remove_player())
+	//   >=3   won
+	//
+	// Cost: 12 ints per observation. Always emitted; no opt-in flag,
+	// because the polling-friendly correctness win outweighs the size.
+	{
+		nlohmann::json gs;
+		auto vs = nlohmann::json::array();
+		for (size_t i = 0; i < st.players.size(); ++i) {
+			vs.push_back((int)st.players[i].victory_state);
+		}
+		gs["victory_state"] = std::move(vs);
+		gs["my_slot"] = slot;
+		if (slot >= 0 && slot < (int)st.players.size()) {
+			gs["my_victory_state"] = (int)st.players[slot].victory_state;
+		}
+		j["game_state"] = std::move(gs);
+	}
+
 	if (opts.include_resources && slot >= 0 && slot < 12) {
 		// Supply is tracked per-race (index 0=zerg, 1=terran, 2=protoss)
 		// because some maps allow a player to have units of multiple
