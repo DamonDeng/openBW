@@ -18,6 +18,10 @@ option(OPENBW_BUILD_SIMSC_APP
 # Off by default; opt in when generating a static map registry.
 option(OPENBW_BUILD_TOOLS
 	"Build openbw preprocessing tools (static_map_parser, ...)" OFF)
+# sprite_viewer: Qt6 desktop unit-animation browser. Off by default so
+# headless-server builds don't need Qt.
+option(OPENBW_BUILD_SPRITE_VIEWER
+	"Build the Qt6 sprite_viewer desktop tool" OFF)
 
 # ui/CMakeLists.txt hard-requires SDL2 (openbw_ui and openbw_observer target
 # both live there). Only descend if we actually intend to build them --
@@ -34,4 +38,7 @@ if (OPENBW_BUILD_SIMSC_APP)
 endif()
 if (OPENBW_BUILD_TOOLS)
 	add_subdirectory(tools)
+endif()
+if (OPENBW_BUILD_SPRITE_VIEWER)
+	add_subdirectory(sprite_viewer)
 endif()

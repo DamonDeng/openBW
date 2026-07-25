@@ -1,0 +1,154 @@
+// Minimal openBW sim bootstrap for the sprite viewer.
+//
+// Loads the MPQs + a small map (default: (4)Blood Bath.scm) with
+// `setup_info.create_no_units = true` -- gives us a valid
+// `bwgame::state` (tile grid, tileset palette, region/pathfinding
+// data) with zero units on the field.
+//
+// The viewer then spawns ONE unit via create_completed_unit and
+// drives its iscript directly via iscript_run_anim; the sim advances
+// via player.next_frame() each Qt tick, which ticks all animations.
+//
+// Rendering: we skip ui_functions::update()'s tile/fog/minimap
+// passes and paint the sprite directly onto a solid background,
+// so the viewer canvas is clean.
+
+#ifndef OPENBW_SPRITE_VIEWER_SIM_HARNESS_H
+#define OPENBW_SPRITE_VIEWER_SIM_HARNESS_H
+
+// Deliberately NOT including ui.h here: it has no include guard,
+// so including it in two different .cpp files that share this
+// header multiply-defines its free functions. Consumers of this
+// header get forward declarations only for `ui_functions`; the
+// .cpp files that actually touch it must include ui.h themselves.
+//
+// data_loading.h IS include-guarded and safe.
+
+#include "../data_loading.h"
+
+#include <memory>
+#include <string>
+
+namespace bwgame {
+	struct unit_t;
+	struct ui_functions;
+}
+
+namespace sprite_viewer {
+
+// Owns all sim state. One instance per viewer window.
+struct SimHarness {
+	// The MPQ loader has to outlive ui_functions because ui_functions
+	// stores a `load_data_file` callback that reads from it on demand.
+	// Held as unique_ptr because data_files_loader is move-only (each
+	// mpq_file owns a FILE*). The pointer lifetime lets us construct
+	// after the harness itself.
+	std::unique_ptr<bwgame::data_loading::data_files_loader<>> mpq_loader;
+
+	// game_player is constructed inside boot() as a local, then moved
+	// into ui_functions (which takes it by value). ui_functions is the
+	// only thing we hold long-term; it owns the state through its
+	// `player` member. Both must outlive any unit_t*/sprite_t* we
+	// hand out.
+	std::unique_ptr<bwgame::ui_functions> ui;
+
+	// The one and only unit we spawn. Owned by the sim's unit table,
+	// not by us -- we just hold a pointer.
+	bwgame::unit_t* unit = nullptr;
+
+	// Set after kill_unit(). While true, tick() is safe to keep
+	// running (the death animation plays over several frames) but
+	// the pointer may become invalid at any tick. We validate
+	// unit->sprite before every dereference. When the unit's
+	// sprite is finally cleaned up, we treat that as "gone" and
+	// stop rendering.
+	bool unit_dying = false;
+
+	// Current iscript animation running on unit->sprite->main_image.
+	int current_anim = -1;   // -1 = never started
+
+	// Map dimensions in world (pixel) coords, cached after map load.
+	int map_pixel_width = 0;
+	int map_pixel_height = 0;
+
+	SimHarness();
+	~SimHarness();
+	SimHarness(const SimHarness&) = delete;
+	SimHarness& operator=(const SimHarness&) = delete;
+
+	// Boot procedure. Blocks on I/O (MPQ load). Throws bwgame::exception
+	// on failure. `data_path` should be the dir containing StarDat.mpq
+	// (and the map file); `map_relpath` is relative to data_path.
+	void boot(const std::string& data_path, const std::string& map_relpath);
+
+	// Create the hidden native window ui.h renders into, and set
+	// screen dims. Call once, after boot(), before the first
+	// render_frame(). Width/height define the sprite canvas size
+	// the caller gets back from render_frame().
+	void configure_viewport(int width, int height);
+
+	// Spawn (or respawn) a unit of the given type at the map center,
+	// owned by player 0. If a unit already exists, kill_unit() it
+	// first. Returns false if the unit_type is invalid or spawning
+	// fails.
+	bool spawn_unit(int unit_type_id);
+
+	// Run one of the iscript_anims::* on the unit's main image.
+	// Silently no-ops (returns false) if the image doesn't have an
+	// anim_pc for that id (which is common -- most units don't have
+	// Landing, LiftOff, WarpIn, etc). See data_types.h:446 for the
+	// full list.
+	bool run_anim(int anim_id);
+
+	// Set the unit's heading. slider_dir is 0..16 with 0=up, 4=right,
+	// 8=down, 12=left. Internally translates to BW's 256-direction
+	// raw byte via direction_from_index. See bwgame.h:13281 for how
+	// this drives frame_index_offset.
+	void set_heading_from_slider(int slider_dir);
+
+	// One iscript / sim tick. Advances all animation state machines,
+	// same as retail's per-frame update (bwgame.h:13185 next_frame).
+	void tick();
+
+	// Center the viewport on the current unit so `draw_sprite`
+	// paints it at the canvas center.
+	void center_viewport();
+
+	// Paint the current unit into ui's indexed_surface + blit to
+	// window_surface. Returns pointer to the RGBA window surface
+	// data + width/height/pitch so the caller can copy pixels onto
+	// its own widget. Returns nullptr / zeros if the sim isn't
+	// ready yet. The pointer is invalidated by the next tick().
+	struct FramePixels {
+		const void* data = nullptr;
+		int width = 0;
+		int height = 0;
+		int pitch = 0;
+	};
+	FramePixels render_frame();
+
+	// Return frame_index / base / offset for the readout. Any of
+	// these being negative means "no unit spawned" or "no image".
+	struct FrameInfo {
+		int frame_index = -1;
+		int frame_base = -1;
+		int frame_offset = -1;
+	};
+	FrameInfo current_frame_info() const;
+
+	// True if the current unit's iscript has an anim_pc for the
+	// given anim id. Used to filter the anim dropdown to just what
+	// this unit supports.
+	bool anim_available(int anim_id) const;
+
+private:
+	bool tried_first_update = false;
+};
+
+// Names for the iscript_anims enum in data_types.h:446. Indexed by
+// the enum value; used to populate the anim dropdown.
+extern const char* const ISCRIPT_ANIM_NAMES[28];
+
+}   // namespace sprite_viewer
+
+#endif
