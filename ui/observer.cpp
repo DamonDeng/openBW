@@ -339,6 +339,22 @@ int main(int argc, char** argv) {
 			ui::log("[obs] viewing perspective: slot=%d\n", (int)sync_st.viewing_slot);
 			last_logged_slot = sync_st.viewing_slot;
 		}
+		// Publish the actual minimap rect so the SDL backend's HUD
+		// blit snapshots only the pixels openBW drew (fixes the
+		// "top of minimap slot shows leaked game canvas" bug on
+		// maps smaller than 128 tiles: Boxer 96, Blood Bath 64,
+		// etc). Numeric readouts stay at -1 = hidden for the
+		// native observer since it doesn't render the mineral /
+		// gas / supply readouts.
+		{
+			native_window::hud_state_t hs;
+			auto area = ui.get_minimap_area();
+			hs.minimap_x = area.from.x;
+			hs.minimap_y = area.from.y;
+			hs.minimap_w = area.to.x - area.from.x;
+			hs.minimap_h = area.to.y - area.from.y;
+			wnd.set_hud_state(hs);
+		}
 		ui.update();
 		// Small yield so we don't 100% spin the CPU when server is idle.
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));

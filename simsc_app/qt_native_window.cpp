@@ -236,17 +236,30 @@ protected:
 			// The console's minimap slot (source PNG x=6..133,
 			// y=55..182 within the trimmed 406×187 asset) is opaque
 			// RGB(8,8,8) — a designed-to-be-overpainted placeholder.
-			// openBW has already drawn the real 128×128 minimap into
-			// the framebuffer at (4, height-4-128). Re-blit exactly
-			// that region on top of the HUD so the real minimap shows
-			// through the slot. Same trick retail BW's engine used to
-			// composite the live minimap over the console PNG.
-			const int mm_size = 128;
-			const int mm_x = 4;
-			const int mm_y = height() - 4 - mm_size;
-			p.drawImage(QRect(mm_x, mm_y, mm_size, mm_size),
+			// openBW has already drawn the real minimap into the
+			// framebuffer at (4, height-4-h) with size = per-map
+			// tile_dim (see ui/ui.h::draw_minimap). For 128×128-tile
+			// maps that's exactly 128×128 and fills the slot; for
+			// smaller maps (Boxer 96×96, Blood Bath 64×64) the
+			// minimap is shorter/narrower and the dark-gray slot
+			// pixels around it stay visible -- distinct from the
+			// black openBW uses for unexplored map, so players
+			// don't confuse the border with fog of war.
+			// Backwards-compat: if hud_state.minimap_w/h are 0
+			// (caller hasn't populated yet), fall back to the
+			// hardcoded 128×128 behavior.
+			int mm_w = hud_state.minimap_w;
+			int mm_h = hud_state.minimap_h;
+			int mm_x = hud_state.minimap_x;
+			int mm_y = hud_state.minimap_y;
+			if (mm_w <= 0 || mm_h <= 0) {
+				mm_w = mm_h = 128;
+				mm_x = 4;
+				mm_y = height() - 4 - 128;
+			}
+			p.drawImage(QRect(mm_x, mm_y, mm_w, mm_h),
 			            framebuffer,
-			            QRect(mm_x, mm_y, mm_size, mm_size));
+			            QRect(mm_x, mm_y, mm_w, mm_h));
 
 			// Numeric HUD readouts drawn on top of the console chrome.
 			// Icons live in HUD-local coords (170, 98/119/140); text

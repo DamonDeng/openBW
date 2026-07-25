@@ -311,6 +311,17 @@ int main(int argc, char** argv) {
 				hs.supply_max  =
 				    ui.st.supply_available[slot][r].integer_part() / 2;
 			}
+			// Publish the real minimap rect so the Qt / SDL HUD blit
+			// can composite only the pixels openBW actually drew,
+			// leaving the HUD's dark-gray placeholder visible around
+			// smaller-than-128 minimaps. See hud_state_t docs.
+			{
+				auto area = ui.get_minimap_area();
+				hs.minimap_x = area.from.x;
+				hs.minimap_y = area.from.y;
+				hs.minimap_w = area.to.x - area.from.x;
+				hs.minimap_h = area.to.y - area.from.y;
+			}
 			wnd.set_hud_state(hs);
 		}
 

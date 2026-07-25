@@ -52,6 +52,19 @@ namespace native_window {
 		int gas = -1;
 		int supply_used = -1;
 		int supply_max = -1;
+		// Actual minimap rectangle in framebuffer pixel coords, as
+		// returned by ui_functions::get_minimap_area(). Populated by
+		// the caller each frame. The HUD blit uses this to snapshot
+		// and re-composite only the region openBW actually drew,
+		// avoiding the "top of the minimap slot shows leaked game
+		// canvas" bug on maps smaller than 128×128 tiles (Boxer,
+		// Blood Bath, etc). Width/height <= 0 means "no minimap to
+		// composite" and the HUD leaves its dark-gray placeholder
+		// slot visible.
+		int minimap_x = 0;
+		int minimap_y = 0;
+		int minimap_w = 0;
+		int minimap_h = 0;
 	};
 
 	struct window {

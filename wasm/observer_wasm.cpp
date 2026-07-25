@@ -311,6 +311,17 @@ extern "C" void wasm_frame() {
 			hs.supply_max  =
 			    st.ui->st.supply_available[slot][r].integer_part() / 2;
 		}
+		// Publish where openBW actually drew the minimap this frame,
+		// so the SDL HUD blit only snapshots + re-composites the real
+		// region (variable per map: 128×128 for Bottleneck, 96×96 for
+		// Boxer, 64×64 for Blood Bath …). See hud_state_t docs.
+		{
+			auto area = st.ui->get_minimap_area();
+			hs.minimap_x = area.from.x;
+			hs.minimap_y = area.from.y;
+			hs.minimap_w = area.to.x - area.from.x;
+			hs.minimap_h = area.to.y - area.from.y;
+		}
 		st.ui->wnd.set_hud_state(hs);
 	}
 

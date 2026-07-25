@@ -223,48 +223,69 @@ struct window_impl {
 		if (hud_console && window) {
 			SDL_Surface* ws = SDL_GetWindowSurface(window);
 			if (ws) {
-				// Console is 640x187 with an opaque "minimap slot"
-				// region (RGB 8,8,8) that the retail engine used to
-				// designate a spot to be overpainted with the live
-				// minimap. Our ui.h has already drawn the real
-				// minimap into ws at (4, height-4-128). Composite
-				// order:
-				//   1. Snapshot the minimap 128x128 patch out of ws
-				//      so we can re-blit it on top of the HUD.
-				//   2. Blit the HUD (covers minimap).
-				//   3. Re-blit the snapshotted minimap patch.
-				// Mirrors qt_native_window.cpp:212-243.
-				const int mm_size = 128;
-				const int mm_x = 4;
-				const int mm_y = ws->h - 4 - mm_size;
+				// Console is 640x187. Inside it, the "minimap slot"
+				// at PNG-local (6, 55) size 128x128 is opaque
+				// RGB(8,8,8) -- a designed-to-be-overpainted
+				// placeholder. Retail SC1 rendered the minimap as a
+				// fixed 128x128 raster with per-tile scaling; our
+				// ui/ui.h::draw_minimap instead draws at 1 tile per
+				// pixel, so the minimap size varies per map
+				// (Bottleneck 128x128, Boxer 96x96, Blood Bath
+				// 64x64, etc). Composite order:
+				//   1. Snapshot the ACTUAL minimap rect (from
+				//      hud_state.minimap_{x,y,w,h}) out of ws so
+				//      we can re-blit it on top of the HUD.
+				//   2. Blit the HUD (its opaque dark-gray slot
+				//      covers whatever's under it).
+				//   3. Re-blit the snapshot at its original screen
+				//      position, so the smaller minimap sits at its
+				//      bottom-left corner inside the slot with the
+				//      dark-gray HUD chrome visible above it. Dark
+				//      gray (RGB 8,8,8) is intentionally distinct
+				//      from openBW's black-for-unexplored on the
+				//      minimap itself, so players don't confuse
+				//      the gray border with fog of war.
+				// Mirrors qt_native_window.cpp with the same fix.
+				// Backwards-compat: if minimap_w/h are 0 (caller
+				// hasn't populated yet), fall back to the hardcoded
+				// 128x128 behavior.
+				int mm_w = hud_state.minimap_w;
+				int mm_h = hud_state.minimap_h;
+				int mm_x = hud_state.minimap_x;
+				int mm_y = hud_state.minimap_y;
+				if (mm_w <= 0 || mm_h <= 0) {
+					mm_w = mm_h = 128;
+					mm_x = 4;
+					mm_y = ws->h - 4 - 128;
+				}
 				const int hud_x = -2;
 				const int hud_y = ws->h - hud_console->h;
 
-				// (1) Copy the minimap patch. Use CreateRGBSurfaceWith
-				// FormatFrom-style approach: allocate a matching
-				// surface and BlitSurface into it.
+				// (1) Copy the actual minimap patch.
 				SDL_Surface* mm_snap = SDL_CreateRGBSurface(
-					0, mm_size, mm_size,
+					0, mm_w, mm_h,
 					ws->format->BitsPerPixel,
 					ws->format->Rmask, ws->format->Gmask,
 					ws->format->Bmask, ws->format->Amask);
 				if (mm_snap) {
-					SDL_Rect src_r{mm_x, mm_y, mm_size, mm_size};
-					SDL_Rect dst_r{0, 0, mm_size, mm_size};
+					SDL_Rect src_r{mm_x, mm_y, mm_w, mm_h};
+					SDL_Rect dst_r{0, 0, mm_w, mm_h};
 					SDL_BlitSurface(ws, &src_r, mm_snap, &dst_r);
 				}
 
 				// (2) Blit HUD chrome over the game framebuffer.
+				// The slot fills with RGB(8,8,8) dark gray -- that
+				// gray is what will show around a smaller minimap.
 				SDL_Rect dst{hud_x, hud_y, hud_console->w, hud_console->h};
-				// Alpha is baked into the PNG (viewport is fully
-				// transparent). Ensure BLEND is on.
 				SDL_SetSurfaceBlendMode(hud_console, SDL_BLENDMODE_BLEND);
 				SDL_BlitSurface(hud_console, nullptr, ws, &dst);
 
-				// (3) Restore the real minimap over the HUD's
-				// designed-overpaint slot.
+				// (3) Restore the real minimap at its actual
+				// position. For maps smaller than 128 tiles this
+				// leaves dark-gray HUD pixels above the minimap
+				// (and to the right if the map is also narrower).
 				if (mm_snap) {
-					SDL_Rect dst_r{mm_x, mm_y, mm_size, mm_size};
+					SDL_Rect dst_r{mm_x, mm_y, mm_w, mm_h};
 					SDL_BlitSurface(mm_snap, nullptr, ws, &dst_r);
 					SDL_FreeSurface(mm_snap);
 				}
