@@ -85,10 +85,17 @@ def create_game(
     net = client.NetworkingV1Api()
 
     # --- args ---
+    # --batch-size 24: bundle 24 server ticks (1s at fastest) into one
+    # id_frame_batch WS message for observer clients that opted in via
+    # id_capabilities. Absorbs long-haul (Beijing->Tokyo ~340ms RTT)
+    # jitter without visible stutter. Legacy observers unaffected --
+    # they still get per-tick id_client_frame + id_agent_action_batch.
+    # See docs/observer_frame_batching.md.
     args = [
         "--map", f"/opt/openbw/data/{map_name}",
         "--game-speed", game_speed,
         "--any-ws-path",  # ALB path-routes to us; accept any WS path.
+        "--batch-size", "24",
     ]
     for i, race in enumerate(races):
         # Control server resolves 'random' → concrete race before
