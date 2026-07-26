@@ -118,6 +118,15 @@ struct args_t {
 	// turbosuper=10 (see docs — simsc soaks run at 10 by convention).
 	int tick_ms = 42;
 
+	// How many server ticks to bundle into one id_frame_batch WS
+	// message for observer clients that opt in via id_capabilities.
+	// Default 1 = disabled (legacy per-tick behavior). Larger values
+	// smooth out network jitter at the cost of observer visual lag
+	// (batch_size * tick_ms). Legacy observers ignore this setting;
+	// they always receive id_client_frame + id_agent_action_batch
+	// per tick as before. See docs/observer_frame_batching.md.
+	int batch_size = 1;
+
 	// Per-slot race override. -1 means "use map default". Indices are
 	// player slots (0..7). We only accept overrides for the 8 melee
 	// slots; slots 8..11 are reserved (neutral/rescue/etc.).
@@ -275,6 +284,16 @@ args_t parse_args(int argc, char** argv) {
 				a.tick_ms = as_int;
 			}
 		}
+		else if (eq("--batch-size") && i + 1 < argc) {
+			int v = std::atoi(argv[++i]);
+			if (v < 1 || v > 240) {
+				fprintf(stderr,
+					"error: --batch-size must be 1..240. got %s\n",
+					argv[i]);
+				std::exit(1);
+			}
+			a.batch_size = v;
+		}
 		else if (eq("--help") || eq("-h")) {
 			fprintf(stderr,
 				"usage: %s --map <path> (--users <path> | --user <spec>... | --no-auth) [options]\n"
@@ -335,6 +354,13 @@ args_t parse_args(int argc, char** argv) {
 				"                     simsc extensions: superfast (20 ms)\n"
 				"                     and turbosuper (10 ms) for testing.\n"
 				"                     Retail BW campaign uses 'fast' (56).\n"
+				"  --batch-size N     Bundle N server ticks into one\n"
+				"                     id_frame_batch message for observer\n"
+				"                     clients that opt in via\n"
+				"                     id_capabilities (bit 0). Default 1\n"
+				"                     = disabled. 24 gives 1s jitter buffer\n"
+				"                     at the cost of 1s observer visual\n"
+				"                     lag. Legacy observers unaffected.\n"
 				"  --race N=RACE      override slot N's race, one of\n"
 				"                     zerg/terran/protoss. Repeat for\n"
 				"                     multiple slots (e.g. --race 0=zerg\n"
@@ -470,6 +496,7 @@ int main(int argc, char** argv) {
 	for (size_t i = 0; i < 8; ++i) setup_info.create_melee_units_for_player[i] = true;
 	sync_st.setup_info = &setup_info;
 	sync_st.latency = 2;
+	sync_st.server_batch_size = args.batch_size;
 
 	// Wire deterministic-repro flags into sync_state. Off by default.
 	if (args.pin_start_seed) {

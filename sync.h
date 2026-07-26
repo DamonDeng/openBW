@@ -7,6 +7,7 @@
 #include "replay_saver.h"
 
 #include <chrono>
+#include <map>
 #include <random>
 #include <thread>
 #include <functional>
@@ -41,6 +42,24 @@ struct sync_state {
 
 	int latency = 2;
 	bool is_first_bwapi_compatible_frame = true;
+
+	// Server-side: how many server ticks to batch into one
+	// id_frame_batch WS message for observer clients that opted in
+	// via id_capabilities (bit 0). Default 1 = legacy per-tick
+	// behavior (no batching, no id_frame_batch emitted). Higher
+	// values trade observer visual lag (server_batch_size * 42 ms)
+	// for jitter tolerance and fewer TLS/ALB overhead events.
+	// See docs/observer_frame_batching.md.
+	int server_batch_size = 1;
+
+	// Client-side: if > 1, this client opts into the id_frame_batch
+	// protocol by sending id_capabilities with bit 0 set right after
+	// its id_auth message. The actual on-wire batch size is the
+	// SERVER's server_batch_size; this field is the client's "I
+	// support batches" flag. Default 1 = legacy (no id_capabilities
+	// emitted, keep receiving id_client_frame + id_agent_action_batch
+	// per tick). See docs/observer_frame_batching.md.
+	int client_batch_size = 1;
 
 	int game_starting_countdown = 0;
 	uint32_t start_game_seed = 0;
@@ -109,6 +128,28 @@ struct sync_state {
 		// stashes an opaque per-user pointer here (e.g. openbw_auth::user_t*).
 		bool has_auth = false;
 		const void* auth_user = nullptr;
+
+		// Capability bitmask advertised by the client via
+		// id_capabilities (see enum comment). 0 = legacy behavior
+		// (no bits set). Server-side only; observers never inspect
+		// their own bitmask.
+		//   bit 0 (0x0001) = supports id_frame_batch
+		uint16_t caps_bitmask = 0;
+
+		// Server-side per-client batch accumulator. Only used when
+		// caps_bitmask & 0x0001 and sync_state::server_batch_size > 1.
+		// Legacy clients: fields stay at defaults, never touched.
+		//
+		// batch_start_frame is the server_frame of the first tick
+		// currently in the accumulator. batch_n_ticks is how many
+		// ticks we've accumulated so far (0..server_batch_size). When
+		// it reaches server_batch_size we flush an id_frame_batch and
+		// reset. batch_action_buf holds the pre-serialized per-action
+		// entries; batch_n_actions counts how many we've written.
+		uint32_t batch_start_frame = 0;
+		uint16_t batch_n_ticks = 0;
+		uint16_t batch_n_actions = 0;
+		a_vector<uint8_t> batch_action_buf;
 	};
 
 	a_list<client_t> clients = {{uid_t::generate(), true}};
@@ -437,7 +478,45 @@ namespace sync_messages {
 		// id_agent_action wins), slot 1's actions applied first --
 		// opposite of the server's slot-major drain order. The batch
 		// message eliminates that class of race entirely.
-		id_agent_action_batch
+		id_agent_action_batch,
+		// Client -> server, sent right after id_auth. Advertises
+		// support for opt-in protocol extensions. Payload:
+		//   [uint16_t caps_bitmask]
+		// Currently defined bits:
+		//   bit 0 (0x0001) = id_frame_batch support (see below)
+		// A client that doesn't send this message (older observer,
+		// or an agent) is treated as legacy: no bits set. Server
+		// tracks per-client capability on client_t::caps_bitmask.
+		// See docs/observer_frame_batching.md for the design.
+		id_capabilities,
+		// Server -> observer: a multi-tick batched broadcast that
+		// bundles N successive server ticks' worth of agent
+		// actions into one WS message. Emitted only to clients
+		// that opted in via id_capabilities bit 0, and only when
+		// the server's --batch-size setting is > 1. Legacy clients
+		// keep receiving id_client_frame + id_agent_action_batch
+		// per tick as before.
+		//
+		// Payload:
+		//   [uint32_t start_frame]     server_frame of the first
+		//                              tick in this batch
+		//   [uint16_t n_ticks]         how many server ticks this
+		//                              batch covers (usually equal
+		//                              to --batch-size)
+		//   [uint16_t n_actions]       total actions across all ticks
+		//   Repeated n_actions times:
+		//     [uint32_t abs_frame]     the server tick this action
+		//                              applied on (start_frame..
+		//                              start_frame+n_ticks-1)
+		//     [uint8_t  slot]
+		//     [uint16_t action_len]
+		//     [action bytes ...]
+		//
+		// The observer queues incoming batches and drains actions
+		// tick-by-tick from the head of the queue at 42 ms/frame,
+		// pausing when the queue is empty (i.e. next batch hasn't
+		// arrived yet). See docs/observer_frame_batching.md.
+		id_frame_batch
 	};
 	enum {
 		id_game_started_escape = 0xdc
@@ -996,6 +1075,25 @@ struct sync_functions: action_functions {
 				// on the client's socket until that point. Handled below.
 				break;
 			}
+			case sync_messages::id_capabilities: {
+				// Optional client-advertised capability bitmask. Client
+				// sends this right after id_auth. Absence is legal
+				// (treated as 0 = no bits = legacy). See enum comment
+				// for defined bits. This message is server-inbound
+				// only; observers never receive it back.
+				if (r.left() < 2) { kill_client(client); return; }
+				client->caps_bitmask = r.template get<uint16_t>();
+				// If the client opted into id_frame_batch, initialize
+				// its accumulator so the very first server tick lands
+				// in a valid batch window.
+				if ((client->caps_bitmask & 0x0001) && sync_st.server_batch_size > 1) {
+					client->batch_start_frame = (uint32_t)sync_st.sync_frame + 1;
+					client->batch_n_ticks = 0;
+					client->batch_n_actions = 0;
+					client->batch_action_buf.clear();
+				}
+				break;
+			}
 			case sync_messages::id_assign_perspective: {
 				int8_t slot = (int8_t)r.template get<uint8_t>();
 				if (slot < -1 || slot > 7) slot = -1;
@@ -1314,6 +1412,93 @@ struct sync_functions: action_functions {
 					sync_log_line(sync_st, 'O', a_string(buf));
 				}
 				sync_st.pending_batches.push_back(std::move(batch));
+				break;
+			}
+			case sync_messages::id_frame_batch: {
+				// Client-side: multi-tick batch of agent actions from
+				// the server. Payload:
+				//   [uint32_t start_frame]
+				//   [uint16_t n_ticks]
+				//   [uint16_t n_actions]
+				//   Repeated n_actions:
+				//     [uint32_t abs_frame]
+				//     [uint8_t  slot]
+				//     [uint16_t action_len]
+				//     [action bytes]
+				//
+				// We UNPACK the multi-tick batch into one entry per
+				// distinct abs_frame in sync_st.pending_batches --
+				// the existing per-tick drain loop then treats each
+				// as if it had arrived via id_agent_action_batch.
+				// That reuses the well-tested SyncBreaker #8 drain
+				// path with zero downstream changes.
+				//
+				// Also advance the server-as-peer's frame counter so
+				// all_clients_in_sync's latency gate keeps working:
+				// in batch mode we never see per-tick id_client_frame,
+				// so without this update `client->frame` never moves
+				// and the client stalls on latency.
+				if (r.left() < 8) {
+					if (sync_st.sync_log) {
+						sync_log_line(sync_st, 'O',
+							a_string("FRAME_BATCH_RECV\tstatus=short-header"));
+					}
+					break;
+				}
+				uint32_t start_frame = r.template get<uint32_t>();
+				uint16_t n_ticks     = r.template get<uint16_t>();
+				uint16_t n_actions   = r.template get<uint16_t>();
+				// Bucket actions by abs_frame in a temp map. Keep
+				// insertion order within each bucket (matches the
+				// server's slot-major serialization within a tick).
+				std::map<uint32_t, sync_state::pending_batch> per_tick;
+				bool ok = true;
+				for (uint16_t i = 0; i < n_actions; ++i) {
+					if (r.left() < 7) { ok = false; break; }
+					uint32_t abs_frame = r.template get<uint32_t>();
+					uint8_t slot       = r.template get<uint8_t>();
+					uint16_t alen      = r.template get<uint16_t>();
+					if (r.left() < alen) { ok = false; break; }
+					sync_state::pending_batch_action e;
+					e.slot = slot;
+					e.data.resize(alen);
+					r.get_bytes(e.data.data(), alen);
+					auto& b = per_tick[abs_frame];
+					if (b.entries.empty()) {
+						b.target_frame = abs_frame + sync_st.latency;
+					}
+					b.entries.push_back(std::move(e));
+				}
+				if (!ok) {
+					if (sync_st.sync_log) {
+						char buf[128];
+						snprintf(buf, sizeof(buf),
+							"FRAME_BATCH_RECV\tstatus=malformed"
+							"\tstart_frame=%u\tn_ticks=%u\tn_actions=%u",
+							start_frame, (unsigned)n_ticks,
+							(unsigned)n_actions);
+						sync_log_line(sync_st, 'O', a_string(buf));
+					}
+					break;
+				}
+				// Push each per-tick batch into pending_batches in
+				// ascending abs_frame order (std::map iterates
+				// key-sorted, which is what we want).
+				for (auto& kv : per_tick) {
+					sync_st.pending_batches.push_back(std::move(kv.second));
+				}
+				// Advance server-as-peer's known frame so the client
+				// doesn't stall on latency gate.
+				client->frame = start_frame + n_ticks;
+				if (sync_st.sync_log) {
+					char buf[192];
+					snprintf(buf, sizeof(buf),
+						"FRAME_BATCH_RECV\tstart_frame=%u\tn_ticks=%u"
+						"\tn_actions=%u\tunique_ticks=%zu",
+						start_frame, (unsigned)n_ticks,
+						(unsigned)n_actions, per_tick.size());
+					sync_log_line(sync_st, 'O', a_string(buf));
+				}
 				break;
 			}
 			default:
@@ -1658,6 +1843,27 @@ struct sync_functions: action_functions {
 					sync_st.outgoing_api_key.size());
 				send(w, h);
 			}
+			// Advertise id_frame_batch support if the embedder opted
+			// in via sync_st.client_batch_size > 1. Server tracks
+			// this on client_t::caps_bitmask and switches its send
+			// path to batched frames for us.
+			//
+			// WARNING: only enable this against a server that speaks
+			// id_capabilities. An old server treats unknown message
+			// IDs as scheduled_action bytes (see the `default:` arm
+			// of the client-inbound recv switch) and will either
+			// crash on garbage input or kill the connection. There's
+			// no server->client capability handshake yet; the
+			// operator must know both sides support batching. Long-
+			// term fix: add id_server_capabilities that the server
+			// emits on connect. See
+			// docs/observer_frame_batching.md.
+			if (sync_st.client_batch_size > 1) {
+				writer<3> w;
+				w.put<uint8_t>((uint8_t)sync_messages::id_capabilities);
+				w.put<uint16_t>((uint16_t)0x0001);   // bit 0 = frame_batch
+				send(w, h);
+			}
 			send_uid(h);
 			auto frame = sync_st.sync_frame;
 			sync_st.sync_frame = 0;
@@ -1677,14 +1883,92 @@ struct sync_functions: action_functions {
 			}
 			recv(client, (const uint8_t*)data, size);
 		}
+		// True iff `c` opted into the multi-tick batch protocol AND
+		// the server is configured with a real batch size (>1).
+		bool client_uses_frame_batch(const sync_state::client_t& c) const {
+			return (c.caps_bitmask & 0x0001)
+			    && sync_st.server_batch_size > 1;
+		}
+
+		// Emit any accumulated batch bytes for `c` as one
+		// id_frame_batch WS message, targeted at that specific
+		// client. Resets the accumulator for the next window. If the
+		// window has zero actions and zero ticks we skip the send
+		// (nothing to say).
+		void flush_client_batch(sync_state::client_t& c) {
+			if (c.batch_n_ticks == 0) return;   // nothing to flush
+			auto d = server.new_message();
+			d.template put<uint8_t>((uint8_t)sync_messages::id_frame_batch);
+			d.template put<uint32_t>(c.batch_start_frame);
+			d.template put<uint16_t>(c.batch_n_ticks);
+			d.template put<uint16_t>(c.batch_n_actions);
+			d.put(c.batch_action_buf.data(), c.batch_action_buf.size());
+			server.send_message(d, c.h);
+			if (sync_st.sync_log) {
+				char buf[160];
+				snprintf(buf, sizeof(buf),
+					"FRAME_BATCH_SEND\tclient=%d\tstart_frame=%u"
+					"\tn_ticks=%u\tn_actions=%u\tbuf_bytes=%zu",
+					c.local_id,
+					(unsigned)c.batch_start_frame,
+					(unsigned)c.batch_n_ticks,
+					(unsigned)c.batch_n_actions,
+					c.batch_action_buf.size());
+				sync_log_line(sync_st, 'S', a_string(buf));
+			}
+			c.batch_start_frame += c.batch_n_ticks;   // next window starts
+			c.batch_n_ticks = 0;
+			c.batch_n_actions = 0;
+			c.batch_action_buf.clear();
+		}
+
 		void send_client_frame() {
-			// Message layout: [u8 id][u32 frame]. Widened from u8 to
-			// support observers that lag >128 frames (see the note on
+			// A tick just completed on the server. For legacy clients
+			// we broadcast id_client_frame as before; for batch-mode
+			// clients we bump their per-client tick counter and flush
+			// their id_frame_batch when it fills the window.
+			//
+			// Legacy id_client_frame layout: [u8 id][u32 frame].
+			// Widened from u8 to support observers that lag >128
+			// frames (see the note on
 			// sync_state::scheduled_action::frame).
-			writer<5> w;
-			w.put<uint8_t>(sync_messages::id_client_frame);
-			w.put<uint32_t>(sync_st.sync_frame);
-			send(w);
+			auto d = server.new_message();
+			d.template put<uint8_t>((uint8_t)sync_messages::id_client_frame);
+			d.template put<uint32_t>((uint32_t)sync_st.sync_frame);
+			// Walk client list once, dispatching per-client based on
+			// capabilities. Skip local_client (that's ourselves, no
+			// wire send needed) and clients without a live socket
+			// handle (virtual clients for agent slots).
+			for (auto& c : sync_st.clients) {
+				if (&c == sync_st.local_client) continue;
+				if (c.h == nullptr) continue;
+				if (client_uses_frame_batch(c)) {
+					// Batch mode: this tick contributes to the
+					// client's current window. Advance the tick
+					// counter, then flush if full.
+					++c.batch_n_ticks;
+					if (c.batch_n_ticks >= (uint16_t)sync_st.server_batch_size) {
+						flush_client_batch(c);
+					}
+				} else {
+					// Legacy: send id_client_frame targeted at this
+					// client. Same message reused across sends.
+					server.send_message(d, c.h);
+				}
+			}
+			// local_client loopback: preserve the original semantics
+			// where send() (with h==nullptr) both broadcasts AND
+			// recv()s into local_client. We rebuild the raw byte
+			// stream to hand to recv(), since message_t is a
+			// scatter-write container that recv doesn't accept.
+			uint8_t raw[5];
+			raw[0] = (uint8_t)sync_messages::id_client_frame;
+			uint32_t f = (uint32_t)sync_st.sync_frame;
+			raw[1] = (uint8_t)(f & 0xff);
+			raw[2] = (uint8_t)((f >> 8) & 0xff);
+			raw[3] = (uint8_t)((f >> 16) & 0xff);
+			raw[4] = (uint8_t)((f >> 24) & 0xff);
+			recv(sync_st.local_client, raw, 5);
 		}
 		void timeout_func() {
 			auto now = std::chrono::steady_clock::now();
@@ -1824,6 +2108,12 @@ struct sync_functions: action_functions {
 				if (e.size > 0 && e.slot >= 0 && e.slot <= 7) ++count;
 			}
 			if (count == 0) return;
+			// Build the legacy per-tick id_agent_action_batch payload
+			// once. Send it to legacy clients only. For batch-mode
+			// clients, we serialize each action into their per-client
+			// batch_action_buf instead (tagged with abs_frame). The
+			// tick-completion path in send_client_frame handles the
+			// eventual flush + reset for those clients.
 			auto d = server.new_message();
 			d.template put<uint8_t>((uint8_t)sync_messages::id_agent_action_batch);
 			d.template put<uint32_t>((uint32_t)sync_st.sync_frame);
@@ -1837,7 +2127,48 @@ struct sync_functions: action_functions {
 				d.template put<uint16_t>(len);
 				d.put(e.data, len);
 			}
-			server.send_message(d, nullptr);
+			// Walk client list, dispatching per-client.
+			for (auto& c : sync_st.clients) {
+				if (&c == sync_st.local_client) continue;
+				if (c.h == nullptr) continue;
+				if (client_uses_frame_batch(c)) {
+					// Serialize each action into this client's batch
+					// buffer, tagged with abs_frame = current tick.
+					// Format matches the id_frame_batch payload spec:
+					//   [u32 abs_frame][u8 slot][u16 action_len][bytes]
+					uint32_t abs_frame = (uint32_t)sync_st.sync_frame;
+					auto& buf = c.batch_action_buf;
+					for (const auto& e : entries) {
+						if (e.size == 0 || e.slot < 0 || e.slot > 7) continue;
+						uint16_t len = e.size > 0xffff ? 0xffff : (uint16_t)e.size;
+						// abs_frame little-endian u32
+						buf.push_back((uint8_t)(abs_frame & 0xff));
+						buf.push_back((uint8_t)((abs_frame >> 8) & 0xff));
+						buf.push_back((uint8_t)((abs_frame >> 16) & 0xff));
+						buf.push_back((uint8_t)((abs_frame >> 24) & 0xff));
+						buf.push_back((uint8_t)e.slot);
+						buf.push_back((uint8_t)(len & 0xff));
+						buf.push_back((uint8_t)((len >> 8) & 0xff));
+						buf.insert(buf.end(),
+							(const uint8_t*)e.data,
+							(const uint8_t*)e.data + len);
+						++c.batch_n_actions;
+					}
+				} else {
+					server.send_message(d, c.h);
+				}
+			}
+			// Local loopback for the server's own local_client (h ==
+			// nullptr semantics preserved from the pre-batching path).
+			// We build a temporary raw byte view of the message.
+			//
+			// The message was built via server.new_message() + puts;
+			// we can rebuild it into a stack buffer for the recv call.
+			// Simpler: skip loopback -- the server's own state doesn't
+			// consume this message (only observer/agent clients do).
+			// The previous code path via send_message(d, nullptr)
+			// did NOT call recv on local_client either (send_message
+			// != send()), so this matches prior behavior.
 
 			if (sync_st.sync_log) {
 				char buf[128];

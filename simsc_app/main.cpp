@@ -65,6 +65,13 @@ struct args_t {
 	std::array<int, 8> race_overrides = {-1, -1, -1, -1, -1, -1, -1, -1};
 	int screen_width  = 1280;
 	int screen_height = 800;
+	// Opt-in to id_frame_batch protocol. > 1 = advertise support to
+	// server via id_capabilities. Only enable against a server that
+	// speaks the new protocol (openbw_server with --batch-size N > 1);
+	// old servers treat the unknown id_capabilities message as
+	// scheduled_action bytes and misbehave. See
+	// docs/observer_frame_batching.md.
+	int client_batch_size = 1;
 };
 
 static bool parse_args(const QStringList& argv, args_t& out) {
@@ -89,6 +96,13 @@ static bool parse_args(const QStringList& argv, args_t& out) {
 		"spec"});
 	p.addOption({"width",  "Window width  (default 1280).",  "n", "1280"});
 	p.addOption({"height", "Window height (default 800).",   "n", "800"});
+	p.addOption({"client-batch-size",
+		"Opt into the id_frame_batch observer protocol. Set to N>1 "
+		"to advertise support to the server; the server drives the "
+		"actual batch width via its --batch-size. Only enable against "
+		"servers that speak this protocol (openbw_server built after "
+		"2026-07-26). Default 1 = legacy per-tick.",
+		"n", "1"});
 	p.parse(argv);
 
 	out.data_path     = p.value("data-path");
@@ -98,6 +112,7 @@ static bool parse_args(const QStringList& argv, args_t& out) {
 	out.sync_log_path = p.value("sync-log");
 	out.screen_width  = p.value("width").toInt();
 	out.screen_height = p.value("height").toInt();
+	out.client_batch_size = p.value("client-batch-size").toInt();
 
 	for (const auto& v : p.values("race")) {
 		int eq = v.indexOf('=');
@@ -192,7 +207,11 @@ int main(int argc, char** argv) {
 	sync_functions funcs(ui.st, action_st, sync_st);
 	game_load_functions::setup_info_t setup_info;
 	sync_st.setup_info = &setup_info;
+	// Latency buffer -- see sync_state::latency docs. 2 is retail
+	// default; jitter tolerance now comes from --client-batch-size
+	// (opt-in) instead of from a large latency buffer.
 	sync_st.latency = 2;
+	sync_st.client_batch_size = args.client_batch_size;
 	sync_st.local_client->name = "simsc_app";
 	if (!args.api_key.isEmpty()) {
 		sync_st.outgoing_api_key =
@@ -258,13 +277,28 @@ int main(int argc, char** argv) {
 	loop_state loop_st;
 
 	QTimer sim_timer;
-	// Sim tick has to be at least as fast as the server's tick_ms
-	// or sync.h stalls waiting for us to catch up. Server can be as
-	// fast as --game-speed 10 (100 ticks/sec = 10 ms/tick). A 10 ms
-	// timer keeps up in all cases; on slower speeds we just repeat
-	// no-op next_frames until server catches up, at trivial cost.
-	// (The SDL observer does the same thing with a 1 ms sleep loop.)
-	sim_timer.setInterval(10);
+	// Sim tick cadence.
+	//
+	// Legacy mode (--client-batch-size <= 1): sync.h paces us to
+	// the server automatically -- funcs.next_frame blocks on the
+	// next id_client_frame heartbeat, and 10 ms oversampling
+	// guarantees we pick up the heartbeat within <=10 ms even at
+	// --game-speed 10 (100 ticks/sec) on the server.
+	//
+	// Batch mode (--client-batch-size > 1): the server sends N
+	// ticks' worth of heartbeats+actions in one id_frame_batch
+	// message. All N ticks unblock at once, so a 10 ms timer would
+	// race through the whole batch in ~N*10 ms (a ~250 ms burst
+	// followed by ~750 ms of no-op) -- visually terrible. Slow the
+	// timer to the retail tick rate (42 ms/frame) so batched ticks
+	// play back at natural speed. The batch buffer absorbs jitter;
+	// the timer paces the render.
+	//
+	// This is the "simplest fix" for the batch-mode burst problem.
+	// A cleaner design would auto-derive the interval from the
+	// observed batch inter-arrival time; punting for now.
+	int tick_interval_ms = (args.client_batch_size > 1) ? 42 : 10;
+	sim_timer.setInterval(tick_interval_ms);
 	QObject::connect(&sim_timer, &QTimer::timeout, &app,
 		[&funcs, &server, &sync_st, &ui, &loop_st, &wnd]() {
 		funcs.next_frame(server);
@@ -338,7 +372,43 @@ int main(int argc, char** argv) {
 				last_printed = cf;
 			}
 		}
-		ui.update();
+		// Perf timing: track how many wall-clock microseconds are
+		// spent in ui.update() (paint) and how many in the wrapping
+		// tick (which includes funcs.next_frame + HUD state + this
+		// diagnostic). Report every 100 ticks as ms averaged over
+		// that window. If paint dominates >>> the tick, we're
+		// paint-bound; if sim dominates, we're sim-bound.
+		{
+			using clk = std::chrono::steady_clock;
+			static auto tick_start = clk::now();   // set below on entry
+			static long long paint_us_sum = 0;
+			static long long tick_us_sum  = 0;
+			static int perf_n = 0;
+			auto paint_t0 = clk::now();
+			ui.update();
+			auto paint_t1 = clk::now();
+			paint_us_sum += std::chrono::duration_cast<
+				std::chrono::microseconds>(paint_t1 - paint_t0).count();
+			tick_us_sum += std::chrono::duration_cast<
+				std::chrono::microseconds>(paint_t1 - tick_start).count();
+			++perf_n;
+			if (perf_n >= 100) {
+				double paint_ms = paint_us_sum / 1000.0 / perf_n;
+				double tick_ms  = tick_us_sum  / 1000.0 / perf_n;
+				double sim_ms   = tick_ms - paint_ms;
+				ui::log("[perf] over %d ticks: sim+overhead=%.2fms  "
+				        "paint=%.2fms  total=%.2fms\n",
+				        perf_n, sim_ms, paint_ms, tick_ms);
+				paint_us_sum = tick_us_sum = 0;
+				perf_n = 0;
+			}
+			// Set for the NEXT tick's total: the timer's timeout
+			// callback runs pretty much continuously back-to-back
+			// when the sim is CPU-bound, so time_since_last_tick_start
+			// is a fine proxy for "how long did the previous tick
+			// take end-to-end".
+			tick_start = clk::now();
+		}
 	});
 	sim_timer.start();
 
