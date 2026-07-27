@@ -179,28 +179,75 @@ static bool load_images_rel(HANDLE hStorage,
 
 // ---- ANIM parsing ---------------------------------------------------
 
-// Header layout as observed in a real main_000.anim from SC:R:
-//   00: "ANIM" magic (4 bytes)
-//   04: u16 version (0x0204 seen)
-//   06: u16 unknown (0)
-//   08: u16 layer_count (7 seen)
-//   0A: u16 unknown (1)
-//   0C: layer_count * 32-byte NUL-padded ASCII layer names
-//        (diffuse, bright, teamcolor, emissive, normal,
-//         specular, ao_depth in the sample)
-//   0C + layer_count*32: per-frame table starts. Frame count and
-//        per-frame descriptor layout is what this spike is here to
-//        confirm; we make a first-cut guess below.
+// Full layout (reverse-engineered from a real main_247.anim -- SC:R's
+// SCV atlas):
 //
-// The layers use fixed 32-byte name slots up to a hard cap; we dump
-// all 32-byte slots up to a heuristic limit or a NUL first-byte.
+//   0x000  "ANIM" magic (4 bytes)
+//   0x004  u16 version           (0x0204 seen)
+//   0x006  u16 unk_06            (0)
+//   0x008  u16 layer_count       (7 seen: diffuse, bright, teamcolor,
+//                                 emissive, normal, specular, ao_depth)
+//   0x00A  u16 unk_0a            (1)
+//   0x00C  layer_count * 32-byte NUL-padded ASCII layer names
+//          followed by (16 - layer_count) * 32 bytes of zero padding.
+//          So the layer-names section is FIXED at 16*32 = 512 bytes.
+//   0x14C  u16 frame_count
+//   0x14E  u16 unk_14e           (0xffff)
+//   0x150  u16 atlas_bounding_w  (max frame width, sprite-cell size)
+//   0x152  u16 atlas_bounding_h  (max frame height)
+//   0x154  u32 frame_table_off   (file offset to the per-frame table
+//                                 in the trailer -- 16 bytes/entry)
+//   0x158  per-layer descriptors, 12 bytes each, one per LAYER SLOT
+//          (16 slots, matching the 16*32 name slots above; unused
+//          slots are all-zero):
+//            u32 data_offset      (file offset of the DDS chunk)
+//            u32 data_size        (bytes)
+//            u32 dims             (packed [u16 w][u16 h] = atlas size)
+//          For layer_count=7 that consumes 16*12 = 192 bytes,
+//          ending at 0x218. First DDS starts at 0x1AC per the
+//          descriptor -- data actually begins mid-descriptor region;
+//          the "16 slots" pattern is a design guess but matches
+//          because unused slots have data_offset=0 which is skipped.
+//
+//   0x1AC..EOF  DDS payloads (concatenated), then at the tail...
+//   [frame_table_off].. frame_count * 16-byte frame descriptors:
+//            u16 atlas_x, atlas_y
+//            u16 offset_x, offset_y   (draw offset for centering)
+//            u16 w, h
+//            u32 flags                (=1 in samples)
+struct AnimLayerInfo {
+	u32 data_offset;   // 0 = layer not present
+	u32 data_size;
+	u16 atlas_w;
+	u16 atlas_h;
+};
+
+struct AnimFrame {
+	u16 atlas_x;
+	u16 atlas_y;
+	u16 offset_x;
+	u16 offset_y;
+	u16 w;
+	u16 h;
+	u32 flags;
+};
+
 struct AnimHeader {
-	u32 magic;              // 'MINA' little-endian == "ANIM"
+	u32 magic;                        // 'MINA' little-endian == "ANIM"
 	u16 version;
 	u16 unk_06;
 	u16 layer_count;
 	u16 unk_0a;
-	std::vector<std::string> layer_names;
+	std::vector<std::string> layer_names;   // named layers only
+
+	// Body:
+	u16 frame_count = 0;
+	u16 unk_14e = 0;
+	u16 sprite_w = 0;              // sprite bounding box (max frame w)
+	u16 sprite_h = 0;              // sprite bounding box (max frame h)
+	u32 frame_table_off = 0;       // file offset of frame descriptors
+	std::vector<AnimLayerInfo> layers;   // aligned with layer_names
+	std::vector<AnimFrame> frames;
 };
 
 static u16 rd16le(const u8* p) { return (u16)p[0] | ((u16)p[1] << 8); }
@@ -209,10 +256,26 @@ static u32 rd32le(const u8* p) {
 		| ((u32)p[2] << 16) | ((u32)p[3] << 24);
 }
 
-static bool parse_anim_header(const std::vector<u8>& bytes,
-	AnimHeader& out, size_t& body_off)
+// Layer-names section is a FIXED 16 * 32-byte slot table (512 bytes)
+// regardless of how many layers are actually named. Beyond
+// layer_count the remaining slots are zero-filled.
+static constexpr int ANIM_MAX_LAYERS = 16;
+static constexpr size_t ANIM_LAYER_NAME_SIZE = 32;
+static constexpr size_t ANIM_HEADER_FIXED_SIZE =
+	12 + ANIM_MAX_LAYERS * ANIM_LAYER_NAME_SIZE;   // = 12 + 512 = 524 -> but real files show body @ 0x14c = 332? see below
+
+// Empirical: for main_247.anim (SC:R SCV) the body section begins at
+// 0x14C = 332 -- which is 12 + 10*32 = 332, i.e. 10 layer slots not
+// 16. Not clear whether Blizzard fixed the slot count or if it's a
+// per-file quirk, but 10 matches the observed offset exactly. Use
+// (0x14c - 12) / 32 = 10 as the layer-slot count going forward.
+static constexpr int ANIM_LAYER_SLOT_COUNT = 10;
+static constexpr size_t ANIM_BODY_OFFSET =
+	12 + ANIM_LAYER_SLOT_COUNT * ANIM_LAYER_NAME_SIZE;   // 0x14C
+
+static bool parse_anim(const std::vector<u8>& bytes, AnimHeader& out)
 {
-	if (bytes.size() < 12) {
+	if (bytes.size() < ANIM_BODY_OFFSET + 8) {
 		fprintf(stderr, ".anim too small: %zu bytes\n", bytes.size());
 		return false;
 	}
@@ -228,61 +291,157 @@ static bool parse_anim_header(const std::vector<u8>& bytes,
 	out.layer_count = rd16le(bytes.data() + 8);
 	out.unk_0a      = rd16le(bytes.data() + 10);
 
-	if (out.layer_count == 0 || out.layer_count > 16) {
-		fprintf(stderr, ".anim implausible layer_count=%u\n",
-			out.layer_count);
+	if (out.layer_count == 0 || out.layer_count > ANIM_LAYER_SLOT_COUNT) {
+		fprintf(stderr, ".anim implausible layer_count=%u (max %d)\n",
+			out.layer_count, ANIM_LAYER_SLOT_COUNT);
 		return false;
 	}
+	// Layer names occupy the first layer_count 32-byte slots; the
+	// rest of the fixed 10-slot region is zero padding.
 	size_t off = 12;
 	for (int i = 0; i < out.layer_count; ++i) {
-		if (off + 32 > bytes.size()) {
-			fprintf(stderr, ".anim truncated at layer %d\n", i);
-			return false;
-		}
-		// Layer name: 32-byte NUL-padded ASCII.
 		std::string name((const char*)&bytes[off]);
 		out.layer_names.push_back(std::move(name));
-		off += 32;
+		off += ANIM_LAYER_NAME_SIZE;
 	}
-	body_off = off;
+
+	// Body section starts at ANIM_BODY_OFFSET (0x14C).
+	const u8* body = bytes.data() + ANIM_BODY_OFFSET;
+	out.frame_count     = rd16le(body + 0);
+	out.unk_14e         = rd16le(body + 2);
+	out.sprite_w        = rd16le(body + 4);
+	out.sprite_h        = rd16le(body + 6);
+	out.frame_table_off = rd32le(body + 8);
+
+	// Per-layer descriptors: 12 bytes each, layer_count of them.
+	// data_offset==0 means "layer not present in this file".
+	size_t layer_desc_off = ANIM_BODY_OFFSET + 12;
+	for (int i = 0; i < out.layer_count; ++i) {
+		if (layer_desc_off + 12 > bytes.size()) {
+			fprintf(stderr, ".anim truncated at layer_desc %d\n", i);
+			return false;
+		}
+		AnimLayerInfo li;
+		li.data_offset = rd32le(bytes.data() + layer_desc_off + 0);
+		li.data_size   = rd32le(bytes.data() + layer_desc_off + 4);
+		li.atlas_w     = rd16le(bytes.data() + layer_desc_off + 8);
+		li.atlas_h     = rd16le(bytes.data() + layer_desc_off + 10);
+		out.layers.push_back(li);
+		layer_desc_off += 12;
+	}
+
+	// Frame table lives at file offset frame_table_off,
+	// frame_count entries of 16 bytes each. Sanity-check the pointer.
+	if (out.frame_table_off == 0
+	    || out.frame_table_off + (size_t)out.frame_count * 16
+	       > bytes.size())
+	{
+		fprintf(stderr,
+			".anim frame_table_off=%u + %u*16 out of range\n",
+			out.frame_table_off, out.frame_count);
+		return false;
+	}
+	const u8* ft = bytes.data() + out.frame_table_off;
+	out.frames.reserve(out.frame_count);
+	for (int i = 0; i < out.frame_count; ++i) {
+		AnimFrame f;
+		const u8* p = ft + i * 16;
+		f.atlas_x  = rd16le(p + 0);
+		f.atlas_y  = rd16le(p + 2);
+		f.offset_x = rd16le(p + 4);
+		f.offset_y = rd16le(p + 6);
+		f.w        = rd16le(p + 8);
+		f.h        = rd16le(p + 10);
+		f.flags    = rd32le(p + 12);
+		out.frames.push_back(f);
+	}
 	return true;
 }
 
-// Find every "DDS " signature in the file body -- Blizzard embeds
-// each layer's texture as a raw DDS chunk with the standard
-// "DDS " magic at its head. This is a coarse scan (linear byte
-// search); good enough for a spike where we just want to prove
-// the payload is present and eyeball-viewable.
-static void scan_and_dump_dds(const std::vector<u8>& bytes,
+// Emit each present layer's DDS payload as a standalone .dds file
+// (raw carve using the layer descriptor's offset+size), plus a
+// manifest.json that captures everything a downstream renderer
+// needs: sprite dimensions, per-layer file/atlas info, and the
+// per-frame atlas rects. Consumers open the .dds via any DDS
+// loader (Qt image plugin, stb_image with a DXT decoder, GL
+// texture upload, etc.) and slice with the frame table.
+static void dump_layers_and_manifest(const std::vector<u8>& bytes,
+	const AnimHeader& ah,
 	const std::string& out_dir, const std::string& stem)
 {
-	// DDS header is exactly 128 bytes: 4-byte magic 'DDS ' + 124-byte
-	// DDS_HEADER. The next DDS start bounds this one's payload; we
-	// carve out the substring between successive DDS starts.
-	std::vector<size_t> starts;
-	const u8 magic[4] = { 'D','D','S',' ' };
-	for (size_t i = 0; i + 4 <= bytes.size(); ++i) {
-		if (std::memcmp(&bytes[i], magic, 4) == 0) starts.push_back(i);
-	}
-	printf("dds scan: found %zu DDS chunks\n", starts.size());
 	fs::create_directories(out_dir);
-	for (size_t k = 0; k < starts.size(); ++k) {
-		size_t begin = starts[k];
-		size_t end = (k + 1 < starts.size()) ? starts[k + 1]
-		                                     : bytes.size();
-		char path[512];
-		snprintf(path, sizeof(path), "%s/%s.dds.%zu",
-			out_dir.c_str(), stem.c_str(), k);
-		FILE* fp = fopen(path, "wb");
-		if (!fp) {
-			fprintf(stderr, "open %s: %s\n", path, strerror(errno));
+
+	// --- write DDS files, one per present layer -----------------
+	std::vector<std::string> layer_paths(ah.layer_count);
+	for (int i = 0; i < ah.layer_count; ++i) {
+		const auto& li = ah.layers[i];
+		if (li.data_offset == 0 || li.data_size == 0) continue;
+		if (li.data_offset + li.data_size > bytes.size()) {
+			fprintf(stderr,
+				"layer %d: offset+size out of range\n", i);
 			continue;
 		}
-		fwrite(&bytes[begin], 1, end - begin, fp);
+		char fname[128];
+		snprintf(fname, sizeof(fname), "%s.%s.dds",
+			stem.c_str(), ah.layer_names[i].c_str());
+		layer_paths[i] = fname;
+		std::string full = out_dir + "/" + fname;
+		FILE* fp = fopen(full.c_str(), "wb");
+		if (!fp) {
+			fprintf(stderr, "open %s: %s\n",
+				full.c_str(), strerror(errno));
+			continue;
+		}
+		fwrite(&bytes[li.data_offset], 1, li.data_size, fp);
 		fclose(fp);
-		printf("  wrote %s (%zu bytes, offset %zu)\n",
-			path, end - begin, begin);
+		printf("  wrote %s (%u bytes, %ux%u)\n",
+			full.c_str(), li.data_size, li.atlas_w, li.atlas_h);
 	}
+
+	// --- write manifest.json ------------------------------------
+	// Small hand-emitted JSON so we don't drag in a dep.
+	std::string manifest_path = out_dir + "/" + stem + ".manifest.json";
+	FILE* fp = fopen(manifest_path.c_str(), "w");
+	if (!fp) {
+		fprintf(stderr, "open %s: %s\n",
+			manifest_path.c_str(), strerror(errno));
+		return;
+	}
+	fprintf(fp, "{\n");
+	fprintf(fp, "  \"stem\": \"%s\",\n", stem.c_str());
+	fprintf(fp, "  \"anim_version\": \"0x%04x\",\n", ah.version);
+	fprintf(fp, "  \"sprite_w\": %u,\n", ah.sprite_w);
+	fprintf(fp, "  \"sprite_h\": %u,\n", ah.sprite_h);
+	fprintf(fp, "  \"layers\": [\n");
+	for (int i = 0; i < ah.layer_count; ++i) {
+		const auto& li = ah.layers[i];
+		bool present = li.data_offset != 0 && li.data_size != 0;
+		fprintf(fp,
+			"    { \"name\": \"%s\", \"present\": %s, "
+			"\"file\": \"%s\", \"atlas_w\": %u, \"atlas_h\": %u }%s\n",
+			ah.layer_names[i].c_str(),
+			present ? "true" : "false",
+			present ? layer_paths[i].c_str() : "",
+			li.atlas_w, li.atlas_h,
+			(i + 1 < ah.layer_count) ? "," : "");
+	}
+	fprintf(fp, "  ],\n");
+	fprintf(fp, "  \"frame_count\": %u,\n", ah.frame_count);
+	fprintf(fp, "  \"frames\": [\n");
+	for (size_t i = 0; i < ah.frames.size(); ++i) {
+		const auto& f = ah.frames[i];
+		fprintf(fp,
+			"    { \"x\": %u, \"y\": %u, \"w\": %u, \"h\": %u, "
+			"\"offset_x\": %u, \"offset_y\": %u, "
+			"\"flags\": %u }%s\n",
+			f.atlas_x, f.atlas_y, f.w, f.h,
+			f.offset_x, f.offset_y, f.flags,
+			(i + 1 < ah.frames.size()) ? "," : "");
+	}
+	fprintf(fp, "  ]\n");
+	fprintf(fp, "}\n");
+	fclose(fp);
+	printf("  wrote %s\n", manifest_path.c_str());
 }
 
 // ---- main -----------------------------------------------------------
@@ -350,20 +509,30 @@ int main(int argc, char** argv) {
 	printf(".anim file: %zu bytes\n", anim_bytes.size());
 
 	AnimHeader ah;
-	size_t body_off = 0;
-	if (!parse_anim_header(anim_bytes, ah, body_off)) {
+	if (!parse_anim(anim_bytes, ah)) {
 		CascCloseStorage(hStorage); return 1;
 	}
-	printf("  version    = 0x%04x\n", ah.version);
-	printf("  layer_count= %u\n", ah.layer_count);
+	printf("  version     = 0x%04x\n", ah.version);
+	printf("  layer_count = %u\n", ah.layer_count);
 	for (int i = 0; i < ah.layer_count; ++i) {
-		printf("  layer[%d]  = %s\n", i, ah.layer_names[i].c_str());
+		const auto& li = ah.layers[i];
+		printf("  layer[%d]   = %-10s data_off=%u size=%u atlas=%ux%u\n",
+			i, ah.layer_names[i].c_str(),
+			li.data_offset, li.data_size, li.atlas_w, li.atlas_h);
 	}
-	printf("  body starts at offset %zu\n", body_off);
+	printf("  sprite_wh   = %ux%u\n", ah.sprite_w, ah.sprite_h);
+	printf("  frame_count = %u\n", ah.frame_count);
+	printf("  frame_table @ %u\n", ah.frame_table_off);
+	if (ah.frame_count > 0) {
+		auto& f0 = ah.frames[0];
+		printf("  frames[0]   = xy=(%u,%u) wh=(%u,%u) off=(%u,%u) flags=%u\n",
+			f0.atlas_x, f0.atlas_y, f0.w, f0.h,
+			f0.offset_x, f0.offset_y, f0.flags);
+	}
 
 	char stem[64];
 	snprintf(stem, sizeof(stem), "main_%03u", anim_num);
-	scan_and_dump_dds(anim_bytes, args.out_dir, stem);
+	dump_layers_and_manifest(anim_bytes, ah, args.out_dir, stem);
 
 	CascCloseStorage(hStorage);
 	return 0;
