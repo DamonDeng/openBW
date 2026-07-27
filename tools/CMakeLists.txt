@@ -21,6 +21,15 @@ target_include_directories(openbw_static_map_parser PRIVATE ..)
 add_executable(slim_mpq ./slim_mpq.cpp)
 target_include_directories(slim_mpq PRIVATE ..)
 
+# sd_sprite_dump: render one PNG per SD sprite in an openBW data
+# install. Companion to anim_dump (HD side). Output feeds the HD
+# Mapping tab's side-by-side comparison workflow. Only zlib is
+# needed on top of the openBW headers (for the PNG encoder).
+find_package(ZLIB REQUIRED)
+add_executable(sd_sprite_dump ./sd_sprite_dump.cpp)
+target_include_directories(sd_sprite_dump PRIVATE ..)
+target_link_libraries(sd_sprite_dump PRIVATE ZLIB::ZLIB)
+
 # anim_dump: spike toward the SC:R HD renderer. Opens a user's
 # StarCraft: Remastered install via the vendored CascLib submodule,
 # reads images.rel to map an image_id to a main_NNN.anim file, and

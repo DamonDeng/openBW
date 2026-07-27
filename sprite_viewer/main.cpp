@@ -54,14 +54,42 @@ int main(int argc, char** argv) {
 		"Path (relative to --data-path) to a .scm/.scx map used as the "
 		"backing stage. Default: '(4)Blood Bath.scm'.",
 		"file", "(4)Blood Bath.scm");
+	// HD mode. --sc-version=remastered switches the render path from
+	// the classic GRP/palette blitter to a CascLib-backed HD loader
+	// that reads a user's SC:R install directly. Assets are NEVER
+	// bundled with this binary; the user brings their own SC:R.
+	// The path should point at the folder containing Data/, Maps/,
+	// x86_64/... (same shape as ../casc_space/StarCraft).
+	QCommandLineOption sc_version_opt(
+		"sc-version",
+		"'classic' (default) uses the GRP+palette classic renderer. "
+		"'remastered' reads HD sprites from --sc-remastered-path.",
+		"mode", "classic");
+	QCommandLineOption sc_path_opt(
+		"sc-remastered-path",
+		"Path to a StarCraft: Remastered install root (the folder "
+		"containing Data/, Maps/, x86_64/...). Required when "
+		"--sc-version=remastered.",
+		"path", "");
 	parser.addOption(data_opt);
 	parser.addOption(map_opt);
+	parser.addOption(sc_version_opt);
+	parser.addOption(sc_path_opt);
 	parser.process(app);
 
 	std::string data_path = parser.value(data_opt).toStdString();
 	std::string map_relpath = parser.value(map_opt).toStdString();
+	QString sc_version = parser.value(sc_version_opt);
+	QString sc_remastered_path = parser.value(sc_path_opt);
 
-	sprite_viewer::ViewerWindow window(data_path, map_relpath);
+	if (sc_version == "remastered" && sc_remastered_path.isEmpty()) {
+		std::fprintf(stderr,
+			"--sc-version=remastered requires --sc-remastered-path\n");
+		return 1;
+	}
+
+	sprite_viewer::ViewerWindow window(
+		data_path, map_relpath, sc_version, sc_remastered_path);
 	window.show();
 	return app.exec();
 }

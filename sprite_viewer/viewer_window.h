@@ -27,17 +27,21 @@
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QSlider>
 #include <QtWidgets/QWidget>
+#include <QtCore/QString>
 #include <QtCore/QTimer>
 #include <QtGui/QImage>
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace sprite_viewer {
 
 class SpriteCanvas;
 struct SimHarness;
+class HdAssetLoader;
+struct HdSprite;
 
 // Registry entry for one unit. For the MVP we only ship Marine;
 // the structure is here so extending to more is one entry per line.
@@ -49,8 +53,17 @@ struct UnitEntry {
 class ViewerWindow : public QMainWindow {
 	Q_OBJECT
 public:
+	// SpriteCanvas needs to read `sim` and `current_hd` in its
+	// paintEvent; keep them private-by-default but visible to the
+	// canvas which is essentially an inner rendering helper.
+	friend class SpriteCanvas;
+	// sc_version:  "classic" or "remastered"
+	// sc_remastered_path: SC:R install root (only used when
+	//   sc_version=="remastered"). Empty otherwise.
 	ViewerWindow(std::string data_path,
 	             std::string map_relpath,
+	             QString sc_version,
+	             QString sc_remastered_path,
 	             QWidget* parent = nullptr);
 	~ViewerWindow();
 
@@ -74,6 +87,17 @@ private:
 	bool booted = false;
 	bool playing = true;
 	int current_dir = 4;
+
+	// HD mode. Both empty in classic mode.
+	QString sc_version;
+	QString sc_remastered_path;
+	std::unique_ptr<HdAssetLoader> hd_loader;
+	// Per-openBW-unit_type sprite cache. Keyed by unit_type_id, not
+	// image_id -- the mapping from unit -> SC:R image_id is resolved
+	// once per unit and stashed in the value.
+	std::unordered_map<int, std::unique_ptr<HdSprite>> hd_cache;
+	// Currently displayed HD sprite (non-owning view into hd_cache).
+	HdSprite* current_hd = nullptr;
 
 	// UI widgets (owned by Qt).
 	QComboBox* race_cb = nullptr;

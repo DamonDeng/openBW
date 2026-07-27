@@ -10,13 +10,17 @@
 
 #include "viewer_window.h"
 #include "sim_harness.h"
+#include "hd_asset_loader.h"
+#include "mapping_tab.h"
 
 #include <QtCore/QDebug>
+#include <QtCore/QDir>
 #include <QtGui/QPainter>
 #include <QtGui/QPaintEvent>
 #include <QtGui/QImage>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QHBoxLayout>
+#include <QtWidgets/QTabWidget>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QWidget>
 
@@ -34,30 +38,65 @@ public:
 	// Nearest-neighbor upscale factor. 3x lets you see individual
 	// pixels of the sprite without them being too small; higher
 	// values just eat screen real estate for no additional detail.
+	// Applied only in classic mode; HD sprites are already
+	// high-resolution so we draw them 1:1.
 	static constexpr int SCALE = 3;
 
-	explicit SpriteCanvas(SimHarness* sim, QWidget* parent = nullptr)
-		: QWidget(parent), sim(sim) {
+	explicit SpriteCanvas(ViewerWindow* owner_,
+	                      QWidget* parent = nullptr)
+		: QWidget(parent), owner(owner_), sim(owner_->sim.get()) {
 		setAttribute(Qt::WA_OpaquePaintEvent);
 		setAttribute(Qt::WA_NoSystemBackground);
-		// Canvas needs to fit the openBW render surface at SCALE
-		// with a little margin. render_frame produces 256x256, so
-		// 3x = 768x768 + ~40 px of padding on each side.
 		setMinimumSize(256 * SCALE + 40, 256 * SCALE + 40);
-		// Mid-gray background makes the marine sprite legible
-		// against both dark (armor, muzzle) and light (skin, HUD
-		// numbers) pixels. Distinct from openBW's black-for-
-		// unexplored so players don't confuse it with fog.
 		background_color = QColor(0x80, 0x80, 0x80);
 	}
 
 	void request_repaint() { update(); }
 
 protected:
+	// HD paint path: draw the currently-selected frame from the
+	// HdSprite's diffuse atlas, centered on the widget. `frame_idx`
+	// comes from iscript state via SimHarness (image->frame_index).
+	// Returns true iff HD rendering was attempted (so classic can
+	// be skipped this tick).
+	bool paint_hd(QPainter& p) {
+		HdSprite* hd = owner ? owner->current_hd : nullptr;
+		if (!hd || hd->frames.empty()) return false;
+
+		// Which frame? Read from the iscript state. SimHarness owns
+		// the unit and its main_image; grab the frame_index there.
+		int f = 0;
+		if (sim) {
+			auto fi = sim->current_frame_info();
+			if (fi.frame_index >= 0) f = fi.frame_index;
+		}
+		if (f < 0 || f >= (int)hd->frames.size()) f = 0;
+		const auto& fr = hd->frames[f];
+
+		// Source rect on the atlas.
+		QImage sub = hd->diffuse.copy(
+			fr.atlas_x, fr.atlas_y, fr.w, fr.h);
+
+		// Place it so (fr.offset_x, fr.offset_y) inside the sub-
+		// image aligns with the widget's center -- offset_x/y are
+		// the "hotspot" of the sprite relative to its bounding box.
+		int cx = width()  / 2;
+		int cy = height() / 2;
+		int dx = cx - (int)fr.offset_x;
+		int dy = cy - (int)fr.offset_y;
+		p.drawImage(dx, dy, sub);
+		return true;
+	}
+
 	void paintEvent(QPaintEvent*) override {
 		QPainter p(this);
 		p.fillRect(rect(), background_color);
 		if (!sim) return;
+
+		// Try HD first; only fall through to classic when no HD
+		// sprite is loaded (mode=classic, or HD mode with a unit
+		// that has no HD anim).
+		if (paint_hd(p)) return;
 
 		auto pixels = sim->render_frame();
 		if (!pixels.data || pixels.width <= 0 || pixels.height <= 0) {
@@ -103,6 +142,7 @@ protected:
 	}
 
 private:
+	ViewerWindow* owner;
 	SimHarness* sim;
 	QColor background_color;
 };
@@ -124,25 +164,36 @@ static const char* const ANIM_LABELS[28] = {
 
 ViewerWindow::ViewerWindow(std::string data_path_,
                            std::string map_relpath_,
+                           QString sc_version_,
+                           QString sc_remastered_path_,
                            QWidget* parent)
 	: QMainWindow(parent),
 	  data_path(std::move(data_path_)),
-	  map_relpath(std::move(map_relpath_)) {
+	  map_relpath(std::move(map_relpath_)),
+	  sc_version(std::move(sc_version_)),
+	  sc_remastered_path(std::move(sc_remastered_path_)) {
 	setWindowTitle("openBW sprite viewer");
 	// Big enough to fit the 3x-upscaled 256x256 render surface
 	// (= 768x768) plus the left control column (~220 px wide).
 	resize(1050, 830);
 
-	// --- unit registry (MVP: Terran + Marine only) ---
-	// bwgame::UnitTypes::Terran_Marine == 0. See bwenums.h.
+	// --- unit registry ---
+	// See bwenums.h for the openBW UnitTypes enum ordering.
 	races.push_back({"Terran", {
 		{"Marine", /*Terran_Marine*/ 0},
+		{"SCV",    /*Terran_SCV*/    7},
 	}});
 
 	// --- widgets ---
-	auto* central = new QWidget(this);
-	setCentralWidget(central);
-	auto* root = new QHBoxLayout(central);
+	// Two-tab layout: "Classic" hosts the original per-unit
+	// anim browser; "HD Mapping" is the eyeball-driven
+	// images.rel row -> openBW unit_name matcher. Both tabs share
+	// the SimHarness + HdAssetLoader owned by this window.
+	auto* tabs = new QTabWidget(this);
+	setCentralWidget(tabs);
+
+	auto* classic = new QWidget();
+	auto* root = new QHBoxLayout(classic);
 
 	auto* left = new QVBoxLayout();
 	left->addWidget(new QLabel("Race"));
@@ -193,7 +244,22 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 		sim.reset();
 	}
 
-	canvas = new SpriteCanvas(sim.get(), this);
+	// HD mode: open the user's SC:R install via CascLib. Failure to
+	// open is a soft error -- we fall back to classic rendering and
+	// surface the reason in the readout label.
+	if (sim && sc_version == "remastered") {
+		hd_loader = std::make_unique<HdAssetLoader>();
+		if (!hd_loader->open(sc_remastered_path)) {
+			qWarning() << "HD open failed:"
+			           << hd_loader->last_error();
+			readout->setText(
+				QString("HD mode disabled: %1")
+					.arg(hd_loader->last_error()));
+			hd_loader.reset();
+		}
+	}
+
+	canvas = new SpriteCanvas(this, this);
 	root->addWidget(canvas, 1);
 
 	if (sim) {
@@ -225,6 +291,34 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 		booted = true;
 		tick_timer.start(TICK_MS);
 	}
+
+	// Assemble the tabs. Classic first so the app opens on the
+	// familiar view; HD Mapping is a tool-tab reachable via the
+	// tab bar once the user is done browsing sprites.
+	//
+	// Autosave path: sibling of the SC:R install root. Chosen so
+	// the mapping file lives next to the source it references and
+	// survives repo checkouts / rebuilds. Empty when HD mode is
+	// off, which disables autosave inside MappingTab.
+	QString autosave_path;
+	if (!sc_remastered_path.isEmpty()) {
+		QDir d(sc_remastered_path);
+		d.cdUp();
+		autosave_path = d.filePath("hd_mapping.json");
+	}
+	// SD reference previews live under <data-path>/sd_previews/
+	// (produced by tools/sd_sprite_dump). Passing the resolved
+	// absolute path so the tab works even when Qt cwd differs.
+	QString sd_previews_dir;
+	if (!data_path.empty()) {
+		QDir d(QString::fromStdString(data_path));
+		sd_previews_dir = d.filePath("sd_previews");
+	}
+	tabs->addTab(classic, "Classic");
+	tabs->addTab(
+		new MappingTab(hd_loader.get(), autosave_path,
+		               sd_previews_dir, tabs),
+		"HD Mapping");
 }
 
 ViewerWindow::~ViewerWindow() = default;
@@ -261,18 +355,70 @@ void ViewerWindow::on_race_changed(int index) {
 	populate_units_for_race(index);
 }
 
+// First-cut mapping from openBW UnitTypes -> SC:R images.rel row.
+// Values verified by grepping arr/images.tbl for the unit's main
+// GRP path, then locating the corresponding HD row (flag=8) in
+// images.rel. Long-term this should be data-driven off images.tbl
+// rather than hand-maintained.
+//
+// The mapping to images.rel row is NOT the same as the images.tbl
+// ordinal: for Marine, images.tbl row 244 = "terran\\marine.grp"
+// and images.rel row 244 (flag=8) points at main_243.anim. That's
+// a lucky 1:1 for these two units, but the general case may need a
+// small ordinal-shift table -- we'll pin down when we add more units.
+static int sc_r_image_id_for_unit(int unit_type_id) {
+	switch (unit_type_id) {
+		case 0:  return 244;   // Terran_Marine -- main_243.anim
+		case 7:  return 248;   // Terran_SCV    -- main_247.anim
+		default: return -1;    // no HD mapping known -> fall back
+	}
+}
+
 void ViewerWindow::on_unit_changed(int index) {
 	if (!sim || index < 0) return;
 	int race_index = race_cb->currentIndex();
 	if (race_index < 0 || race_index >= (int)races.size()) return;
 	const auto& units = races[race_index].units;
 	if (index >= (int)units.size()) return;
-	if (!sim->spawn_unit(units[index].unit_type_id)) {
+	int u_id = units[index].unit_type_id;
+	if (!sim->spawn_unit(u_id)) {
 		readout->setText("spawn_unit failed");
 		return;
 	}
 	sim->set_heading_from_slider(current_dir);
+	// Log what got spawned + how many anims iscript reports for it.
+	// Helps diagnose "unit picker changed but anim list didn't"
+	// symptoms; a proper unit swap always produces a distinct count.
+	int n_anims = 0;
+	for (int i = 0; i < 28; ++i) if (sim->anim_available(i)) ++n_anims;
+	qInfo() << "spawn_unit type_id=" << u_id
+	        << "-> anim_count=" << n_anims;
 	populate_anims_for_current_unit();
+
+	// HD path: resolve this unit's SC:R image_id, load (or reuse)
+	// its HdSprite, and stash a non-owning pointer for the canvas.
+	current_hd = nullptr;
+	if (hd_loader) {
+		int u_id = units[index].unit_type_id;
+		int sc_id = sc_r_image_id_for_unit(u_id);
+		if (sc_id >= 0) {
+			auto it = hd_cache.find(u_id);
+			if (it == hd_cache.end()) {
+				auto sp = hd_loader->load_sprite(sc_id);
+				if (sp) {
+					current_hd = sp.get();
+					hd_cache.emplace(u_id, std::move(sp));
+				} else {
+					qWarning() << "HD load failed for unit"
+					           << u_id << "sc_id" << sc_id
+					           << ":" << hd_loader->last_error();
+				}
+			} else {
+				current_hd = it->second.get();
+			}
+		}
+	}
+
 	refresh_readout();
 	canvas->request_repaint();
 }
