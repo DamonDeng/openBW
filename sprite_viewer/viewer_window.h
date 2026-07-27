@@ -106,7 +106,11 @@ private:
 	QSlider* dir_slider = nullptr;
 	QPushButton* playpause_btn = nullptr;
 	QLabel* readout = nullptr;
-	SpriteCanvas* canvas = nullptr;
+	// Split canvas: SD on the left, HD on the right. Both driven
+	// by the same SimHarness -- so iscript state advances in
+	// lockstep and both views represent the same tick.
+	SpriteCanvas* sd_canvas = nullptr;
+	SpriteCanvas* hd_canvas = nullptr;
 
 	// Sim tick timer -- retail is 42 ms/frame (~24 FPS).
 	QTimer tick_timer;

@@ -45,11 +45,16 @@ struct HdFrame {
 };
 
 // One unit's HD sprite: the decoded diffuse atlas + per-frame table.
-// Future extension: additional layers (teamcolor, normal, etc.)
-// stored as parallel QImages. For the first cut we ship diffuse only.
+// Optionally holds a pre-composited "diffuse + teamcolor * player
+// color" atlas baked at load time (option A in the design
+// discussion). We render `composited` when it's non-null; falls
+// back to `diffuse` alone otherwise.
 struct HdSprite {
-	QImage diffuse;            // RGBA8888, atlas_w x atlas_h
-	uint16_t sprite_w = 0;     // sprite bounding box (max frame size)
+	QImage diffuse;             // raw diffuse layer, kept for
+	                             // reference / debugging.
+	QImage composited;          // diffuse + teamcolor*playercolor,
+	                             // premultiplied; drawn as-is.
+	uint16_t sprite_w = 0;      // sprite bounding box (max frame size)
 	uint16_t sprite_h = 0;
 	std::vector<HdFrame> frames;
 };
@@ -126,6 +131,19 @@ public:
 	// authoritative vocabulary of unit / building / addon names.
 	// Empty vector + last_error() on failure.
 	std::vector<QString> read_images_tbl();
+
+	// Load a runtime bw_id -> sc_r_row lookup table produced by
+	// tools/validate_hd_mapping.py (schema
+	// "openbw_hd_mapping_v1"). Returns true iff the file parses
+	// and the schema tag matches. Missing file is NOT an error --
+	// callers use has_mapping_table() to gate the HD render path.
+	bool load_mapping_table(const QString& path);
+	bool has_mapping_table() const;
+
+	// Look up a bw_id (openBW image_type_t::id). Returns the
+	// SC:R images.rel row that render_sprite() should use, or -1
+	// if no HD mapping is known for that bw_id.
+	int sc_r_row_for_bw_id(int bw_id) const;
 
 private:
 	struct Impl;

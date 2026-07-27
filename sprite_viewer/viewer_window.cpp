@@ -33,6 +33,13 @@ namespace sprite_viewer {
 // current frame's pixels (already rendered by openBW's draw_sprite
 // into an RGBA surface) and blits them onto this widget.
 
+// One instance renders one mode. We put two of them side by side --
+// the SD canvas skips HD and always shows the classic openBW-rendered
+// bitmap; the HD canvas skips classic and only paints HD. Both share
+// the same SimHarness so iscript state advances in lockstep and the
+// two views represent the same tick.
+enum class CanvasMode { SD, HD };
+
 class SpriteCanvas : public QWidget {
 public:
 	// Nearest-neighbor upscale factor. 3x lets you see individual
@@ -42,14 +49,21 @@ public:
 	// high-resolution so we draw them 1:1.
 	static constexpr int SCALE = 3;
 
-	explicit SpriteCanvas(ViewerWindow* owner_,
+	explicit SpriteCanvas(ViewerWindow* owner_, CanvasMode mode,
 	                      QWidget* parent = nullptr)
-		: QWidget(parent), owner(owner_), sim(owner_->sim.get()) {
+		: QWidget(parent), owner(owner_), sim(owner_->sim.get()),
+		  mode_(mode) {
 		setAttribute(Qt::WA_OpaquePaintEvent);
 		setAttribute(Qt::WA_NoSystemBackground);
-		setMinimumSize(256 * SCALE + 40, 256 * SCALE + 40);
+		// Small minimum so both canvases fit side by side on a
+		// laptop screen. Startup uses sizeHint() below (~480x400
+		// per canvas); user can resize freely.
+		setMinimumSize(320, 320);
 		background_color = QColor(0x80, 0x80, 0x80);
 	}
+
+	QSize sizeHint()    const override { return QSize(480, 400); }
+	QSize minimumSizeHint() const override { return QSize(320, 320); }
 
 	void request_repaint() { update(); }
 
@@ -73,17 +87,40 @@ protected:
 		if (f < 0 || f >= (int)hd->frames.size()) f = 0;
 		const auto& fr = hd->frames[f];
 
-		// Source rect on the atlas.
-		QImage sub = hd->diffuse.copy(
+		// Prefer the composited (diffuse + teamcolor*player_color)
+		// atlas when available so the sprite shows its owner's tint;
+		// falls back to raw diffuse if teamcolor was absent for
+		// this unit (e.g. neutral doodads).
+		const QImage& src_atlas =
+			hd->composited.isNull() ? hd->diffuse : hd->composited;
+		QImage sub = src_atlas.copy(
 			fr.atlas_x, fr.atlas_y, fr.w, fr.h);
 
-		// Place it so (fr.offset_x, fr.offset_y) inside the sub-
-		// image aligns with the widget's center -- offset_x/y are
-		// the "hotspot" of the sprite relative to its bounding box.
+		// Place the frame the same way openBW's SD renderer does
+		// (bwgame.h:13334 get_image_map_position):
+		//
+		//   NORMAL : screen = sprite_center + frame.offset - bbox_center
+		//   FLIPPED: screen = sprite_center + bbox_center - (frame.offset + frame.size)
+		//
+		// The per-frame offset is measured from the top-left of the
+		// sprite's bounding box (sprite_w * sprite_h). The flipped
+		// variant mirrors the anchor point across the bbox center so
+		// h-flipped left facings line up correctly. iscript only
+		// stores facings 0..16 in the frame table -- facings 17..31
+		// draw one of those 17 frames with flipped=true.
+		bool flipped = sim ? sim->current_flipped() : false;
+		if (flipped) sub = sub.mirrored(/*h=*/true, /*v=*/false);
+
 		int cx = width()  / 2;
 		int cy = height() / 2;
-		int dx = cx - (int)fr.offset_x;
-		int dy = cy - (int)fr.offset_y;
+		int dx, dy;
+		if (flipped) {
+			dx = cx + (int)hd->sprite_w / 2
+			        - ((int)fr.offset_x + (int)fr.w);
+		} else {
+			dx = cx + (int)fr.offset_x - (int)hd->sprite_w / 2;
+		}
+		dy = cy + (int)fr.offset_y - (int)hd->sprite_h / 2;
 		p.drawImage(dx, dy, sub);
 		return true;
 	}
@@ -93,11 +130,19 @@ protected:
 		p.fillRect(rect(), background_color);
 		if (!sim) return;
 
-		// Try HD first; only fall through to classic when no HD
-		// sprite is loaded (mode=classic, or HD mode with a unit
-		// that has no HD anim).
-		if (paint_hd(p)) return;
+		// HD-only canvas: attempt HD paint; if no HD sprite is
+		// loaded for the current unit, leave the panel blank
+		// (a placeholder gray square) rather than fall back to SD.
+		// The SD canvas is right next door if the user needs SD.
+		if (mode_ == CanvasMode::HD) {
+			paint_hd(p);
+			return;
+		}
 
+		// SD canvas below: skip HD entirely and always paint the
+		// classic sprite. sim->render_frame() drives openBW's own
+		// draw_sprite into an indexed surface, then converts to
+		// RGBA -- exactly what the pre-split viewer did.
 		auto pixels = sim->render_frame();
 		if (!pixels.data || pixels.width <= 0 || pixels.height <= 0) {
 			// Not ready yet (first-frame lazy init); Qt will call
@@ -130,12 +175,22 @@ protected:
 			}
 		}
 
-		// 3x nearest-neighbor upscale via drawImage with an explicit
+		// Nearest-neighbor upscale via drawImage with an explicit
 		// target rect. SmoothPixmapTransform=false forces nearest
-		// (each source pixel becomes a 3x3 block of the same color).
+		// (each source pixel becomes a NxN block of the same color).
+		// Auto-fit the scale to whatever the widget can hold: prefer
+		// SCALE (3x = pixel-clear) when there's room, otherwise
+		// shrink so the sprite always fits. Enables small windows
+		// on laptop screens without cropping the sprite.
 		p.setRenderHint(QPainter::SmoothPixmapTransform, false);
-		int scaled_w = pixels.width * SCALE;
-		int scaled_h = pixels.height * SCALE;
+		int scale = SCALE;
+		while (scale > 1 && (pixels.width * scale > width()
+		                     || pixels.height * scale > height()))
+		{
+			--scale;
+		}
+		int scaled_w = pixels.width * scale;
+		int scaled_h = pixels.height * scale;
 		int dx = (width() - scaled_w) / 2;
 		int dy = (height() - scaled_h) / 2;
 		p.drawImage(QRect(dx, dy, scaled_w, scaled_h), snap);
@@ -144,6 +199,7 @@ protected:
 private:
 	ViewerWindow* owner;
 	SimHarness* sim;
+	CanvasMode mode_;
 	QColor background_color;
 };
 
@@ -175,13 +231,43 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 	setWindowTitle("openBW sprite viewer");
 	// Big enough to fit the 3x-upscaled 256x256 render surface
 	// (= 768x768) plus the left control column (~220 px wide).
-	resize(1050, 830);
+	// Startup size: left column ~220px + two canvases at ~480px
+	// each + margins. Fits on a 1440-wide laptop screen. Both
+	// canvases scale their content to whatever size they get
+	// (SD auto-picks a 1x..3x nearest-neighbor scale; HD draws
+	// 1:1 and lets the widget clip if too small), and the
+	// window is freely resizable.
+	resize(1280, 720);
 
 	// --- unit registry ---
-	// See bwenums.h for the openBW UnitTypes enum ordering.
+	// See bwenums.h for the openBW UnitTypes enum ordering. Units
+	// here are drawn in whichever mode is active. In remastered
+	// mode, unit_type -> flingy -> sprite -> image_id is looked up
+	// via SimHarness::current_image_id() and then routed through
+	// the HD mapping table -- so as long as tools/hd_mapping_table.json
+	// has an entry for that image_id, the unit renders in HD.
 	races.push_back({"Terran", {
-		{"Marine", /*Terran_Marine*/ 0},
-		{"SCV",    /*Terran_SCV*/    7},
+		{"Marine",         /*Terran_Marine*/                0},
+		{"Ghost",          /*Terran_Ghost*/                 1},
+		{"Vulture",        /*Terran_Vulture*/               2},
+		{"Goliath",        /*Terran_Goliath*/               3},
+		{"Siege Tank",     /*Terran_Siege_Tank_Tank_Mode*/  5},
+		{"SCV",            /*Terran_SCV*/                   7},
+		{"Wraith",         /*Terran_Wraith*/                8},
+		{"Science Vessel", /*Terran_Science_Vessel*/        9},
+		{"Dropship",       /*Terran_Dropship*/             11},
+		{"Battlecruiser",  /*Terran_Battlecruiser*/        12},
+		{"Firebat",        /*Terran_Firebat*/              32},
+		{"Medic",          /*Terran_Medic*/                34},
+		{"Valkyrie",       /*Terran_Valkyrie*/             58},
+		{"Command Center", /*Terran_Command_Center*/      106},
+		{"Supply Depot",   /*Terran_Supply_Depot*/        109},
+		{"Refinery",       /*Terran_Refinery*/            110},
+		{"Barracks",       /*Terran_Barracks*/            111},
+		{"Academy",        /*Terran_Academy*/             112},
+		{"Factory",        /*Terran_Factory*/             113},
+		{"Starport",       /*Terran_Starport*/            114},
+		{"Science Facility", /*Terran_Science_Facility*/  116},
 	}});
 
 	// --- widgets ---
@@ -256,11 +342,51 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 				QString("HD mode disabled: %1")
 					.arg(hd_loader->last_error()));
 			hd_loader.reset();
+		} else {
+			// Optional runtime mapping table (bw_id -> sc_r_row)
+			// produced by tools/validate_hd_mapping.py. Absence
+			// falls back to the hardcoded 2-unit table below so
+			// the Classic tab still shows Marine + SCV in HD.
+			QString table_path = QCoreApplication::applicationDirPath()
+				+ "/../../tools/hd_mapping_table.json";
+			if (hd_loader->load_mapping_table(table_path)) {
+				qInfo() << "HD mapping table loaded from"
+				        << table_path;
+			} else {
+				qInfo() << "HD mapping table not loaded ("
+				        << hd_loader->last_error()
+				        << "); using hardcoded fallback";
+			}
 		}
 	}
 
-	canvas = new SpriteCanvas(this, this);
-	root->addWidget(canvas, 1);
+	// Two canvases side-by-side: SD on the left (openBW's classic
+	// GRP+palette blitter), HD on the right (SC:R diffuse atlas
+	// via HdAssetLoader). Both share the same SimHarness so the
+	// two views advance in lockstep -- easier to spot HD anim
+	// bugs against the SD ground truth.
+	{
+		auto* pair = new QVBoxLayout();
+		auto* labels = new QHBoxLayout();
+		auto* sd_label = new QLabel("Classic (SD)");
+		auto* hd_label = new QLabel("Remastered (HD)");
+		sd_label->setAlignment(Qt::AlignCenter);
+		hd_label->setAlignment(Qt::AlignCenter);
+		sd_label->setStyleSheet("color: #667; font-weight: bold;");
+		hd_label->setStyleSheet("color: #667; font-weight: bold;");
+		labels->addWidget(sd_label);
+		labels->addWidget(hd_label);
+		pair->addLayout(labels);
+
+		auto* canvases = new QHBoxLayout();
+		sd_canvas = new SpriteCanvas(this, CanvasMode::SD, this);
+		hd_canvas = new SpriteCanvas(this, CanvasMode::HD, this);
+		canvases->addWidget(sd_canvas, 1);
+		canvases->addWidget(hd_canvas, 1);
+		pair->addLayout(canvases, 1);
+
+		root->addLayout(pair, 1);
+	}
 
 	if (sim) {
 		// Create the hidden native window that ui.h blits into.
@@ -355,22 +481,16 @@ void ViewerWindow::on_race_changed(int index) {
 	populate_units_for_race(index);
 }
 
-// First-cut mapping from openBW UnitTypes -> SC:R images.rel row.
-// Values verified by grepping arr/images.tbl for the unit's main
-// GRP path, then locating the corresponding HD row (flag=8) in
-// images.rel. Long-term this should be data-driven off images.tbl
-// rather than hand-maintained.
-//
-// The mapping to images.rel row is NOT the same as the images.tbl
-// ordinal: for Marine, images.tbl row 244 = "terran\\marine.grp"
-// and images.rel row 244 (flag=8) points at main_243.anim. That's
-// a lucky 1:1 for these two units, but the general case may need a
-// small ordinal-shift table -- we'll pin down when we add more units.
-static int sc_r_image_id_for_unit(int unit_type_id) {
+// Fallback for when the runtime mapping table is unavailable.
+// Long-term the answer comes from tools/hd_mapping_table.json
+// (produced by validate_hd_mapping.py from the user's hand-mapped
+// hd_mapping.json). This 2-entry table just keeps Marine + SCV
+// working when developers haven't produced the table yet.
+static int sc_r_image_id_for_unit_fallback(int unit_type_id) {
 	switch (unit_type_id) {
 		case 0:  return 244;   // Terran_Marine -- main_243.anim
 		case 7:  return 248;   // Terran_SCV    -- main_247.anim
-		default: return -1;    // no HD mapping known -> fall back
+		default: return -1;
 	}
 }
 
@@ -397,10 +517,34 @@ void ViewerWindow::on_unit_changed(int index) {
 
 	// HD path: resolve this unit's SC:R image_id, load (or reuse)
 	// its HdSprite, and stash a non-owning pointer for the canvas.
+	//
+	// Preferred lookup: openBW bw_id (from the running sim, via
+	// SimHarness::current_image_id()) -> hd_loader's mapping table
+	// -> sc_r_row. Correctly handles every entry the user has
+	// confirmed in the HD Mapping tab. Falls back to a 2-entry
+	// hardcoded table (Marine + SCV) if the mapping table wasn't
+	// loaded, so a fresh clone still sees SOMETHING in HD.
 	current_hd = nullptr;
 	if (hd_loader) {
-		int u_id = units[index].unit_type_id;
-		int sc_id = sc_r_image_id_for_unit(u_id);
+		int sc_id = -1;
+		int bw_id = -1;
+		if (hd_loader->has_mapping_table()) {
+			// Use grp_filename_index (arr/images.tbl string ordinal),
+			// NOT image_type_t::id (ImageTypes enum ordinal). The
+			// HD Mapping tab's combobox is keyed by images.tbl
+			// filenames, so hd_mapping_table.json's bw_id column
+			// is images.tbl ordinals -- distinct from ImageTypes.
+			bw_id = sim->current_grp_filename_index();
+			if (bw_id >= 0) sc_id = hd_loader->sc_r_row_for_bw_id(bw_id);
+		}
+		qInfo() << "on_unit_changed"
+		        << units[index].label
+		        << "u_id=" << u_id
+		        << "bw_id(grp_idx)=" << bw_id
+		        << "sc_r=" << sc_id;
+		if (sc_id < 0) {
+			sc_id = sc_r_image_id_for_unit_fallback(u_id);
+		}
 		if (sc_id >= 0) {
 			auto it = hd_cache.find(u_id);
 			if (it == hd_cache.end()) {
@@ -420,7 +564,8 @@ void ViewerWindow::on_unit_changed(int index) {
 	}
 
 	refresh_readout();
-	canvas->request_repaint();
+	if (sd_canvas) sd_canvas->request_repaint();
+	if (hd_canvas) hd_canvas->request_repaint();
 }
 
 void ViewerWindow::on_anim_changed(int index) {
@@ -445,14 +590,16 @@ void ViewerWindow::on_anim_changed(int index) {
 		}
 	}
 	refresh_readout();
-	canvas->request_repaint();
+	if (sd_canvas) sd_canvas->request_repaint();
+	if (hd_canvas) hd_canvas->request_repaint();
 }
 
 void ViewerWindow::on_direction_changed(int value) {
 	current_dir = value;
 	if (sim) sim->set_heading_from_slider(current_dir);
 	refresh_readout();
-	canvas->request_repaint();
+	if (sd_canvas) sd_canvas->request_repaint();
+	if (hd_canvas) hd_canvas->request_repaint();
 }
 
 void ViewerWindow::on_playpause_clicked() {
@@ -470,7 +617,8 @@ void ViewerWindow::on_playpause_clicked() {
 void ViewerWindow::on_tick() {
 	if (!sim) return;
 	sim->tick();
-	canvas->request_repaint();
+	if (sd_canvas) sd_canvas->request_repaint();
+	if (hd_canvas) hd_canvas->request_repaint();
 }
 
 void ViewerWindow::refresh_readout() {

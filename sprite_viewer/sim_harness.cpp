@@ -346,4 +346,49 @@ bool SimHarness::anim_available(int anim_id) const {
 	return anim_pcs[anim_id] != 0;
 }
 
+int SimHarness::current_image_id() const {
+	// Traverse the same chain openBW's own renderer uses:
+	// unit -> sprite -> main_image -> image_type -> id.
+	// This is the ImageTypes enum ordinal (index into images.dat's
+	// 999-slot table), NOT the arr/images.tbl string ordinal.
+	if (!ui || !unit_is_alive_for_render(unit)) return -1;
+	auto* image = unit->sprite->main_image;
+	if (!image || !image->image_type) return -1;
+	return (int)image->image_type->id;
+}
+
+bool SimHarness::current_flipped() const {
+	// Reads image_t::flag_horizontally_flipped, set by openBW's
+	// set_image_heading() when direction wraps past facing 16
+	// (bwgame.h:13286-13288). Encapsulated here so viewer_window
+	// stays clear of bwgame.h internals.
+	if (!ui || !unit_is_alive_for_render(unit)) return false;
+	auto* image = unit->sprite->main_image;
+	if (!image) return false;
+	return (image->flags & bwgame::image_t::flag_horizontally_flipped) != 0;
+}
+
+int SimHarness::current_grp_filename_index() const {
+	// Chain: image_type -> grp_filename_index -> position in
+	// arr/images.tbl. Two subtleties:
+	//
+	// (a) openBW stores grp_filename_index as a 1-based index --
+	//     the retail images.dat / images.tbl convention where
+	//     index 0 means "no GRP" (bwgame.h:22228 does an explicit
+	//     `if (!index) return 0` and then subtracts 1 when
+	//     seeking into the .tbl offset table). Callers such as the
+	//     HD Mapping tab iterate the .tbl as a 0-based array of
+	//     names, so we convert to that convention here by
+	//     subtracting 1.
+	//
+	// (b) A stored value of 0 means "no GRP" -- return -1 so
+	//     callers fall through to the classic render path.
+	if (!ui || !unit_is_alive_for_render(unit)) return -1;
+	auto* image = unit->sprite->main_image;
+	if (!image || !image->image_type) return -1;
+	int idx = (int)image->image_type->grp_filename_index;
+	if (idx == 0) return -1;
+	return idx - 1;   // 1-based -> 0-based
+}
+
 }   // namespace sprite_viewer

@@ -4,11 +4,16 @@
 
 #include <CascLib.h>
 
+#include <QtCore/QFile>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <memory>
+#include <unordered_map>
 
 namespace sprite_viewer {
 
@@ -230,6 +235,109 @@ static void decode_bc3_block(const u8* src, u8* out_rgba)
 	}
 }
 
+// Decode one 4x4 BC1 (DXT1) block into out_rgba (16*4 bytes).
+// BC1 is the color-only half of BC3: two RGB565 endpoints followed
+// by a 32-bit index table (2 bits per pixel). Used by SC:R's
+// teamcolor layer where alpha isn't needed -- the mask is
+// grayscale so we treat the color output as a luminance signal.
+//
+// SC:R's teamcolor DDS is guaranteed to use the 4-color branch
+// (c0 > c1). Even if a block encodes the c0 <= c1 branch (which
+// would produce an explicit-black-color-3 variant), the max of
+// (r,g,b) still represents the intended mask strength, which is
+// what the compositor needs.
+static void decode_bc1_block(const u8* src, u8* out_rgba)
+{
+	u16 c0 = (u16)src[0] | ((u16)src[1] << 8);
+	u16 c1 = (u16)src[2] | ((u16)src[3] << 8);
+	u8 r0, g0, b0, r1, g1, b1;
+	unpack_rgb565(c0, r0, g0, b0);
+	unpack_rgb565(c1, r1, g1, b1);
+	u8 rgb[4][3];
+	rgb[0][0] = r0; rgb[0][1] = g0; rgb[0][2] = b0;
+	rgb[1][0] = r1; rgb[1][1] = g1; rgb[1][2] = b1;
+	if (c0 > c1) {
+		rgb[2][0] = (u8)((2 * r0 + r1) / 3);
+		rgb[2][1] = (u8)((2 * g0 + g1) / 3);
+		rgb[2][2] = (u8)((2 * b0 + b1) / 3);
+		rgb[3][0] = (u8)((r0 + 2 * r1) / 3);
+		rgb[3][1] = (u8)((g0 + 2 * g1) / 3);
+		rgb[3][2] = (u8)((b0 + 2 * b1) / 3);
+	} else {
+		rgb[2][0] = (u8)((r0 + r1) / 2);
+		rgb[2][1] = (u8)((g0 + g1) / 2);
+		rgb[2][2] = (u8)((b0 + b1) / 2);
+		rgb[3][0] = 0; rgb[3][1] = 0; rgb[3][2] = 0;
+	}
+	u32 cidx = (u32)src[4]
+		| ((u32)src[5] << 8)
+		| ((u32)src[6] << 16)
+		| ((u32)src[7] << 24);
+	for (int i = 0; i < 16; ++i) {
+		int ci = (cidx >> (i * 2)) & 0x3;
+		u8* o = &out_rgba[i * 4];
+		o[0] = rgb[ci][0];
+		o[1] = rgb[ci][1];
+		o[2] = rgb[ci][2];
+		o[3] = 255;   // BC1 has no alpha
+	}
+}
+
+// Decode a full BC1 mip level into a QImage. Same layout as the BC3
+// decoder below but 8 bytes/block instead of 16. Used for teamcolor
+// masks.
+static QImage decode_bc1_dds(const u8* dds_bytes, size_t dds_size,
+	u16 atlas_w, u16 atlas_h, std::string& err)
+{
+	if (dds_size < 128) { err = "DDS: too small"; return {}; }
+	if (dds_bytes[0] != 'D' || dds_bytes[1] != 'D'
+	    || dds_bytes[2] != 'S' || dds_bytes[3] != ' ')
+	{ err = "DDS: bad magic"; return {}; }
+	u32 hdr_h = rd32le(dds_bytes + 12);
+	u32 hdr_w = rd32le(dds_bytes + 16);
+	if (hdr_w != atlas_w || hdr_h != atlas_h) {
+		char buf[256];
+		snprintf(buf, sizeof(buf),
+			"DDS dims %ux%u disagree with layer %ux%u",
+			hdr_w, hdr_h, atlas_w, atlas_h);
+		err = buf;
+		return {};
+	}
+	size_t blocks_x = (atlas_w + 3) / 4;
+	size_t blocks_y = (atlas_h + 3) / 4;
+	size_t need = 128 + blocks_x * blocks_y * 8;
+	if (dds_size < need) {
+		err = "DDS: payload too small for declared dims";
+		return {};
+	}
+	const u8* payload = dds_bytes + 128;
+	QImage img(atlas_w, atlas_h, QImage::Format_RGBA8888);
+	if (img.isNull()) { err = "QImage alloc failed"; return {}; }
+	u8 block_rgba[64];
+	for (size_t by = 0; by < blocks_y; ++by) {
+		for (size_t bx = 0; bx < blocks_x; ++bx) {
+			const u8* blk = payload + (by * blocks_x + bx) * 8;
+			decode_bc1_block(blk, block_rgba);
+			for (int py = 0; py < 4; ++py) {
+				int y = (int)(by * 4) + py;
+				if (y >= atlas_h) continue;
+				u8* row = img.scanLine(y);
+				for (int px = 0; px < 4; ++px) {
+					int x = (int)(bx * 4) + px;
+					if (x >= atlas_w) continue;
+					const u8* src = &block_rgba[(py * 4 + px) * 4];
+					u8* dst = row + x * 4;
+					dst[0] = src[0];
+					dst[1] = src[1];
+					dst[2] = src[2];
+					dst[3] = src[3];
+				}
+			}
+		}
+	}
+	return img;
+}
+
 // Decode a full DXT5 mip level into a QImage (Format_RGBA8888).
 // dds_bytes points at the start of the DDS file (magic 'DDS ');
 // we skip the 128-byte header and decode the first mip only --
@@ -322,6 +430,10 @@ struct ImagesRelEntry {
 struct HdAssetLoader::Impl {
 	HANDLE storage = NULL;
 	std::vector<ImagesRelEntry> images_rel;
+	// bw_id -> sc_r_row, populated by load_mapping_table(). Empty
+	// map means no HD mapping known -> HD render path is a no-op.
+	std::unordered_map<int, int> bw_id_to_sc_r;
+	bool have_table = false;
 };
 
 HdAssetLoader::HdAssetLoader()
@@ -641,12 +753,137 @@ std::unique_ptr<HdSprite> HdAssetLoader::load_sprite(int sc_image_id) {
 		return nullptr;
 	}
 
+	// Optional teamcolor layer (DXT1 grayscale mask). SC:R's shader
+	// adds "teamcolor.rgb * playerColor" on top of the diffuse to
+	// pull dark diffuse regions toward the player's color. Blizzard
+	// authors diffuse dark on purpose expecting this pass -- if we
+	// skip it, HD units look drained of color (the "dark Marine"
+	// problem we saw before wiring this in).
+	//
+	// Hardcoded player color: red (Player 1 default). Matches
+	// openBW's slot-0 palette convention. Will be lifted to an
+	// argument once we care about non-red owners.
+	static constexpr uint8_t PLAYER_RED[3]   = { 224,   0,   0 };
+	static constexpr uint8_t PLAYER_COLOR[3] = { PLAYER_RED[0],
+	                                             PLAYER_RED[1],
+	                                             PLAYER_RED[2] };
+
+	QImage composited = atlas;   // starts as a copy of diffuse
+	const LayerInfo* tc = nullptr;
+	for (const auto& li : pa.layers) {
+		if (li.name == "teamcolor") { tc = &li; break; }
+	}
+	if (tc && tc->data_offset != 0
+	    && tc->data_offset + tc->data_size <= anim_bytes.size())
+	{
+		QImage tc_atlas = decode_bc1_dds(
+			anim_bytes.data() + tc->data_offset,
+			tc->data_size,
+			tc->atlas_w, tc->atlas_h, perr);
+		if (tc_atlas.isNull()) {
+			// Non-fatal: unit gets un-tinted diffuse.
+			fprintf(stderr,
+				"warn: teamcolor decode failed for %s: %s\n",
+				name, perr.c_str());
+		} else if (tc_atlas.width() == composited.width()
+		           && tc_atlas.height() == composited.height())
+		{
+			// SC:R teamcolor blend is a modulate, not an addition:
+			//   tint_factor = mix(vec3(1), player_color/255, mask)
+			//   final.rgb   = diffuse.rgb * tint_factor
+			//
+			// Additive was wrong -- it saturated highlights toward
+			// white ("pink Marine" symptom the user hit). Modulate
+			// preserves the diffuse shading and tints only what the
+			// mask marks: mask=0 leaves diffuse alone, mask=1 makes
+			// a white armor plate become pure player color with the
+			// original shading multiplied in.
+			int H = composited.height();
+			int W = composited.width();
+			for (int y = 0; y < H; ++y) {
+				uint8_t* dst = composited.scanLine(y);
+				const uint8_t* mask = tc_atlas.scanLine(y);
+				for (int x = 0; x < W; ++x) {
+					int g = mask[x * 4];   // R channel = mask
+					if (g == 0) continue;
+					uint8_t* p = dst + x * 4;
+					// Per-channel modulate factor in fixed-point
+					// [0..255]: at mask=0 factor=255 (no change),
+					// at mask=255 factor=PLAYER_COLOR[c].
+					int fr = 255 + (g * ((int)PLAYER_COLOR[0] - 255)) / 255;
+					int fg = 255 + (g * ((int)PLAYER_COLOR[1] - 255)) / 255;
+					int fb = 255 + (g * ((int)PLAYER_COLOR[2] - 255)) / 255;
+					int r = (p[0] * fr) / 255;
+					int gg = (p[1] * fg) / 255;
+					int b = (p[2] * fb) / 255;
+					p[0] = (uint8_t)(r > 255 ? 255 : r);
+					p[1] = (uint8_t)(gg > 255 ? 255 : gg);
+					p[2] = (uint8_t)(b > 255 ? 255 : b);
+				}
+			}
+		}
+	}
+
 	auto sp = std::make_unique<HdSprite>();
-	sp->diffuse  = std::move(atlas);
-	sp->sprite_w = pa.sprite_w;
-	sp->sprite_h = pa.sprite_h;
-	sp->frames   = std::move(pa.frames);
+	sp->diffuse     = std::move(atlas);
+	sp->composited  = std::move(composited);
+	sp->sprite_w    = pa.sprite_w;
+	sp->sprite_h    = pa.sprite_h;
+	sp->frames      = std::move(pa.frames);
 	return sp;
+}
+
+// ---- mapping table --------------------------------------------------
+
+bool HdAssetLoader::load_mapping_table(const QString& path) {
+	impl_->bw_id_to_sc_r.clear();
+	impl_->have_table = false;
+	QFile f(path);
+	if (!f.open(QIODevice::ReadOnly)) {
+		err_ = QString("open mapping table failed: %1")
+			.arg(f.errorString());
+		return false;
+	}
+	QJsonParseError perr;
+	auto doc = QJsonDocument::fromJson(f.readAll(), &perr);
+	f.close();
+	if (!doc.isObject()) {
+		err_ = QString("mapping table not JSON object: %1")
+			.arg(perr.errorString());
+		return false;
+	}
+	auto root = doc.object();
+	// Enforce the schema tag so a stale hand-edited file doesn't
+	// silently produce wrong sprites.
+	if (root.value("schema").toString()
+	    != QStringLiteral("openbw_hd_mapping_v1"))
+	{
+		err_ = "mapping table has unexpected schema tag";
+		return false;
+	}
+	auto entries = root.value("bw_id_to_sc_r_row").toObject();
+	for (auto it = entries.begin(); it != entries.end(); ++it) {
+		bool ok = false;
+		int bw = it.key().toInt(&ok);
+		if (!ok) continue;
+		auto e = it.value().toObject();
+		int sc = e.value("sc_r_row").toInt(-1);
+		if (sc < 0) continue;
+		impl_->bw_id_to_sc_r[bw] = sc;
+	}
+	impl_->have_table = !impl_->bw_id_to_sc_r.empty();
+	return impl_->have_table;
+}
+
+bool HdAssetLoader::has_mapping_table() const {
+	return impl_ && impl_->have_table;
+}
+
+int HdAssetLoader::sc_r_row_for_bw_id(int bw_id) const {
+	if (!impl_) return -1;
+	auto it = impl_->bw_id_to_sc_r.find(bw_id);
+	if (it == impl_->bw_id_to_sc_r.end()) return -1;
+	return it->second;
 }
 
 }   // namespace sprite_viewer

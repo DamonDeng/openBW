@@ -141,6 +141,29 @@ struct SimHarness {
 	// this unit supports.
 	bool anim_available(int anim_id) const;
 
+	// Return the openBW image_type_t::id (bw_id) of the current
+	// unit's main sprite image -- an index into images.dat / the
+	// ImageTypes enum (999 slots). -1 if no unit is spawned.
+	int current_image_id() const;
+
+	// Return the arr/images.tbl string ordinal (grp_filename_index)
+	// of the current unit's main image. This is the number the HD
+	// Mapping tab's combobox uses to identify unit names, so it's
+	// the correct key into hd_mapping_table.json. Distinct from
+	// current_image_id() -- images.tbl has 929 valid strings while
+	// images.dat has 999 image_type slots; the two indexings do
+	// NOT line up.
+	int current_grp_filename_index() const;
+
+	// True iff the current unit's main image has the
+	// horizontally_flipped flag set by iscript. openBW stores only
+	// facings 0..16 in the frame table; facings 17..31 are drawn
+	// by mirroring one of the stored facings horizontally. The HD
+	// renderer needs to honor the same convention -- otherwise
+	// every left-facing direction looks identical to its right-
+	// facing mirror.
+	bool current_flipped() const;
+
 private:
 	bool tried_first_update = false;
 };
