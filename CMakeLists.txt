@@ -14,6 +14,11 @@ option(OPENBW_BUILD_SERVER   "Build the openbw_server headless authoritative sim
 # CI images don't need to pull Qt.
 option(OPENBW_BUILD_SIMSC_APP
 	"Build the Qt6 simsc_app desktop spectator (macOS-first)" OFF)
+# End-user Qt6 desktop app: lobby for local + remote games, spawns
+# openbw_server locally, hosts observer windows. See simsc_desktop/
+# and docs plan file. Off by default.
+option(OPENBW_BUILD_SIMSC_DESKTOP
+	"Build the Qt6 simsc_desktop end-user lobby + observer app" OFF)
 # Standalone preprocessing binaries under tools/ (e.g. static_map_parser).
 # Off by default; opt in when generating a static map registry.
 option(OPENBW_BUILD_TOOLS
@@ -35,6 +40,9 @@ if (OPENBW_BUILD_SERVER)
 endif()
 if (OPENBW_BUILD_SIMSC_APP)
 	add_subdirectory(simsc_app)
+endif()
+if (OPENBW_BUILD_SIMSC_DESKTOP)
+	add_subdirectory(simsc_desktop)
 endif()
 if (OPENBW_BUILD_TOOLS)
 	add_subdirectory(tools)
