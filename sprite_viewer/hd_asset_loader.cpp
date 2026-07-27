@@ -434,6 +434,26 @@ struct HdAssetLoader::Impl {
 	// map means no HD mapping known -> HD render path is a no-op.
 	std::unordered_map<int, int> bw_id_to_sc_r;
 	bool have_table = false;
+	// Cache of inferred shadow sprites, keyed by the body's
+	// sc_r_row (not the shadow's -- the caller knows the body,
+	// which is what we start from).
+	std::unordered_map<int, std::unique_ptr<HdSprite>> shadow_cache;
+
+	// HD tileset for the currently-loaded map. Owned bytes so
+	// we don't re-read CASC per megatile. hd_tileset_stride is
+	// the size in bytes of ONE megatile entry (128-byte DDS
+	// header + payload + optional padding); hd_tileset_count is
+	// how many megatiles the file contains; hd_tileset_dim is
+	// the megatile's pixel size (64 for HD2). All zero when
+	// no tileset is loaded.
+	std::vector<u8> hd_tileset_bytes;
+	size_t hd_tileset_stride = 0;
+	int    hd_tileset_count  = 0;
+	int    hd_tileset_dim    = 0;
+	// Lazily-decoded megatile textures. Keyed by megatile index;
+	// bounded by hd_tileset_count. Null entries mean "not yet
+	// decoded". hd_megatile() populates on first access.
+	std::unordered_map<int, QImage> hd_megatile_cache;
 };
 
 HdAssetLoader::HdAssetLoader()
@@ -884,6 +904,278 @@ int HdAssetLoader::sc_r_row_for_bw_id(int bw_id) const {
 	auto it = impl_->bw_id_to_sc_r.find(bw_id);
 	if (it == impl_->bw_id_to_sc_r.end()) return -1;
 	return it->second;
+}
+
+// Peek at a candidate anim file: parse just enough of the layer
+// table to decide if it's a "shadow anim" (only diffuse layer
+// populated, no bright/teamcolor/normal/specular/ao_depth). Returns
+// true iff the file exists AND its layer layout matches that
+// signature. Fetches the anim bytes as a side effect stored into
+// `out_bytes` when true (so the caller doesn't reload). Also emits
+// the frame count so the caller can pick a shadow that matches its
+// body's frame count when multiple only-diffuse candidates exist.
+static bool try_shadow_anim(HANDLE storage, uint32_t anim_num,
+	std::vector<u8>& out_bytes, int& out_frame_count)
+{
+	char name[64];
+	snprintf(name, sizeof(name), "anim\\main_%03u.anim", anim_num);
+	std::string ce;
+	if (!casc_read_file(storage, name, out_bytes, ce)) return false;
+
+	ParsedAnim pa;
+	std::string perr;
+	if (!parse_anim(out_bytes, pa, perr)) return false;
+
+	// Shadow signature: exactly the diffuse layer has data, and
+	// every other layer descriptor has data_offset==0.
+	bool has_diffuse = false;
+	for (const auto& li : pa.layers) {
+		if (li.name == "diffuse" && li.data_offset != 0) {
+			has_diffuse = true;
+		} else if (li.data_offset != 0) {
+			return false;   // any non-diffuse layer -> body, not shadow
+		}
+	}
+	out_frame_count = pa.frame_count;
+	return has_diffuse;
+}
+
+HdSprite* HdAssetLoader::shadow_sprite_for(int body_sc_r_row) {
+	if (!is_open() || body_sc_r_row < 0
+	    || (size_t)body_sc_r_row >= impl_->images_rel.size())
+		return nullptr;
+
+	// Cached?
+	auto cit = impl_->shadow_cache.find(body_sc_r_row);
+	if (cit != impl_->shadow_cache.end())
+		return cit->second.get();
+
+	// Body's anim_num is the reference point.
+	const auto& body = impl_->images_rel[body_sc_r_row];
+	if (body.anim_num == 0xffffffff) {
+		impl_->shadow_cache.emplace(body_sc_r_row, nullptr);
+		return nullptr;
+	}
+
+	// Determine the body's frame count so we can pick the shadow
+	// candidate whose frame count matches -- iscript walks the
+	// SAME frame_index across body and shadow images, so they must
+	// share the frame table shape. Adjacent-anim inspection alone
+	// isn't enough: a Vulture's neighborhood contains multiple
+	// only-diffuse anims (255=6 frames, 257=17 frames, 259=12
+	// frames); only 257 matches the Vulture body's 17.
+	int body_frame_count = -1;
+	{
+		char body_name[64];
+		snprintf(body_name, sizeof(body_name),
+			"anim\\main_%03u.anim", body.anim_num);
+		std::vector<u8> body_bytes;
+		std::string ce;
+		if (casc_read_file(impl_->storage, body_name, body_bytes, ce)) {
+			ParsedAnim body_pa;
+			std::string perr;
+			if (parse_anim(body_bytes, body_pa, perr)) {
+				body_frame_count = body_pa.frame_count;
+			}
+		}
+	}
+
+	// Search deltas in order of empirical likelihood. Data from
+	// the retail sample: shadow_anim - body_anim landed at +1
+	// (Marine, SCV) or +2 (Tank, Academy) or occasionally -1 (some
+	// buildings). Widen to +/-3, then prefer a candidate whose
+	// frame count MATCHES the body's; fall back to the first
+	// only-diffuse hit if none match exactly.
+	static const int kDeltas[] = { 1, 2, 3, -1, -2, -3 };
+	std::vector<u8> anim_bytes;
+	int shadow_anim = -1;
+	std::vector<u8> best_bytes;
+	int best_anim = -1;
+	for (int d : kDeltas) {
+		int candidate = (int)body.anim_num + d;
+		if (candidate < 0) continue;
+		std::vector<u8> tmp;
+		int fc = -1;
+		if (!try_shadow_anim(impl_->storage, (uint32_t)candidate,
+		                     tmp, fc)) continue;
+		if (fc == body_frame_count) {
+			shadow_anim = candidate;
+			anim_bytes = std::move(tmp);
+			break;   // exact match wins
+		}
+		if (best_anim < 0) {
+			best_anim = candidate;
+			best_bytes = std::move(tmp);
+		}
+	}
+	if (shadow_anim < 0 && best_anim >= 0) {
+		// Fall back to first-hit only when no frame-count match.
+		shadow_anim = best_anim;
+		anim_bytes = std::move(best_bytes);
+	}
+	if (shadow_anim < 0) {
+		impl_->shadow_cache.emplace(body_sc_r_row, nullptr);
+		return nullptr;
+	}
+
+	// Decode the shadow anim -- only the diffuse layer to keep
+	// memory small, but wire up frames + sprite bounding box the
+	// same way load_sprite() does for bodies.
+	ParsedAnim pa;
+	std::string perr;
+	if (!parse_anim(anim_bytes, pa, perr)) {
+		impl_->shadow_cache.emplace(body_sc_r_row, nullptr);
+		return nullptr;
+	}
+	const LayerInfo* diff = nullptr;
+	for (const auto& li : pa.layers) {
+		if (li.name == "diffuse") { diff = &li; break; }
+	}
+	if (!diff || diff->data_offset == 0
+	    || diff->data_offset + diff->data_size > anim_bytes.size())
+	{
+		impl_->shadow_cache.emplace(body_sc_r_row, nullptr);
+		return nullptr;
+	}
+	QImage atlas = decode_dxt5_dds(
+		anim_bytes.data() + diff->data_offset,
+		diff->data_size, diff->atlas_w, diff->atlas_h, perr);
+	if (atlas.isNull()) {
+		impl_->shadow_cache.emplace(body_sc_r_row, nullptr);
+		return nullptr;
+	}
+	auto sp = std::make_unique<HdSprite>();
+	sp->diffuse    = std::move(atlas);
+	// Shadows don't use teamcolor -- leave composited null so the
+	// paint_hd_image branch uses raw diffuse (which is exactly
+	// the black silhouette we then re-tint).
+	sp->sprite_w   = pa.sprite_w;
+	sp->sprite_h   = pa.sprite_h;
+	sp->frames     = std::move(pa.frames);
+	auto* raw = sp.get();
+	impl_->shadow_cache.emplace(body_sc_r_row, std::move(sp));
+	return raw;
+}
+
+// ---- HD tileset ----------------------------------------------------
+
+bool HdAssetLoader::open_hd_tileset(int tileset_index) {
+	impl_->hd_tileset_bytes.clear();
+	impl_->hd_tileset_stride = 0;
+	impl_->hd_tileset_count  = 0;
+	impl_->hd_tileset_dim    = 0;
+	impl_->hd_megatile_cache.clear();
+
+	// Same table as ui.h load_tileset_image_data.
+	static const char* const kTilesetNames[8] = {
+		"badlands", "platform", "install", "AshWorld",
+		"Jungle", "Desert", "Ice", "Twilight"
+	};
+	if (tileset_index < 0 || tileset_index >= 8) {
+		err_ = QString("tileset index %1 out of range").arg(tileset_index);
+		return false;
+	}
+	if (!is_open()) { err_ = "loader not open"; return false; }
+
+	// SC:R ships terrain at two resolution tiers: full-res "HD" at
+	// TileSet/<name>.dds.vr4 (128x128 megatiles) and half-res
+	// "HD2" at HD2/TileSet/<name>.dds.vr4 (64x64 megatiles).
+	// Sprite atlases follow the same convention -- the anim files
+	// we load via anim\\main_NNN.anim resolve to the HD full-res
+	// tier. Using HD tiles here matches that so tile-pixel and
+	// sprite-pixel densities line up (both 128 * vp_scale/32 =
+	// 4 * vp_scale widget px per HD tile pixel, equal to the same
+	// per HD sprite pixel via s = vp_scale/4).
+	char name[128];
+	snprintf(name, sizeof(name), "TileSet\\%s.dds.vr4",
+		kTilesetNames[tileset_index]);
+	std::string ce;
+	if (!casc_read_file(impl_->storage, name,
+	                    impl_->hd_tileset_bytes, ce))
+	{
+		err_ = QString("open %1 failed: %2")
+			.arg(name).arg(QString::fromStdString(ce));
+		return false;
+	}
+
+	// Container header (reverse-engineered from platform.dds.vr4):
+	//   u32 total_file_size
+	//   u32 unk (tileset version / id)
+	//   u32 unk (0)
+	//   u16 tile_w
+	//   u16 tile_h
+	//   u32 tile_payload_bytes (128 + w*h/2 for DXT1 at 4bpp)
+	// After that: (count) chunks of `stride` bytes each, where
+	// stride matches the offset between the first two DDS markers
+	// (usually payload_bytes + a small trailing pad for 8-byte
+	// alignment).
+	auto& bytes = impl_->hd_tileset_bytes;
+	if (bytes.size() < 20) {
+		err_ = "HD tileset file too small";
+		return false;
+	}
+	uint16_t w = rd16le(bytes.data() + 12);
+	uint16_t h = rd16le(bytes.data() + 14);
+	if (w == 0 || h == 0 || w > 512 || h > 512) {
+		err_ = "HD tileset: implausible tile dimensions";
+		return false;
+	}
+	// Locate first two DDS markers to compute stride.
+	size_t first = 0;
+	for (size_t i = 20; i + 4 <= bytes.size(); ++i) {
+		if (std::memcmp(bytes.data() + i, "DDS ", 4) == 0) {
+			first = i;
+			break;
+		}
+	}
+	if (first == 0) { err_ = "HD tileset: no DDS chunks"; return false; }
+	size_t second = 0;
+	for (size_t i = first + 4; i + 4 <= bytes.size(); ++i) {
+		if (std::memcmp(bytes.data() + i, "DDS ", 4) == 0) {
+			second = i;
+			break;
+		}
+	}
+	if (second == 0) {
+		// Only one megatile in the file -- unusual but valid.
+		impl_->hd_tileset_stride = bytes.size() - first;
+		impl_->hd_tileset_count  = 1;
+	} else {
+		impl_->hd_tileset_stride = second - first;
+		impl_->hd_tileset_count  =
+			(int)((bytes.size() - first) / impl_->hd_tileset_stride);
+	}
+	impl_->hd_tileset_dim = w;   // assume square
+	err_.clear();
+	return true;
+}
+
+bool HdAssetLoader::has_hd_tileset() const {
+	return impl_ && !impl_->hd_tileset_bytes.empty();
+}
+
+QImage HdAssetLoader::hd_megatile(int megatile_index) {
+	if (!has_hd_tileset()) return {};
+	if (megatile_index < 0
+	    || megatile_index >= impl_->hd_tileset_count) return {};
+
+	auto it = impl_->hd_megatile_cache.find(megatile_index);
+	if (it != impl_->hd_megatile_cache.end()) return it->second;
+
+	// Chunks start immediately after the 20-byte container header.
+	size_t chunk_off = 20 + (size_t)megatile_index * impl_->hd_tileset_stride;
+	if (chunk_off + 128 > impl_->hd_tileset_bytes.size()) return {};
+
+	int w = impl_->hd_tileset_dim;
+	int h = impl_->hd_tileset_dim;
+	std::string perr;
+	QImage img = decode_bc1_dds(
+		impl_->hd_tileset_bytes.data() + chunk_off,
+		impl_->hd_tileset_stride,
+		(u16)w, (u16)h, perr);
+	if (img.isNull()) return {};
+	impl_->hd_megatile_cache[megatile_index] = img;
+	return img;
 }
 
 }   // namespace sprite_viewer

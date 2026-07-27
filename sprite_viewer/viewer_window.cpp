@@ -24,6 +24,7 @@
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QWidget>
 
+#include <algorithm>
 #include <cstring>
 
 namespace sprite_viewer {
@@ -39,6 +40,11 @@ namespace sprite_viewer {
 // the same SimHarness so iscript state advances in lockstep and the
 // two views represent the same tick.
 enum class CanvasMode { SD, HD };
+
+// No global HD scale constant: the correct per-sprite scale is
+// derived from the ratio SD_grp_width / HD_sprite_w so a Marine's
+// HD render occupies exactly the same on-widget pixels as its SD
+// render. See paint_hd_image() for the derivation.
 
 class SpriteCanvas : public QWidget {
 public:
@@ -73,55 +79,235 @@ protected:
 	// comes from iscript state via SimHarness (image->frame_index).
 	// Returns true iff HD rendering was attempted (so classic can
 	// be skipped this tick).
-	bool paint_hd(QPainter& p) {
-		HdSprite* hd = owner ? owner->current_hd : nullptr;
+	// Draw one HD image (shadow, body, overlay, ...) at the widget
+	// center. Returns false iff no HD sprite is available for the
+	// given grp_filename_index (caller falls back to whatever the
+	// SD tile background already contains).
+	bool paint_hd_image(QPainter& p,
+	                    const SimHarness::SpriteImage& img)
+	{
+		if (img.hidden || img.grp_filename_index < 0) return false;
+		HdAssetLoader* loader = owner ? owner->hd_loader.get() : nullptr;
+		if (!loader) return false;
+
+		HdSprite* hd = nullptr;
+
+		// Shadows: the mapping tab doesn't include *Shad.grp
+		// entries, but SC:R stores shadow sprites in adjacent
+		// only-diffuse anim files. Use the body's HD sc_r_row
+		// (from the current unit) as the seed and probe adjacent
+		// anim_nums for an only-diffuse anim whose frame count
+		// matches the body's -- see HdAssetLoader::shadow_sprite_for.
+		if (img.is_shadow) {
+			HdSprite* body = owner->current_hd;
+			if (!body) return false;
+			int body_sc_r = -1;
+			if (sim) {
+				int body_bw = sim->current_grp_filename_index();
+				if (body_bw >= 0)
+					body_sc_r = loader->sc_r_row_for_bw_id(body_bw);
+			}
+			if (body_sc_r < 0) return false;
+			hd = loader->shadow_sprite_for(body_sc_r);
+			if (!hd) return false;
+		} else {
+			int sc_r = loader->sc_r_row_for_bw_id(
+				img.grp_filename_index);
+			if (sc_r < 0) return false;
+
+			// Cache HD sprites per (grp_filename_index) so
+			// subsequent frames of the same anim reuse the
+			// decoded atlas.
+			auto& cache = owner->hd_image_cache;
+			auto it = cache.find(img.grp_filename_index);
+			if (it == cache.end()) {
+				auto sp = loader->load_sprite(sc_r);
+				if (!sp) return false;
+				it = cache.emplace(img.grp_filename_index,
+					std::move(sp)).first;
+			}
+			hd = it->second.get();
+		}
 		if (!hd || hd->frames.empty()) return false;
 
-		// Which frame? Read from the iscript state. SimHarness owns
-		// the unit and its main_image; grab the frame_index there.
-		int f = 0;
-		if (sim) {
-			auto fi = sim->current_frame_info();
-			if (fi.frame_index >= 0) f = fi.frame_index;
-		}
+		int f = img.frame_index;
 		if (f < 0 || f >= (int)hd->frames.size()) f = 0;
 		const auto& fr = hd->frames[f];
 
-		// Prefer the composited (diffuse + teamcolor*player_color)
-		// atlas when available so the sprite shows its owner's tint;
-		// falls back to raw diffuse if teamcolor was absent for
-		// this unit (e.g. neutral doodads).
+		// Prefer composited (diffuse + teamcolor tint). Shadow
+		// images ignore teamcolor -- they're solid black masks --
+		// but our composited path leaves non-teamcolor pixels
+		// untouched, so it's safe to always use it when present.
 		const QImage& src_atlas =
 			hd->composited.isNull() ? hd->diffuse : hd->composited;
 		QImage sub = src_atlas.copy(
 			fr.atlas_x, fr.atlas_y, fr.w, fr.h);
+		if (img.flipped) sub = sub.mirrored(true, false);
 
-		// Place the frame the same way openBW's SD renderer does
-		// (bwgame.h:13334 get_image_map_position):
-		//
-		//   NORMAL : screen = sprite_center + frame.offset - bbox_center
-		//   FLIPPED: screen = sprite_center + bbox_center - (frame.offset + frame.size)
-		//
-		// The per-frame offset is measured from the top-left of the
-		// sprite's bounding box (sprite_w * sprite_h). The flipped
-		// variant mirrors the anchor point across the bbox center so
-		// h-flipped left facings line up correctly. iscript only
-		// stores facings 0..16 in the frame table -- facings 17..31
-		// draw one of those 17 frames with flipped=true.
-		bool flipped = sim ? sim->current_flipped() : false;
-		if (flipped) sub = sub.mirrored(/*h=*/true, /*v=*/false);
+		// Anchor: place the sprite at the same visual center as
+		// the SD viewport (centered square). paint_hd() computed
+		// hd_vp_scale_ / hd_vp_ox_ / hd_vp_oy_ from the SD tile
+		// surface size.
+		double cx = hd_vp_ox_ + (width()  - 2 * hd_vp_ox_) / 2.0;
+		double cy = hd_vp_oy_ + (height() - 2 * hd_vp_oy_) / 2.0;
 
-		int cx = width()  / 2;
-		int cy = height() / 2;
-		int dx, dy;
-		if (flipped) {
-			dx = cx + (int)hd->sprite_w / 2
-			        - ((int)fr.offset_x + (int)fr.w);
+		// HD sprite scale: pixel-to-pixel with the HD terrain.
+		//
+		// HD megatile is 128 atlas pixels wide, painted into a
+		// (32 * vp_scale) widget rect -- so one HD tile pixel
+		// takes up (vp_scale / 4) widget pixels. To keep the
+		// sprite at the same pixel density as the ground it
+		// stands on, one HD sprite pixel must also take up
+		// (vp_scale / 4) widget pixels.
+		//
+		//   s = vp_scale / 4
+		//
+		// This falls out of SC:R's HD tier: sprites (2048x1520
+		// atlas for Marine) and tiles (128x128 megatile) both
+		// authored at ~4x SD reference. If we were using HD2
+		// instead (1024x760 sprite, 64x64 tile), the ratio would
+		// be vp_scale / 2. Keep in sync with the tileset path
+		// selected in hd_asset_loader.cpp::open_hd_tileset.
+		double s = hd_vp_scale_ / 4.0;
+
+		double dx, dy;
+		if (img.flipped) {
+			dx = cx + s * ((int)hd->sprite_w / 2
+			        - ((int)fr.offset_x + (int)fr.w));
 		} else {
-			dx = cx + (int)fr.offset_x - (int)hd->sprite_w / 2;
+			dx = cx + s * ((int)fr.offset_x
+			        - (int)hd->sprite_w / 2);
 		}
-		dy = cy + (int)fr.offset_y - (int)hd->sprite_h / 2;
-		p.drawImage(dx, dy, sub);
+		dy = cy + s * ((int)fr.offset_y
+		        - (int)hd->sprite_h / 2);
+		QRectF dst(dx, dy, fr.w * s, fr.h * s);
+
+		// Shadow blend: openBW's SD renderer uses modifier=10 with
+		// a dark-palette LUT that yields translucent black.
+		// Approximation for HD: draw a black silhouette at reduced
+		// alpha keyed off the source alpha channel. Preserves the
+		// sprite shape while darkening the underlying tiles rather
+		// than showing the raw diffuse.
+		if (img.is_shadow) {
+			QImage silhouette(sub.size(),
+				QImage::Format_RGBA8888);
+			silhouette.fill(0x00000000);
+			for (int y = 0; y < sub.height(); ++y) {
+				const uint8_t* src = sub.scanLine(y);
+				uint8_t* dst_scanline = silhouette.scanLine(y);
+				for (int x = 0; x < sub.width(); ++x) {
+					uint8_t a = src[x * 4 + 3];
+					if (a == 0) continue;
+					dst_scanline[x * 4 + 0] = 0;
+					dst_scanline[x * 4 + 1] = 0;
+					dst_scanline[x * 4 + 2] = 0;
+					dst_scanline[x * 4 + 3] =
+						(uint8_t)((int)a * 140 / 255);
+				}
+			}
+			p.drawImage(dst, silhouette);
+		} else {
+			p.drawImage(dst, sub);
+		}
+		return true;
+	}
+
+	bool paint_hd(QPainter& p) {
+		HdSprite* hd = owner ? owner->current_hd : nullptr;
+		if (!hd || hd->frames.empty()) return false;
+
+		// Ground + sprite share one viewport: a centered square
+		// scaled to fit whichever side of the widget is shorter.
+		// This keeps HD's aspect ratio 1:1 with SD (whose render
+		// surface is 256x256). Without this, a non-square widget
+		// stretches tiles + sprite differently (tiles by widget-
+		// aspect, sprite by kHdScale) and the two drift apart.
+		double vp_scale = 1.0;   // widget px per surface px
+		double vp_ox = 0.0;      // widget-space viewport origin
+		double vp_oy = 0.0;
+		if (sim) {
+			auto tile_pixels =
+				sim->render_frame(/*draw_sprite=*/false);
+			if (tile_pixels.width > 0 && tile_pixels.height > 0) {
+				// Mirror SD's scale rule (SpriteCanvas paint at
+				// mode_==SD): start at SCALE=3 and shrink down
+				// (in integer steps) until the surface fits.
+				// Locking to the same integer scale keeps HD
+				// tiles the same size as SD tiles on the same
+				// widget -- without it, HD widget-fill diverges
+				// from SD's centered 768x768 box.
+				int scale = SCALE;
+				while (scale > 1
+				       && (tile_pixels.width  * scale > width()
+				        || tile_pixels.height * scale > height()))
+				{
+					--scale;
+				}
+				vp_scale = (double)scale;
+				vp_ox = (width()  - tile_pixels.width  * vp_scale) / 2.0;
+				vp_oy = (height() - tile_pixels.height * vp_scale) / 2.0;
+			}
+
+			HdAssetLoader* loader = owner
+				? owner->hd_loader.get() : nullptr;
+			bool used_hd_tiles = false;
+
+			if (loader && loader->has_hd_tileset()) {
+				auto cells = sim->visible_tiles();
+				if (tile_pixels.width > 0 && tile_pixels.height > 0) {
+					p.setRenderHint(
+						QPainter::SmoothPixmapTransform, true);
+					for (const auto& c : cells) {
+						QImage mt = loader->hd_megatile(
+							c.megatile_index);
+						if (mt.isNull()) continue;
+						QRectF dst(
+							vp_ox + c.screen_x * vp_scale,
+							vp_oy + c.screen_y * vp_scale,
+							32 * vp_scale, 32 * vp_scale);
+						p.drawImage(dst, mt);
+					}
+					used_hd_tiles = true;
+				}
+			}
+
+			if (!used_hd_tiles) {
+				if (tile_pixels.data && tile_pixels.width > 0
+				    && tile_pixels.height > 0)
+				{
+					QImage tiles(
+						reinterpret_cast<const uchar*>(
+							tile_pixels.data),
+						tile_pixels.width, tile_pixels.height,
+						tile_pixels.pitch,
+						QImage::Format_ARGB32);
+					p.setRenderHint(
+						QPainter::SmoothPixmapTransform, true);
+					// Uniform-scale into the centered viewport
+					// rect so the tile aspect stays 1:1 (matches
+					// SD canvas).
+					p.drawImage(
+						QRectF(vp_ox, vp_oy,
+						       tile_pixels.width  * vp_scale,
+						       tile_pixels.height * vp_scale),
+						tiles);
+				}
+			}
+		}
+		// Stash the viewport transform for the sprite paint below.
+		hd_vp_scale_ = vp_scale;
+		hd_vp_ox_    = vp_ox;
+		hd_vp_oy_    = vp_oy;
+
+		// Walk every image_t on the sprite in draw order (shadow
+		// deepest, body next, overlays last). Match openBW's
+		// draw_sprite iteration. Individual images that lack an
+		// HD mapping are simply skipped; the SD tile background
+		// already contains what they would have looked like in
+		// classic mode.
+		if (!sim) return false;
+		auto images = sim->current_sprite_images();
+		for (const auto& img : images) paint_hd_image(p, img);
 		return true;
 	}
 
@@ -157,23 +343,13 @@ protected:
 		QImage view(reinterpret_cast<const uchar*>(pixels.data),
 		            pixels.width, pixels.height, pixels.pitch,
 		            QImage::Format_ARGB32);
-		// openBW's render surface is filled with palette index 0
-		// (= RGB 0,0,0 alpha 255 on all tilesets) before draw_sprite
-		// writes into it. The indexed->rgba blit copies index 0 as
-		// opaque black, so the widget sees a black square around
-		// the sprite. Detach a mutable copy and swap those pure-
-		// black pixels for the widget's mid-gray background so the
-		// marine sits on gray instead. Legitimate sprite pixels use
-		// palette shades like 0x08/0x10; NONE map exactly to
-		// (0,0,0), so the filter is unambiguous.
-		QImage snap = view.copy();
-		const QRgb gray = qRgb(0x80, 0x80, 0x80);
-		for (int y = 0; y < snap.height(); ++y) {
-			QRgb* row = reinterpret_cast<QRgb*>(snap.scanLine(y));
-			for (int x = 0; x < snap.width(); ++x) {
-				if ((row[x] & 0x00FFFFFF) == 0) row[x] = gray;
-			}
-		}
+		// SimHarness::render_frame now paints the map tiles into
+		// the surface before compositing the sprite, so palette
+		// index 0 (pure black) no longer appears as a rectangular
+		// backdrop and we can draw the surface as-is. Keep the
+		// QImage as a read-only view over the surface bytes -- Qt
+		// won't hold the pointer past the drawImage call below.
+		QImage& snap = view;
 
 		// Nearest-neighbor upscale via drawImage with an explicit
 		// target rect. SmoothPixmapTransform=false forces nearest
@@ -201,6 +377,14 @@ private:
 	SimHarness* sim;
 	CanvasMode mode_;
 	QColor background_color;
+
+	// HD viewport transform captured by paint_hd() and consumed
+	// by paint_hd_image() so tiles + sprite share a single scale
+	// + origin. Keeps HD's aspect ratio 1:1 regardless of the
+	// widget's outer aspect. See paint_hd for the derivation.
+	double hd_vp_scale_ = 1.0;
+	double hd_vp_ox_    = 0.0;
+	double hd_vp_oy_    = 0.0;
 };
 
 // -------------------------------------------------------------------
@@ -356,6 +540,16 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 				qInfo() << "HD mapping table not loaded ("
 				        << hd_loader->last_error()
 				        << "); using hardcoded fallback";
+			}
+			// Open the HD tileset for whatever map SimHarness
+			// booted with. Failure is soft -- HD canvas falls
+			// back to the stretched SD tile surface as before.
+			int ti = sim ? sim->tileset_index() : -1;
+			if (ti >= 0 && hd_loader->open_hd_tileset(ti)) {
+				qInfo() << "HD tileset loaded (index" << ti << ")";
+			} else {
+				qInfo() << "HD tileset not loaded:"
+				        << hd_loader->last_error();
 			}
 		}
 	}

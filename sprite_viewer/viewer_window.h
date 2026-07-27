@@ -96,6 +96,14 @@ private:
 	// image_id -- the mapping from unit -> SC:R image_id is resolved
 	// once per unit and stashed in the value.
 	std::unordered_map<int, std::unique_ptr<HdSprite>> hd_cache;
+	// Per-image cache keyed by grp_filename_index (0-based). Used
+	// by paint_hd's per-image loop so the shadow, muzzle-flash,
+	// etc. each get their own HdSprite without re-decoding on
+	// every frame. Keyed differently from hd_cache above (which
+	// is unit_type-keyed for the initial current_hd lookup); over
+	// time hd_cache should probably fold into this map, but for
+	// now the two coexist.
+	std::unordered_map<int, std::unique_ptr<HdSprite>> hd_image_cache;
 	// Currently displayed HD sprite (non-owning view into hd_cache).
 	HdSprite* current_hd = nullptr;
 

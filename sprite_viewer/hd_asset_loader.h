@@ -145,6 +145,37 @@ public:
 	// if no HD mapping is known for that bw_id.
 	int sc_r_row_for_bw_id(int bw_id) const;
 
+	// Open an HD tileset for the given index (matching ui.h's
+	// tileset_names table: 0=badlands, 1=platform, 2=install,
+	// 3=AshWorld, 4=Jungle, 5=Desert, 6=Ice, 7=Twilight). Loads
+	// HD2/TileSet/<name>.dds.vr4 -- a container of 5711 (or
+	// tileset-specific) 64x64 DXT1 megatile textures. Returns
+	// false + last_error() on failure. Safe to call multiple
+	// times; a new open replaces the prior tileset.
+	bool open_hd_tileset(int tileset_index);
+	bool has_hd_tileset() const;
+
+	// Decode-on-demand: return a 64x64 RGBA QImage for the given
+	// megatile index. Cached per index -- subsequent calls with
+	// the same index return the same QImage. Empty (null) image
+	// when the index is out of range or the decode fails.
+	QImage hd_megatile(int megatile_index);
+
+	// SC:R stores shadow sprites in their own main_NNN.anim files
+	// (only diffuse layer populated -- no teamcolor / normal /
+	// specular). They live adjacent to the body anim in anim_num
+	// (typically body_anim +/- 1..3). openBW's SD renderer treats
+	// each shadow as a separate image_t on the sprite, but the
+	// mapping tab doesn't include shadow entries -- they were
+	// visually indistinguishable in the eyeball workflow.
+	//
+	// This method infers a shadow HdSprite by scanning anim files
+	// near the body anim for an only-diffuse layout, then decoding
+	// that file the same way load_sprite() does the body. Cached
+	// per body sc_r_row so repeated calls are cheap. Returns
+	// nullptr when no plausible shadow anim exists.
+	HdSprite* shadow_sprite_for(int body_sc_r_row);
+
 private:
 	struct Impl;
 	std::unique_ptr<Impl> impl_;

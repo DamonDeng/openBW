@@ -118,6 +118,12 @@ void SimHarness::boot(const std::string& data_path,
 		(*loader_ptr)(data, std::move(filename));
 	};
 	ui->init();
+	// Log the resolved tileset so the HD tile loader (if any)
+	// knows which .dds.vr4 to open. Names match ui.h:188 --
+	// 0=badlands, 1=platform, 2=install, 3=AshWorld, 4=Jungle,
+	// 5=Desert, 6=Ice, 7=Twilight.
+	fprintf(stderr, "[sim_harness] tileset_index=%zu\n",
+		ui->game_st.tileset_index);
 	// Spectator: no fog / no visibility filter (see ui.h:1247-1252).
 	ui->viewing_slot = -1;
 	// Mute the sound path. iscript's `playsnd` opcode triggers
@@ -275,7 +281,7 @@ void SimHarness::center_viewport() {
 	};
 }
 
-SimHarness::FramePixels SimHarness::render_frame() {
+SimHarness::FramePixels SimHarness::render_frame(bool draw_sprite) {
 	FramePixels out;
 	if (!ui) return out;
 
@@ -293,11 +299,25 @@ SimHarness::FramePixels SimHarness::render_frame() {
 	auto* idx = ui->indexed_surface.get();
 	uint8_t* data = (uint8_t*)idx->lock();
 	size_t pitch = (size_t)idx->pitch;
-	size_t buf_size = pitch * (size_t)idx->h;
-	// Palette entry 0 = transparent/black-ish on all tilesets.
-	std::memset(data, 0, buf_size);
 
-	if (unit_is_alive_for_render(unit)) {
+	// Ground: let openBW paint the map tiles under our viewport
+	// (draw_tiles walks screen_tile_bounds against st.tiles and
+	// blits per-tile from the tileset's megatile atlas). The
+	// backing map is loaded at boot ('(4)Blood Bath.scm' by
+	// default) and center_viewport() below anchors the viewport
+	// on the spawned unit's world position -- so we get real
+	// terrain rather than a solid-color fill under the sprite.
+	// Pre-fill is unnecessary; draw_tiles covers every screen
+	// pixel because we sized the surface to fit the tile grid.
+	ui->draw_tiles(data, pitch);
+
+	// Only composite the unit sprite when the caller wants it.
+	// The HD canvas paints tiles here then overlays its own
+	// HD-scale unit on top; painting the SD sprite in that path
+	// too produces a double-draw (SD unit at 2x behind the HD
+	// unit at 1x, both offset by kHdScale). See render_frame's
+	// draw_sprite parameter docs.
+	if (draw_sprite && unit_is_alive_for_render(unit)) {
 		ui->draw_sprite(unit->sprite, data, pitch);
 	}
 	idx->unlock();
@@ -346,6 +366,52 @@ bool SimHarness::anim_available(int anim_id) const {
 	return anim_pcs[anim_id] != 0;
 }
 
+int SimHarness::tileset_index() const {
+	if (!ui) return -1;
+	return (int)ui->game_st.tileset_index;
+}
+
+std::vector<SimHarness::TileCell> SimHarness::visible_tiles() const {
+	// Compute the same on-screen tile grid ui.h::draw_tiles walks
+	// so HD paint stays in lockstep with SD. Layout:
+	//   from_tile.x/y = screen_pos.xy / 32  (clamped)
+	//   to_tile.x/y   = (screen_pos.xy + view_wh + 31) / 32  (clamped)
+	// screen pos of each 32x32 megatile:
+	//   sx = tile_x * 32 - screen_pos.x
+	//   sy = tile_y * 32 - screen_pos.y
+	std::vector<TileCell> out;
+	if (!ui || !ui->indexed_surface) return out;
+
+	int view_w = (int)ui->view_width;
+	int view_h = (int)ui->view_height;
+	int spx = ui->screen_pos.x;
+	int spy = ui->screen_pos.y;
+	int mtw = (int)ui->game_st.map_tile_width;
+	int mth = (int)ui->game_st.map_tile_height;
+
+	int from_x = spx / 32;
+	if (from_x < 0 || from_x >= mtw) from_x = 0;
+	int from_y = spy / 32;
+	if (from_y < 0 || from_y >= mth) from_y = 0;
+	int to_x = (spx + view_w + 31) / 32;
+	if (to_x > mtw) to_x = mtw;
+	int to_y = (spy + view_h + 31) / 32;
+	if (to_y > mth) to_y = mth;
+
+	const auto* mega = ui->st.tiles_mega_tile_index.data();
+	out.reserve((size_t)(to_y - from_y) * (to_x - from_x));
+	for (int ty = from_y; ty < to_y; ++ty) {
+		for (int tx = from_x; tx < to_x; ++tx) {
+			TileCell c;
+			c.megatile_index = (int)mega[ty * mtw + tx];
+			c.screen_x = tx * 32 - spx;
+			c.screen_y = ty * 32 - spy;
+			out.push_back(c);
+		}
+	}
+	return out;
+}
+
 int SimHarness::current_image_id() const {
 	// Traverse the same chain openBW's own renderer uses:
 	// unit -> sprite -> main_image -> image_type -> id.
@@ -355,6 +421,47 @@ int SimHarness::current_image_id() const {
 	auto* image = unit->sprite->main_image;
 	if (!image || !image->image_type) return -1;
 	return (int)image->image_type->id;
+}
+
+std::vector<SimHarness::SpriteImage>
+SimHarness::current_sprite_images() const {
+	// Walk sprite->images in reverse (matches ui.h::draw_sprite's
+	// `for (auto* image : reverse(sprite->images))`). Deepest image
+	// first -- shadow first, main body next, muzzle-flash / attack
+	// overlays last. Consumers blit in the returned order so
+	// higher-index entries land on top.
+	std::vector<SpriteImage> out;
+	if (!ui || !unit_is_alive_for_render(unit)) return out;
+	for (const auto& image : bwgame::reverse(unit->sprite->images)) {
+		SpriteImage e;
+		// grp_filename_index is 1-based in openBW (index 0 = "no
+		// GRP"). Convert to 0-based for the mapping-table key; -1
+		// means "no HD candidate at all".
+		int gfi = (int)image.image_type->grp_filename_index;
+		e.grp_filename_index = (gfi == 0) ? -1 : (gfi - 1);
+		e.frame_index = (int)image.frame_index;
+		e.offset_x    = image.offset.x;
+		e.offset_y    = image.offset.y;
+		e.flipped     = (image.flags
+			& bwgame::image_t::flag_horizontally_flipped) != 0;
+		e.hidden      = (image.flags
+			& bwgame::image_t::flag_hidden) != 0;
+		// openBW's ui.h treats modifier==10 as the shadow blend;
+		// tag it here so the HD renderer can dim/tint the image.
+		e.is_shadow   = (image.modifier == 10);
+		// SD grp dimensions -- the sprite bounding box the SD
+		// renderer uses at bwgame.h:13332-13337 for its own
+		// anchor math. HD renderer reads these to derive an
+		// on-screen-size match between SD and HD without a magic
+		// constant. Guarded because image->grp can be null for
+		// virtual/synthetic images.
+		if (image.grp) {
+			e.grp_width  = (int)image.grp->width;
+			e.grp_height = (int)image.grp->height;
+		}
+		out.push_back(e);
+	}
+	return out;
 }
 
 bool SimHarness::current_flipped() const {

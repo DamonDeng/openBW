@@ -125,7 +125,30 @@ struct SimHarness {
 		int height = 0;
 		int pitch = 0;
 	};
-	FramePixels render_frame();
+	// draw_sprite = true (default): tiles + unit sprite composited
+	// into the returned buffer, the way the classic viewer wants
+	// it. draw_sprite = false: only the tile terrain -- callers
+	// use this to build a ground layer under a differently-drawn
+	// unit (e.g. the HD canvas overlays its own scaled-down HD
+	// sprite on the tiles).
+	FramePixels render_frame(bool draw_sprite = true);
+
+	// Which HD2 tileset this map uses (0..7, matching the enum in
+	// ui.h::load_tileset_image_data). -1 if not booted.
+	int tileset_index() const;
+
+	// Description of one on-screen megatile: its megatile_index
+	// (row in tiles_mega_tile_index / index into the HD .dds.vr4
+	// container) plus the widget-relative screen rect (top-left
+	// x,y and 32x32 dimensions in SD's own coordinates). The
+	// caller (HD canvas) scales this to whatever HD dimensions
+	// the tileset ships. Empty when the sim isn't booted yet.
+	struct TileCell {
+		int megatile_index = -1;
+		int screen_x = 0;    // relative to render_frame surface top-left
+		int screen_y = 0;
+	};
+	std::vector<TileCell> visible_tiles() const;
 
 	// Return frame_index / base / offset for the readout. Any of
 	// these being negative means "no unit spawned" or "no image".
@@ -163,6 +186,29 @@ struct SimHarness {
 	// every left-facing direction looks identical to its right-
 	// facing mirror.
 	bool current_flipped() const;
+
+	// One entry per image_t on the current unit's sprite, in draw
+	// order (deepest first -- shadow, then body, then overlays).
+	// Matches ui.h::draw_sprite which iterates reverse(sprite->images)
+	// so the topmost image is rendered last. Consumers (HD renderer)
+	// loop through this and blit each image; images with no HD
+	// mapping fall through to classic SD rendering, which the
+	// underlying tile surface already contains.
+	struct SpriteImage {
+		int  grp_filename_index = -1;  // key into hd_mapping_table
+		int  frame_index = 0;          // atlas frame to draw
+		int  offset_x = 0;             // image_t.offset relative to sprite center
+		int  offset_y = 0;
+		bool flipped = false;
+		bool is_shadow = false;        // modifier == 10 -> shadow blend
+		bool hidden = false;           // flag_hidden set -> skip
+		int  grp_width = 0;            // SD grp bounding-box width, used
+		int  grp_height = 0;           //  by HD renderer to compute the
+		                               //  scale ratio HD_frame_w / SD_grp_w
+		                               //  that makes HD sprites visually
+		                               //  match SD on the same widget.
+	};
+	std::vector<SpriteImage> current_sprite_images() const;
 
 private:
 	bool tried_first_update = false;
