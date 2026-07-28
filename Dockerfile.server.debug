@@ -1,0 +1,59 @@
+# openbw_server debug image -- IDENTICAL to Dockerfile.server EXCEPT:
+#   * CMAKE_BUILD_TYPE=RelWithDebInfo (was Release) so -g is honored
+#     alongside -O2, giving readable line numbers on hot paths.
+#   * NO `strip` at the end of the build stage. Strip removes both
+#     DWARF debug info AND the dynamic symbol table that -rdynamic
+#     produces; without the latter, backtrace_symbols_fd(3) only gets
+#     addresses, not mangled function names. Keeping both makes the
+#     crash trace usable in `kubectl logs` without needing a separate
+#     addr2line pass.
+#
+# The binary is ~5x larger (35 MB vs 6.5 MB) but that's fine for a
+# debug image used to hunt production segfaults.
+#
+# Build:
+#   docker build -f Dockerfile.server.debug -t openbw-server:debug .
+#
+# The runtime stage is a straight copy of Dockerfile.server's -- same
+# base, same user, same data path -- so it's a drop-in replacement in
+# any k8s pod spec.
+
+FROM debian:12-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY CMakeLists.txt ./
+COPY server/       ./server/
+COPY deps/         ./deps/
+COPY *.h           ./
+
+RUN mkdir -p build && cd build \
+    && cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+                -DOPENBW_BUILD_OBSERVER=OFF \
+                -DOPENBW_BUILD_SERVER=ON \
+    && cmake --build . --target openbw_server -j"$(nproc)"
+# Deliberately no `strip`. See top-of-file comment.
+
+FROM debian:12-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libstdc++6 libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r openbw && useradd -r -g openbw -s /usr/sbin/nologin openbw
+
+WORKDIR /opt/openbw
+
+COPY --from=builder --chown=openbw:openbw \
+	/src/build/server/openbw_server /opt/openbw/bin/openbw_server
+COPY --chown=openbw:openbw \
+	original_resources/ /opt/openbw/data/
+
+EXPOSE 6113 6114
+
+USER openbw
+
+ENTRYPOINT ["/opt/openbw/bin/openbw_server", "--data-path", "/opt/openbw/data"]
+CMD ["--help"]

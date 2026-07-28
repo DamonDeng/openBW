@@ -1,0 +1,100 @@
+# openbw_server AddressSanitizer image.
+#
+# Purpose: hunt the "observer close crashes server ~1-2min in" bug
+# that survived the async_release idempotency fix (see
+# sync_server_asio_ws.h). The next crash was inside a deque<observe_request>
+# destructor calling libc_free with a bad pointer -- classic heap
+# corruption or use-after-free. ASan will show the offending
+# allocation + prior free with per-line source info.
+#
+# Cost of this image at runtime:
+#   * Binary ~40 MB (ASan runtime is linked in).
+#   * ~2-3x memory (shadow map) -- may bump us over the 1Gi pod
+#     limit. We do NOT raise the limit here; if OOM kills a pod
+#     first, ASan output goes to stderr up to that point.
+#   * ~1.5-3x CPU. Not a concern for a 1-minute repro.
+#
+# Runtime env:
+#   ASAN_OPTIONS is set on the ENTRYPOINT-wrapper below rather than
+#   in the k8s pod-spec, so simsc-app doesn't need to know about
+#   this image. We halt_on_error=1 so the first bad access dies
+#   immediately with the annotated stack, and abort_on_error=1 so
+#   the exit code matches what our crash_handler chain expects
+#   (i.e. an actual SIGABRT with the shell's 128+6=134 code, plus
+#   ASan's own report already in stderr).
+#
+# Build:
+#   docker build -f Dockerfile.server.asan -t openbw-server:asan .
+
+FROM debian:12-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY CMakeLists.txt ./
+COPY server/       ./server/
+COPY deps/         ./deps/
+COPY *.h           ./
+
+# -O1 keeps compile fast AND gives ASan usable line info. -O0 is
+# too slow to reproduce the timing-sensitive crash within a
+# reasonable game session.
+#
+# -fno-omit-frame-pointer + -g are non-negotiable: ASan reports
+# unwind through function names on both.
+#
+# ASan flags come in via CXXFLAGS + LDFLAGS so CMake picks them up
+# automatically. The linker flag is what pulls in libasan.
+RUN mkdir -p build && cd build \
+    && CXXFLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=address" \
+       LDFLAGS="-fsanitize=address" \
+       cmake .. -DCMAKE_BUILD_TYPE=Debug \
+                -DOPENBW_BUILD_OBSERVER=OFF \
+                -DOPENBW_BUILD_SERVER=ON \
+    && cmake --build . --target openbw_server -j"$(nproc)"
+
+FROM debian:12-slim AS runtime
+
+# libasan6 gives us the ASan runtime library. libstdc++ / libgcc
+# still needed for regular C++ runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libstdc++6 libgcc-s1 libasan8 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r openbw && useradd -r -g openbw -s /usr/sbin/nologin openbw
+
+WORKDIR /opt/openbw
+
+COPY --from=builder --chown=openbw:openbw \
+	/src/build/server/openbw_server /opt/openbw/bin/openbw_server
+COPY --chown=openbw:openbw \
+	original_resources/ /opt/openbw/data/
+
+EXPOSE 6113 6114
+
+USER openbw
+
+# Baked-in ASan runtime knobs:
+#   halt_on_error=1 -- do NOT try to continue after the first
+#                     report; the state is corrupt.
+#   abort_on_error=1 -- terminate via abort() so the OS/K8s see
+#                     an exit status matching a crash. Without
+#                     this, ASan prints and exit(1).
+#   detect_leaks=0 -- we're hunting a runtime bug, not leaks;
+#                     LSan would spam huge reports at each
+#                     process exit and slow things down.
+#   symbolize=1 -- resolve stack addresses to file:line. Needs
+#                  llvm-symbolizer OR the debug info in the binary
+#                  itself. We ship the debug binary so this works.
+#   print_scariness=1 -- ASan adds a "scariness score" to each
+#                        report; helps prioritize when we hit
+#                        multiple issues.
+#
+# ALLOW_USER_SEGV_HANDLER=1 lets our crash_handler still install
+# on top of ASan's; harmless double-print if we ever hit a
+# non-ASan-caught signal.
+ENV ASAN_OPTIONS="halt_on_error=1:abort_on_error=1:detect_leaks=0:symbolize=1:print_scariness=1:allow_user_segv_handler=1"
+
+ENTRYPOINT ["/opt/openbw/bin/openbw_server", "--data-path", "/opt/openbw/data"]
+CMD ["--help"]

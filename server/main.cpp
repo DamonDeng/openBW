@@ -17,6 +17,7 @@
 
 #include "auth.h"
 #include "command_queue.h"
+#include "crash_handler.h"
 #include "observe_request.h"
 #include "observation.h"
 #include "queries.h"
@@ -406,6 +407,11 @@ args_t parse_args(int argc, char** argv) {
 } // anonymous namespace
 
 int main(int argc, char** argv) {
+	// Install crash handler before ANYTHING else so we catch faults
+	// in map loading / sync setup / etc., not just steady-state
+	// tick-loop crashes.
+	crash_handler::install();
+
 	auto args = parse_args(argc, argv);
 
 	fprintf(stderr, "[srv] starting: map=%s data=%s obs-port=%d agent-port=%d seed=%u\n",

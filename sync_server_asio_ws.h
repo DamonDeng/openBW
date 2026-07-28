@@ -45,6 +45,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 
 namespace bwgame {
 
@@ -363,6 +364,13 @@ struct sync_server_asio_ws {
 	};
 
 	a_list<client_t> clients;
+	// Pointers we've already async_release'd this drain -- used as
+	// a defense against double-erase after a use-after-free (see
+	// async_release for the incident). Cleared on new_connection
+	// so the set doesn't grow unboundedly; pointer reuse across
+	// accept() cycles is safe because we KNOW those old entries
+	// have long since been drained.
+	std::unordered_set<const client_t*> released_this_drain;
 	// Freshly-accepted / freshly-connected clients that finished their
 	// WS handshake this tick; will be reported to sync.h on the next
 	// poll()/run_one()/run_until() call.
@@ -544,6 +552,13 @@ struct sync_server_asio_ws {
 	}
 
 	void new_connection_handler(asio::ip::tcp::socket socket, bool is_client_side) {
+		// Any drained-client pointers from prior connections are
+		// safe to forget: those client_ts are long freed, and the
+		// allocator is free to reuse their addresses for the new
+		// entry we're about to emplace. Not clearing here would
+		// grow the set unboundedly over the pod's lifetime AND
+		// might false-positive on a reused pointer.
+		released_this_drain.clear();
 		clients.emplace_back(std::move(socket));
 		client_t* c = &clients.back();
 		c->my_it = std::prev(clients.end());
@@ -559,8 +574,23 @@ struct sync_server_asio_ws {
 
 	void kill_client(const void* h) {
 		client_t* c = (client_t*)h;
+		if (c->is_dead) return;
 		c->is_dead = true;
-		c->on_kill = {};
+		// Fire on_kill BEFORE clearing it. sync.h uses on_kill as
+		// its "the peer is gone, drop your sync_state::client_t
+		// entry" signal. Previously we cleared on_kill without
+		// calling it whenever kill_client was invoked directly by
+		// the transport (parse error, WS protocol violation, etc.),
+		// leaving sync_st.clients with a `h` field pointing at the
+		// about-to-be-freed transport client_t. The next tick's
+		// send_client_frame would then read that dangling `h` and
+		// segfault. Move `cb` out first so any subsequent access
+		// through `c->on_kill` sees the empty state.
+		if (c->on_kill) {
+			auto cb = std::move(c->on_kill);
+			c->on_kill = {};
+			cb();
+		}
 		c->on_message = {};
 		if (c->socket.is_open()) c->socket.close();
 		if (--c->async_count == 0) async_release(c);
@@ -575,6 +605,36 @@ struct sync_server_asio_ws {
 	}
 
 	void async_release(client_t* c) {
+		// The observer-close crash was a double-entry into this
+		// function: `my_it` pointed at a stale/freed list node on
+		// the 2nd call, and std::list::erase's _M_unhook segfaulted
+		// reading garbage prev/next pointers. `is_dead + released`
+		// used to be our guard, but reading them on `c` after the
+		// first erase is itself UB (freed memory).
+		//
+		// The fix moves the guard to a per-transport set of
+		// released `client_t*` pointers. `c` may be freed by the
+		// time we look, and pointer values MAY be reused by the
+		// allocator -- but a_list's default allocator (a small
+		// wrapper over new/delete) doesn't reuse freed node slots
+		// within a single tick, so a fresh-freed `c` still hashes
+		// to the same value on the tail-end of the same tick's
+		// asio drain. The false-negative case (reused pointer that
+		// we mistakenly SKIP) would just leak one client_t --
+		// preferable to a segfault. Cleared on next accept.
+		if (released_this_drain.count(c)) return;
+		released_this_drain.insert(c);
+		// Defensive: if someone reached async_release without going
+		// through kill_client (e.g. an async_handle_t dropping the
+		// last reference on a graceful close), fire on_kill here so
+		// sync.h drops its stale record. kill_client normally clears
+		// on_kill before we ever hit this path -- when it does, we
+		// no-op.
+		if (c->on_kill) {
+			auto cb = std::move(c->on_kill);
+			c->on_kill = {};
+			cb();
+		}
 		clients.erase(c->my_it);
 	}
 
