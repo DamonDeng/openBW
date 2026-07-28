@@ -47,12 +47,15 @@ add_executable(simsc_desktop
     local_user_roster.cpp
     map_catalog.cpp
     local_server_manager.cpp
+    simsc_api_client.cpp
+    remote_games_model.cpp
 
     ui/main_window.cpp
     ui/settings_tab.cpp
     ui/local_games_tab.cpp
     ui/remote_games_tab.cpp
     ui/new_local_game_dialog.cpp
+    ui/new_remote_game_dialog.cpp
     ui/observer_window.cpp
 
     # Reused from simsc_app -- do NOT duplicate. Contains the

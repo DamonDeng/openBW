@@ -5,6 +5,7 @@
 #include "../local_user_roster.h"
 #include "../map_catalog.h"
 #include "../settings.h"
+#include "../simsc_api_client.h"
 #include "local_games_tab.h"
 #include "remote_games_tab.h"
 #include "settings_tab.h"
@@ -35,6 +36,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 	catalog_->loadFromFile(paths_->maps_json_path());
 
 	manager_  = new LocalServerManager(paths_, settings_, roster_, this);
+	api_      = new SimscApiClient(settings_, this);
 
 	// Kill every local server before we drop off the event loop.
 	// aboutToQuit fires after the last widget closes; window
@@ -46,7 +48,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 	tabs_         = new QTabWidget(this);
 	local_tab_    = new LocalGamesTab(
 		paths_, settings_, roster_, catalog_, manager_, tabs_);
-	remote_tab_   = new RemoteGamesTab(tabs_);
+	remote_tab_   = new RemoteGamesTab(
+		paths_, settings_, catalog_, api_, tabs_);
 	settings_tab_ = new SettingsTab(settings_, roster_, tabs_);
 
 	tabs_->addTab(local_tab_,    tr("Local games"));

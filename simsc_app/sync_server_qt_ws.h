@@ -217,6 +217,7 @@ struct sync_server_qt_ws {
 		// Kick the QWebSocket handshake. Returns immediately; the
 		// `connected` / `errorOccurred` signals fire from the Qt
 		// event loop later.
+		std::fprintf(stderr, "[qt_ws] connecting to %s\n", full.c_str());
 		ws->open(QUrl(QString::fromStdString(full)));
 	}
 

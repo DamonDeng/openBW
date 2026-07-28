@@ -27,6 +27,7 @@ class MapCatalog;
 class RemoteGamesTab;
 class SettingsTab;
 class Settings;
+class SimscApiClient;
 
 class MainWindow : public QMainWindow {
 	Q_OBJECT
@@ -43,6 +44,7 @@ private:
 	LocalUserRoster*    roster_   = nullptr;
 	MapCatalog*         catalog_  = nullptr;
 	LocalServerManager* manager_  = nullptr;
+	SimscApiClient*     api_      = nullptr;
 
 	QTabWidget*     tabs_          = nullptr;
 	LocalGamesTab*  local_tab_     = nullptr;

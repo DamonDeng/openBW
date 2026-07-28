@@ -43,24 +43,29 @@ void Settings::set_sc1_data_path(const QString& v) {
 
 QString Settings::simsc_api_key() const {
 	QSettings s;
-	return s.value(kSimscApiKey).toString();
+	// Trim on read: a stray leading/trailing space (easy to paste
+	// from a chat window) becomes `%20` in the WS URL and the
+	// server rejects the key. Fixing it here means the value on
+	// disk stays whatever the user pasted, but consumers always
+	// see the clean form.
+	return s.value(kSimscApiKey).toString().trimmed();
 }
 
 void Settings::set_simsc_api_key(const QString& v) {
 	QSettings s;
-	s.setValue(kSimscApiKey, v);
+	s.setValue(kSimscApiKey, v.trimmed());
 	emit changed();
 }
 
 QString Settings::simsc_base_url() const {
 	QSettings s;
 	return s.value(kSimscBaseUrl,
-		QStringLiteral("https://simsc.agentnumber47.com")).toString();
+		QStringLiteral("https://simsc.agentnumber47.com")).toString().trimmed();
 }
 
 void Settings::set_simsc_base_url(const QString& v) {
 	QSettings s;
-	s.setValue(kSimscBaseUrl, v);
+	s.setValue(kSimscBaseUrl, v.trimmed());
 	emit changed();
 }
 
