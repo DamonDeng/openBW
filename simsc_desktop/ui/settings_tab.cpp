@@ -6,6 +6,7 @@
 #include "../settings.h"
 
 #include <QtCore/QSignalBlocker>
+#include <QtWidgets/QComboBox>
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QFormLayout>
 #include <QtWidgets/QGroupBox>
@@ -20,6 +21,30 @@
 #include <QtWidgets/QVBoxLayout>
 
 namespace simsc_desktop {
+
+namespace {
+
+// Named BW speeds -> ms/frame. Matches the mapping in
+// server/main.cpp; the two must stay in sync. "custom" is a
+// sentinel row that appears at the bottom of the combobox only
+// when the persisted ms value doesn't match a named speed --
+// picking it is a no-op (the combobox falls back to the current
+// value); actual custom values must be set via a preexisting
+// QSettings entry (e.g. `defaults write`).
+struct SpeedOpt { const char* label; int ms; };
+constexpr SpeedOpt kSpeeds[] = {
+	{"turbosuper (10 ms)", 10},
+	{"superfast (20 ms)",  20},
+	{"fastest (42 ms)",    42},
+	{"faster (56 ms)",     56},
+	{"fast (67 ms)",       67},
+	{"normal (83 ms)",     83},
+	{"slow (111 ms)",     111},
+	{"slower (167 ms)",   167},
+	{"slowest (250 ms)",  250},
+};
+
+}   // namespace
 
 SettingsTab::SettingsTab(Settings* settings, LocalUserRoster* roster,
                          QWidget* parent)
@@ -37,6 +62,11 @@ SettingsTab::SettingsTab(Settings* settings, LocalUserRoster* roster,
 	simsc_base_url_edit_         = new QLineEdit(paths_box);
 	default_local_port_spin_     = new QSpinBox(paths_box);
 	default_local_port_spin_->setRange(1024, 65535);
+	default_game_speed_combo_    = new QComboBox(paths_box);
+	for (const auto& opt : kSpeeds) {
+		default_game_speed_combo_->addItem(
+			QString::fromLatin1(opt.label), opt.ms);
+	}
 	server_binary_override_edit_ = new QLineEdit(paths_box);
 
 	auto add_row_with_browse = [&](const QString& label, QLineEdit* edit,
@@ -54,6 +84,7 @@ SettingsTab::SettingsTab(Settings* settings, LocalUserRoster* roster,
 	paths_layout->addRow(tr("simsc API key"),  simsc_api_key_edit_);
 	paths_layout->addRow(tr("simsc base URL"), simsc_base_url_edit_);
 	paths_layout->addRow(tr("Default local port"), default_local_port_spin_);
+	paths_layout->addRow(tr("Default game speed"), default_game_speed_combo_);
 	add_row_with_browse(tr("openbw_server override"),
 	                    server_binary_override_edit_,
 	                    &SettingsTab::onBrowseServerBinaryOverride);
@@ -71,6 +102,14 @@ SettingsTab::SettingsTab(Settings* settings, LocalUserRoster* roster,
 	connect(default_local_port_spin_,
 		QOverload<int>::of(&QSpinBox::valueChanged),
 		this, [this](int v) { settings_->set_default_local_port(v); });
+	connect(default_game_speed_combo_,
+		QOverload<int>::of(&QComboBox::currentIndexChanged),
+		this, [this](int idx) {
+			const auto v = default_game_speed_combo_->itemData(idx);
+			if (v.isValid()) {
+				settings_->set_default_game_speed_ms(v.toInt());
+			}
+		});
 	connect(server_binary_override_edit_, &QLineEdit::editingFinished,
 		this, [this] {
 			settings_->set_server_binary_override(
@@ -127,11 +166,24 @@ void SettingsTab::pushCurrentValuesToUi() {
 	QSignalBlocker b3(simsc_base_url_edit_);
 	QSignalBlocker b4(default_local_port_spin_);
 	QSignalBlocker b5(server_binary_override_edit_);
+	QSignalBlocker b6(default_game_speed_combo_);
 	sc1_data_path_edit_->setText(settings_->sc1_data_path());
 	simsc_api_key_edit_->setText(settings_->simsc_api_key());
 	simsc_base_url_edit_->setText(settings_->simsc_base_url());
 	default_local_port_spin_->setValue(settings_->default_local_port());
 	server_binary_override_edit_->setText(settings_->server_binary_override());
+
+	const int cur_ms = settings_->default_game_speed_ms();
+	int idx = default_game_speed_combo_->findData(cur_ms);
+	if (idx < 0) {
+		// Persisted value doesn't map to any named preset. Append
+		// a synthetic "custom" row so we can still show it, and
+		// select it without clobbering the value.
+		default_game_speed_combo_->addItem(
+			tr("custom (%1 ms)").arg(cur_ms), cur_ms);
+		idx = default_game_speed_combo_->count() - 1;
+	}
+	default_game_speed_combo_->setCurrentIndex(idx);
 }
 
 void SettingsTab::onBrowseSc1DataPath() {

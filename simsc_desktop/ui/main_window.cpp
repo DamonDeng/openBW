@@ -1,11 +1,15 @@
 #include "main_window.h"
 
+#include "../app_paths.h"
+#include "../local_server_manager.h"
 #include "../local_user_roster.h"
+#include "../map_catalog.h"
 #include "../settings.h"
 #include "local_games_tab.h"
 #include "remote_games_tab.h"
 #include "settings_tab.h"
 
+#include <QtCore/QCoreApplication>
 #include <QtWidgets/QTabWidget>
 
 namespace simsc_desktop {
@@ -14,12 +18,34 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 	setWindowTitle(tr("simsc_desktop"));
 	resize(960, 640);
 
+	paths_    = new AppPaths();
 	settings_ = new Settings(this);
 	roster_   = new LocalUserRoster(this);
 	roster_->load();
 
+	// If the user hasn't picked an SC1 data path yet, seed it with
+	// the bundled MPQ dir (if present). Makes the fresh-install
+	// experience one click shorter.
+	if (settings_->sc1_data_path().isEmpty()
+	    && !paths_->bundled_mpq_dir().isEmpty()) {
+		settings_->set_sc1_data_path(paths_->bundled_mpq_dir());
+	}
+
+	catalog_  = new MapCatalog(this);
+	catalog_->loadFromFile(paths_->maps_json_path());
+
+	manager_  = new LocalServerManager(paths_, settings_, roster_, this);
+
+	// Kill every local server before we drop off the event loop.
+	// aboutToQuit fires after the last widget closes; window
+	// closeEvents have already surfaced through the QApplication
+	// event loop by this point.
+	connect(qApp, &QCoreApplication::aboutToQuit,
+		manager_, &LocalServerManager::stopAll);
+
 	tabs_         = new QTabWidget(this);
-	local_tab_    = new LocalGamesTab(tabs_);
+	local_tab_    = new LocalGamesTab(
+		paths_, settings_, roster_, catalog_, manager_, tabs_);
 	remote_tab_   = new RemoteGamesTab(tabs_);
 	settings_tab_ = new SettingsTab(settings_, roster_, tabs_);
 
@@ -28,6 +54,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 	tabs_->addTab(settings_tab_, tr("Settings"));
 
 	setCentralWidget(tabs_);
+}
+
+MainWindow::~MainWindow() {
+	delete paths_;
+	paths_ = nullptr;
 }
 
 void MainWindow::showEvent(QShowEvent* e) {

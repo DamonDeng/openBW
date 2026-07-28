@@ -10,6 +10,7 @@
 
 #include <QtWidgets/QWidget>
 
+class QComboBox;
 class QLineEdit;
 class QSpinBox;
 class QTableView;
@@ -41,6 +42,7 @@ private:
 	QLineEdit*   simsc_api_key_edit_          = nullptr;
 	QLineEdit*   simsc_base_url_edit_         = nullptr;
 	QSpinBox*    default_local_port_spin_     = nullptr;
+	QComboBox*   default_game_speed_combo_    = nullptr;
 	QLineEdit*   server_binary_override_edit_ = nullptr;
 	QTableView*  roster_view_                 = nullptr;
 	QPushButton* remove_user_btn_             = nullptr;

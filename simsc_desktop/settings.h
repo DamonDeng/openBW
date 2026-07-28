@@ -47,6 +47,14 @@ public:
 	int  default_local_port() const;
 	void set_default_local_port(int);
 
+	// Local server --game-speed in ms/frame. Named BW speeds map to
+	// integers per server/main.cpp: fastest=42, faster=56, fast=67,
+	// normal=83, slow=111, slower=167, slowest=250. simsc extensions:
+	// superfast=20, turbosuper=10. Default 10 (matches the
+	// project's "faster testing" preference).
+	int  default_game_speed_ms() const;
+	void set_default_game_speed_ms(int);
+
 	// Optional dev-only override: path to a custom openbw_server
 	// binary. Empty = use the bundled one via AppPaths. Present
 	// when a developer wants to test their own build without

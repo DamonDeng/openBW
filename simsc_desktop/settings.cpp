@@ -22,6 +22,7 @@ const auto kSc1DataPath        = QStringLiteral("sc1_data_path");
 const auto kSimscApiKey        = QStringLiteral("simsc_api_key");
 const auto kSimscBaseUrl       = QStringLiteral("simsc_base_url");
 const auto kDefaultLocalPort   = QStringLiteral("default_local_port");
+const auto kDefaultGameSpeedMs = QStringLiteral("default_game_speed_ms");
 const auto kServerBinOverride  = QStringLiteral("server_binary_override");
 const auto kFirstRunSeen       = QStringLiteral("first_run_seen");
 
@@ -71,6 +72,17 @@ int Settings::default_local_port() const {
 void Settings::set_default_local_port(int v) {
 	QSettings s;
 	s.setValue(kDefaultLocalPort, v);
+	emit changed();
+}
+
+int Settings::default_game_speed_ms() const {
+	QSettings s;
+	return s.value(kDefaultGameSpeedMs, 10).toInt();
+}
+
+void Settings::set_default_game_speed_ms(int v) {
+	QSettings s;
+	s.setValue(kDefaultGameSpeedMs, v);
 	emit changed();
 }
 

@@ -45,14 +45,19 @@ add_executable(simsc_desktop
     settings.cpp
     app_paths.cpp
     local_user_roster.cpp
+    map_catalog.cpp
+    local_server_manager.cpp
 
     ui/main_window.cpp
     ui/settings_tab.cpp
     ui/local_games_tab.cpp
     ui/remote_games_tab.cpp
+    ui/new_local_game_dialog.cpp
+    ui/observer_window.cpp
 
-    # Reused from simsc_app -- do NOT duplicate. Present here so
-    # Phase 1b's ObserverWindow can call directly into it.
+    # Reused from simsc_app -- do NOT duplicate. Contains the
+    # native_window / native_window_drawing implementations that
+    # ObserverWindow drives.
     ../simsc_app/qt_native_window.cpp
 )
 

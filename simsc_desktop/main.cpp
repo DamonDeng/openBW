@@ -4,35 +4,18 @@
 // getters land in the same platform-native config file. Keep them
 // stable -- changing either would move every user's persisted
 // settings out from under them.
+//
+// Note: bwgame.h / ui.h are deliberately NOT included from this
+// file. Those headers define global tables (see korean.h) and
+// must be pulled into exactly ONE translation unit -- which for
+// simsc_desktop is observer_window.cpp. The ui::log_str /
+// fatal_error_str hooks the game code needs at link time live
+// there too.
 
 #include "ui/main_window.h"
 
-#include "../bwgame.h"          // for bwgame::a_string used by ui:: log/fatal
-#include "ui.h"                 // pulls in the ui::log/fatal declarations
-
 #include <QtCore/QCoreApplication>
 #include <QtWidgets/QApplication>
-
-#include <cstdio>
-#include <cstdlib>
-
-// Header-only ui.h declares these two hook symbols and expects the
-// executable to define them. simsc_app's main.cpp does the same;
-// duplicated verbatim rather than shared so the ObserverWindow's
-// log output stays independent of any future simsc_app choices.
-namespace bwgame {
-namespace ui {
-void log_str(bwgame::a_string str) {
-	std::fwrite(str.data(), str.size(), 1, stdout);
-	std::fflush(stdout);
-}
-void fatal_error_str(bwgame::a_string str) {
-	log("fatal error: %s\n", str);
-	std::fflush(stdout);
-	std::abort();
-}
-}   // namespace ui
-}   // namespace bwgame
 
 int main(int argc, char** argv) {
 	QCoreApplication::setOrganizationName(QStringLiteral("openbw"));
