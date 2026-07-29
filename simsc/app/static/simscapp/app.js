@@ -294,18 +294,24 @@
     const gameSpeeds = [
       'slowest', 'slower', 'slow', 'normal',
       'fast', 'faster', 'fastest',
-      'superfast', 'turbosuper',
+      'fastest+', 'fastest++', 'fastest+++', 'fastest++++',
     ];
+    // JS object keys with '+' are legal but need quoting. Use the
+    // full-quoted form throughout so future readers don't have to
+    // remember that `fastest+++` is a valid identifier here only
+    // because it's a string literal.
     const speedLabels = {
-      slowest:    t('create_game.speed_slowest'),
-      slower:     t('create_game.speed_slower'),
-      slow:       t('create_game.speed_slow'),
-      normal:     t('create_game.speed_normal'),
-      fast:       t('create_game.speed_fast'),
-      faster:     t('create_game.speed_faster'),
-      fastest:    t('create_game.speed_fastest'),
-      superfast:  t('create_game.speed_superfast'),
-      turbosuper: t('create_game.speed_turbosuper'),
+      'slowest':      t('create_game.speed_slowest'),
+      'slower':       t('create_game.speed_slower'),
+      'slow':         t('create_game.speed_slow'),
+      'normal':       t('create_game.speed_normal'),
+      'fast':         t('create_game.speed_fast'),
+      'faster':       t('create_game.speed_faster'),
+      'fastest':      t('create_game.speed_fastest'),
+      'fastest+':     t('create_game.speed_fastest_plus'),
+      'fastest++':    t('create_game.speed_fastest_plus_plus'),
+      'fastest+++':   t('create_game.speed_fastest_plus_plus_plus'),
+      'fastest++++':  t('create_game.speed_fastest_plus_plus_plus_plus'),
     };
 
     // Rebuild dropdowns whenever map changes

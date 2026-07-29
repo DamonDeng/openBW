@@ -20,7 +20,8 @@ const QStringList kRaceOptions = {"zerg", "terran", "protoss", "random"};
 // Same closed vocabulary as simsc/app/services/games.py::GAME_SPEEDS.
 // Order is fastest -> slowest so the dropdown reads sensibly.
 const QStringList kSpeedOptions = {
-	"turbosuper", "superfast", "fastest",
+	"fastest++++", "fastest+++", "fastest++", "fastest+",
+	"fastest",
 	"faster", "fast", "normal",
 	"slow", "slower", "slowest",
 };

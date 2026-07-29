@@ -33,15 +33,17 @@ namespace {
 // QSettings entry (e.g. `defaults write`).
 struct SpeedOpt { const char* label; int ms; };
 constexpr SpeedOpt kSpeeds[] = {
-	{"turbosuper (10 ms)", 10},
-	{"superfast (20 ms)",  20},
-	{"fastest (42 ms)",    42},
-	{"faster (56 ms)",     56},
-	{"fast (67 ms)",       67},
-	{"normal (83 ms)",     83},
-	{"slow (111 ms)",     111},
-	{"slower (167 ms)",   167},
-	{"slowest (250 ms)",  250},
+	{"fastest++++ (10 ms)", 10},
+	{"fastest+++ (22 ms)",  22},
+	{"fastest++ (32 ms)",   32},
+	{"fastest+ (38 ms)",    38},
+	{"fastest (42 ms)",     42},
+	{"faster (56 ms)",      56},
+	{"fast (67 ms)",        67},
+	{"normal (83 ms)",      83},
+	{"slow (111 ms)",      111},
+	{"slower (167 ms)",    167},
+	{"slowest (250 ms)",   250},
 };
 
 }   // namespace

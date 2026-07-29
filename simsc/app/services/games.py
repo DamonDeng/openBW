@@ -43,7 +43,7 @@ NONE_SLOT = "None"
 GAME_SPEEDS = (
     "slowest", "slower", "slow", "normal",
     "fast", "faster", "fastest",
-    "superfast", "turbosuper",
+    "fastest+", "fastest++", "fastest+++", "fastest++++",
 )
 DEFAULT_GAME_SPEED = "fastest"
 

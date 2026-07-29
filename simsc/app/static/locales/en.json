@@ -72,8 +72,10 @@
     "speed_fast": "Fast (56 ms)",
     "speed_faster": "Faster (48 ms)",
     "speed_fastest": "Fastest (42 ms, default)",
-    "speed_superfast": "Superfast (20 ms)",
-    "speed_turbosuper": "Turbo Super (10 ms, testing)",
+    "speed_fastest_plus": "Fastest+ (38 ms)",
+    "speed_fastest_plus_plus": "Fastest++ (32 ms)",
+    "speed_fastest_plus_plus_plus": "Fastest+++ (22 ms)",
+    "speed_fastest_plus_plus_plus_plus": "Fastest++++ (10 ms)",
     "cancel_button": "Cancel",
     "create_button": "Create",
     "creating": "Creating…"

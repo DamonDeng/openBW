@@ -375,6 +375,15 @@ void RemoteGamesTab::onGameCreated(const RemoteGame&) {
 }
 
 void RemoteGamesTab::onError(const QString& op, int status, const QString& msg) {
+	// Reset the pending-users flag if the failure was on the
+	// roster fetch itself. Otherwise the tab gets stuck: New Game
+	// waits forever on user_cache_ that will never populate, and
+	// clicking the button becomes a silent no-op.
+	if (op == QStringLiteral("list_users")) {
+		users_pending_ = false;
+		open_dialog_when_users_ready_ = false;
+	}
+
 	// Non-blocking for list_games so a transient network failure
 	// during a background poll doesn't spam a modal. All other
 	// ops are user-initiated -> surface immediately.

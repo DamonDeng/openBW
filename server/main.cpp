@@ -114,9 +114,10 @@ struct args_t {
 	// ms/frame. Retail BW ships seven speeds: slowest=167, slower=111,
 	// slow=83, normal=67, fast=56, faster=48, fastest=42. Campaign
 	// defaults to fast; multiplayer defaults to fastest. We pick fastest
-	// as our default so agent iteration is snappy. We also ship two
-	// non-BW extensions used for automated testing: superfast=20 and
-	// turbosuper=10 (see docs — simsc soaks run at 10 by convention).
+	// as our default so agent iteration is snappy. Four non-BW
+	// extensions extend the fastest range for agent development /
+	// automated testing: fastest+ (38), fastest++ (32), fastest+++
+	// (22), fastest++++ (10).
 	int tick_ms = 42;
 
 	// How many server ticks to bundle into one id_frame_batch WS
@@ -152,9 +153,13 @@ inline int speed_name_to_ms(const std::string& name) {
 	if (name == "fast")      return 56;
 	if (name == "faster")    return 48;
 	if (name == "fastest")   return 42;
-	// simsc extensions beyond BW's canonical seven, for testing:
-	if (name == "superfast") return 20;
-	if (name == "turbosuper")return 10;
+	// simsc extensions beyond BW's canonical seven. These sit
+	// ABOVE fastest so a bot developer can iterate at higher tick
+	// rates without leaving the fastest/fastest-family vocabulary.
+	if (name == "fastest+")    return 38;
+	if (name == "fastest++")   return 32;
+	if (name == "fastest+++")  return 22;
+	if (name == "fastest++++") return 10;
 	return -1;
 }
 
@@ -278,8 +283,9 @@ args_t parse_args(int argc, char** argv) {
 					fprintf(stderr,
 						"error: --game-speed must be one of "
 						"slowest/slower/slow/normal/fast/faster/fastest/"
-						"superfast/turbosuper, or an integer number of "
-						"ms/frame (1-1000). got %s\n", v.c_str());
+						"fastest+/fastest++/fastest+++/fastest++++, or an "
+						"integer number of ms/frame (1-1000). got %s\n",
+						v.c_str());
 					std::exit(1);
 				}
 				a.tick_ms = as_int;
@@ -352,8 +358,12 @@ args_t parse_args(int argc, char** argv) {
 				"                     name: slowest, slower, slow, normal,\n"
 				"                     fast, faster, fastest (default:\n"
 				"                     fastest = 42 ms/frame ~ 24 FPS).\n"
-				"                     simsc extensions: superfast (20 ms)\n"
-				"                     and turbosuper (10 ms) for testing.\n"
+				"                     simsc extensions above fastest, for\n"
+				"                     agent iteration + soaks:\n"
+				"                       fastest+    = 38 ms\n"
+				"                       fastest++   = 32 ms\n"
+				"                       fastest+++  = 22 ms\n"
+				"                       fastest++++ = 10 ms\n"
 				"                     Retail BW campaign uses 'fast' (56).\n"
 				"  --batch-size N     Bundle N server ticks into one\n"
 				"                     id_frame_batch message for observer\n"

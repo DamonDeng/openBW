@@ -49,9 +49,10 @@ public:
 
 	// Local server --game-speed in ms/frame. Named BW speeds map to
 	// integers per server/main.cpp: fastest=42, faster=56, fast=67,
-	// normal=83, slow=111, slower=167, slowest=250. simsc extensions:
-	// superfast=20, turbosuper=10. Default 10 (matches the
-	// project's "faster testing" preference).
+	// normal=83, slow=111, slower=167, slowest=250. simsc extensions
+	// above fastest: fastest+=38, fastest++=32, fastest+++=22,
+	// fastest++++=10. Default 10 (matches the project's "faster
+	// testing" preference).
 	int  default_game_speed_ms() const;
 	void set_default_game_speed_ms(int);
 
