@@ -37,8 +37,13 @@ namespace sprite_viewer {
 struct HdFrame {
 	uint16_t atlas_x = 0;
 	uint16_t atlas_y = 0;
-	uint16_t offset_x = 0;
-	uint16_t offset_y = 0;
+	// offset_x/offset_y are SIGNED int16 in Blizzard's anim format.
+	// Overlay anims (SCV flame, Firebat spray, ...) routinely author
+	// negative offsets to anchor above/left of the atlas rect. Reading
+	// as uint16 turned -13 into 65523 and drew flames ~30000 widget
+	// pixels off-screen. See rd16le() in the parser.
+	int16_t offset_x = 0;
+	int16_t offset_y = 0;
 	uint16_t w = 0;
 	uint16_t h = 0;
 	uint32_t flags = 0;

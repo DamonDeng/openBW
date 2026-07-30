@@ -126,8 +126,11 @@ static bool parse_anim(const std::vector<u8>& bytes, ParsedAnim& out,
 		const u8* p = ft + i * 16;
 		f.atlas_x  = rd16le(p + 0);
 		f.atlas_y  = rd16le(p + 2);
-		f.offset_x = rd16le(p + 4);
-		f.offset_y = rd16le(p + 6);
+		// offset_{x,y} are signed int16 on disk. Reinterpret the
+		// unsigned parse via a static_cast so the bit pattern
+		// (e.g. 0xFFF3) survives as -13 rather than 65523.
+		f.offset_x = (int16_t)rd16le(p + 4);
+		f.offset_y = (int16_t)rd16le(p + 6);
 		f.w        = rd16le(p + 8);
 		f.h        = rd16le(p + 10);
 		f.flags    = rd32le(p + 12);

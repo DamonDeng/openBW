@@ -152,22 +152,50 @@ protected:
 				return false;
 			}
 		} else {
+			// Body path first: images.rel-mapped grp_filename_index.
+			// Covers the ~230 canonical unit body sprites the
+			// mapping table validates. Cached by gfi so a whole
+			// swarm of the same unit type shares one decoded atlas.
 			int sc_r = loader->sc_r_row_for_bw_id(
 				img.grp_filename_index);
-			if (sc_r < 0) return false;
-
-			// Cache HD sprites per (grp_filename_index) so
-			// subsequent frames of the same anim reuse the
-			// decoded atlas.
-			auto& cache = owner->hd_image_cache;
-			auto it = cache.find(img.grp_filename_index);
-			if (it == cache.end()) {
-				auto sp = loader->load_sprite(sc_r);
-				if (!sp) return false;
-				it = cache.emplace(img.grp_filename_index,
-					std::move(sp)).first;
+			if (sc_r >= 0) {
+				auto& cache = owner->hd_image_cache;
+				auto it = cache.find(img.grp_filename_index);
+				if (it == cache.end()) {
+					auto sp = loader->load_sprite(sc_r);
+					if (!sp) return false;
+					it = cache.emplace(img.grp_filename_index,
+						std::move(sp)).first;
+				}
+				hd = it->second.get();
+			} else if (img.image_id >= 0) {
+				// Overlay fallback: iscript spawns image_ts for
+				// engine flames (SCV, Vulture), firebat spray,
+				// siege blast, casting glow, etc. Their gfi lives
+				// outside our mapping table because they aren't
+				// unit bodies, but their image_id (from openBW's
+				// image.dat) corresponds directly to an anim file
+				// on disk -- SCV flame image_id=249 lives in
+				// anim\main_249.anim, even though images.rel[249]
+				// is marked SD-only. Open it directly.
+				// Cached by image_id (parallel to the body cache
+				// keyed by gfi) so we don't re-decode per frame.
+				auto& cache = owner->hd_image_by_image_id_cache;
+				auto it = cache.find(img.image_id);
+				if (it == cache.end()) {
+					auto sp = loader->load_sprite_layer_by_anim(
+						(uint32_t)img.image_id, "diffuse");
+					// Cache both hits and misses -- a miss means
+					// "no anim file for this image_id"; there's
+					// no point retrying every frame.
+					it = cache.emplace(img.image_id,
+						std::move(sp)).first;
+				}
+				hd = it->second.get();
+				if (!hd) return false;   // remembered null
+			} else {
+				return false;
 			}
-			hd = it->second.get();
 		}
 		if (!hd || hd->frames.empty()) return false;
 
@@ -373,30 +401,6 @@ protected:
 		// One-shot per-unit dump: emit the sprite's image list the
 		// first time we see each distinct (image_id) tuple so we can
 		// tell whether the sim is emitting a shadow entry at all.
-		{
-			static int last_first_iid = -0x7fffffff;
-			int first_iid = images.empty() ? -1 : images.front().image_id;
-			if (first_iid != last_first_iid) {
-				last_first_iid = first_iid;
-				int shadow_count = 0;
-				for (const auto& im : images) {
-					if (im.is_shadow) ++shadow_count;
-				}
-				std::fprintf(stderr,
-					"[hd-dbg] sprite image list changed: n=%zu "
-					"shadow_entries=%d\n",
-					images.size(), shadow_count);
-				for (const auto& im : images) {
-					std::fprintf(stderr,
-						"    image_id=%d gfi=%d frame=%d shadow=%d "
-						"hidden=%d off=(%d,%d) flip=%d\n",
-						im.image_id, im.grp_filename_index,
-						im.frame_index, (int)im.is_shadow,
-						(int)im.hidden, im.offset_x, im.offset_y,
-						(int)im.flipped);
-				}
-			}
-		}
 		for (const auto& img : images) paint_hd_image(p, img);
 		return true;
 	}
