@@ -19,9 +19,13 @@
 
 #include "CascLib.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -30,10 +34,20 @@ int main(int argc, char** argv) {
 	// --image-ids id1,id2,...              [optional] dump those rows
 	// --histogram                          [optional] flag distribution
 	// --anim-range LO,HI                   [optional] enumerate main_LO..main_HI
+	// --enumerate [PREFIX]                 [optional] list every file in CASC
+	//                                      (filtered to PREFIX if given)
+	// --enum-summary                       [optional] enumerate + bucket by
+	//                                      extension + top-level directory
+	// --enum-exts EXT1,EXT2,...            [optional] with --enumerate: only
+	//                                      list files whose extension matches
 	const char* root = nullptr;
 	const char* image_ids_arg = nullptr;
 	const char* anim_range_arg = nullptr;
+	const char* enum_prefix = nullptr;
+	const char* enum_exts_arg = nullptr;
 	bool histogram = false;
+	bool enumerate = false;
+	bool enum_summary = false;
 	for (int i = 1; i < argc; ++i) {
 		if (std::strcmp(argv[i], "--sc-remastered-path") == 0 && i + 1 < argc) {
 			root = argv[++i];
@@ -43,6 +57,16 @@ int main(int argc, char** argv) {
 			anim_range_arg = argv[++i];
 		} else if (std::strcmp(argv[i], "--histogram") == 0) {
 			histogram = true;
+		} else if (std::strcmp(argv[i], "--enumerate") == 0) {
+			enumerate = true;
+			// Optional prefix follows; consume if it doesn't start with --.
+			if (i + 1 < argc && argv[i + 1][0] != '-') {
+				enum_prefix = argv[++i];
+			}
+		} else if (std::strcmp(argv[i], "--enum-summary") == 0) {
+			enum_summary = true;
+		} else if (std::strcmp(argv[i], "--enum-exts") == 0 && i + 1 < argc) {
+			enum_exts_arg = argv[++i];
 		}
 	}
 	if (!root) {
@@ -305,6 +329,123 @@ int main(int argc, char** argv) {
 				std::printf("  anim=%d  size=%-8u  fc=%-4u  L=%u  "
 					"sprite=%ux%u  L1='%s'\n",
 					n, (unsigned)sz, fc, layers, sw, sh, l1);
+			}
+		}
+	}
+
+	// Walk the whole storage. Two output modes:
+	//   * --enumerate [PREFIX]  -> list every matching file's path+size
+	//   * --enum-summary        -> per-extension + per-top-dir counters
+	//                              (much less noisy than raw enumeration;
+	//                              use this first, then --enumerate to
+	//                              drill in on interesting buckets)
+	if (enumerate || enum_summary) {
+		// Parse extension filter (comma-separated). Empty = keep all.
+		std::set<std::string> ext_filter;
+		if (enum_exts_arg) {
+			std::string s(enum_exts_arg);
+			size_t p = 0;
+			while (p < s.size()) {
+				size_t c = s.find(',', p);
+				if (c == std::string::npos) c = s.size();
+				std::string e = s.substr(p, c - p);
+				// Normalize: lowercase, prepend '.' if user omitted it.
+				for (auto& ch : e) ch = (char)std::tolower(ch);
+				if (!e.empty() && e[0] != '.') e = "." + e;
+				ext_filter.insert(e);
+				p = c + 1;
+			}
+		}
+
+		// CascFindFirstFile mask "*" enumerates everything the storage
+		// exposes by name. Files with unknown names still show up via
+		// their ContentKey/DataId hash but are useless for our search.
+		CASC_FIND_DATA fd;
+		HANDLE hFind = CascFindFirstFile(hStorage, "*", &fd, NULL);
+		if (hFind == NULL || hFind == (HANDLE)-1) {
+			std::fprintf(stderr, "CascFindFirstFile failed err=%u\n",
+				GetCascError());
+			goto done_probe;
+		}
+		size_t total = 0, matched = 0;
+		std::map<std::string, size_t> ext_counts;
+		std::map<std::string, size_t> topdir_counts;
+		do {
+			++total;
+			// Skip name-less entries (nameType==0 usually means the
+			// entry is only reachable by hash, not path).
+			if (fd.szFileName[0] == 0) continue;
+
+			std::string path = fd.szFileName;
+			// Normalize backslashes to forward slashes for bucketing
+			// (CASC returns Windows paths).
+			std::string norm = path;
+			for (auto& ch : norm) if (ch == '\\') ch = '/';
+			// lowercase for filter comparisons.
+			std::string lower = norm;
+			for (auto& ch : lower) ch = (char)std::tolower(ch);
+
+			// Optional path prefix filter.
+			if (enum_prefix) {
+				std::string pfx = enum_prefix;
+				for (auto& ch : pfx) ch = (char)std::tolower(ch);
+				if (lower.rfind(pfx, 0) != 0) continue;
+			}
+
+			// Extract extension + top-level directory for bucketing.
+			std::string ext;
+			auto dot = lower.rfind('.');
+			auto slash = lower.rfind('/');
+			if (dot != std::string::npos
+			    && (slash == std::string::npos || dot > slash)) {
+				ext = lower.substr(dot);
+			} else {
+				ext = "(no-ext)";
+			}
+			std::string topdir;
+			auto first_slash = lower.find('/');
+			if (first_slash != std::string::npos) {
+				topdir = lower.substr(0, first_slash);
+			} else {
+				topdir = "(root)";
+			}
+
+			// Optional extension filter.
+			if (!ext_filter.empty()
+			    && ext_filter.find(ext) == ext_filter.end()) continue;
+
+			++matched;
+			++ext_counts[ext];
+			++topdir_counts[topdir];
+
+			if (enumerate) {
+				std::printf("  %10llu  %s\n",
+					(unsigned long long)fd.FileSize,
+					path.c_str());
+			}
+		} while (CascFindNextFile(hFind, &fd));
+		CascFindClose(hFind);
+
+		std::printf("\nenumerated: %zu total, %zu matched\n",
+			total, matched);
+
+		if (enum_summary) {
+			std::printf("\nby extension (top 40):\n");
+			// Copy into vector to sort desc by count.
+			std::vector<std::pair<std::string, size_t>> ex(
+				ext_counts.begin(), ext_counts.end());
+			std::sort(ex.begin(), ex.end(),
+				[](const auto& a, const auto& b) {
+					return a.second > b.second;
+				});
+			for (size_t i = 0; i < ex.size() && i < 40; ++i) {
+				std::printf("  %-16s  %zu\n",
+					ex[i].first.c_str(), ex[i].second);
+			}
+			std::printf("\nby top-dir:\n");
+			for (const auto& kv : topdir_counts) {
+				std::printf("  %-16s  %zu\n",
+					kv.first.c_str(), kv.second);
 			}
 		}
 	}

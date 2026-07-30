@@ -118,6 +118,26 @@ public:
 	// several MB of RAM per unit.
 	std::unique_ptr<HdSprite> load_sprite(int sc_image_id);
 
+	// SC:R-native lookup: open `anim\main_<image_id>.anim` directly.
+	// Skips images.rel entirely -- iscript already knows the correct
+	// image_id, and every image_id we've observed (bodies, shadows,
+	// overlays like SCV engine flame image_id=249) has a matching
+	// main_<id>.anim on disk regardless of what images.rel says
+	// about the row's flag / anim_num.
+	//
+	// Behavior:
+	//   * Anim missing on disk -> nullptr + last_error().
+	//   * Anim has a teamcolor layer -> multi-layer composite in
+	//     .composited (diffuse * player-tint) plus raw .diffuse.
+	//   * Anim has only a diffuse layer (shadow or overlay) ->
+	//     .diffuse populated, .composited left null. Callers that
+	//     want a shadow blend read .diffuse's alpha channel.
+	//
+	// One call replaces the old load_sprite(sc_row) + shadow_sprite_for
+	// + load_sprite_layer_by_anim(image_id,"diffuse") triad -- they
+	// were all resolving to the same file via longer routes.
+	std::unique_ptr<HdSprite> load_by_image_id(int image_id);
+
 	// Loader debug helper: load the anim for `sc_image_id` and
 	// decode a SPECIFIC layer by name (e.g. "diffuse", "ao_depth",
 	// "bright"). Fills the diffuse field of the returned HdSprite

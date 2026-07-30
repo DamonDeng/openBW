@@ -91,112 +91,43 @@ protected:
 	// comes from iscript state via SimHarness (image->frame_index).
 	// Returns true iff HD rendering was attempted (so classic can
 	// be skipped this tick).
-	// Draw one HD image (shadow, body, overlay, ...) at the widget
+	// Draw one HD image (body, shadow, or overlay) at the widget
 	// center. Returns false iff no HD sprite is available for the
-	// given grp_filename_index (caller falls back to whatever the
-	// SD tile background already contains).
+	// given image_id (caller draws nothing; the SD tile background
+	// stays visible).
+	//
+	// SC:R storage rule (empirical, verified across Marine, SCV,
+	// Firebat, and their overlays via casc_probe): every image_id
+	// iscript emits has its render at anim\main_<image_id>.anim on
+	// disk. Bodies are multi-layer (diffuse + teamcolor + normal +
+	// specular + ao_depth + emissive + bright); shadows and iscript
+	// overlays are diffuse-only. That's the whole rule -- one
+	// lookup, no mapping table, no neighborhood probe.
+	//
+	// We ignore img.grp_filename_index entirely: it's SD authoring
+	// (image.dat's grp field) and SC:R indexes everything by image_id
+	// instead. Keeping .grp_filename_index in the SpriteImage struct
+	// only for the SD paint path.
 	bool paint_hd_image(QPainter& p,
 	                    const SimHarness::SpriteImage& img)
 	{
-		if (img.hidden || img.grp_filename_index < 0) return false;
+		if (img.hidden || img.image_id < 0) return false;
 		HdAssetLoader* loader = owner ? owner->hd_loader.get() : nullptr;
 		if (!loader) return false;
 
-		HdSprite* hd = nullptr;
-
-		// Shadows: images.rel does contain rows for shadow image_ids
-		// (SCV shadow is image_id=248), but those rows are marked
-		// SD-only (flag=0x1, anim_num=0xffffffff) -- SC:R keeps the
-		// actual HD shadow anim as an orphan main_NNN.anim file with
-		// no images.rel entry. Direct image_id -> anim_num lookup
-		// therefore returns nothing.
-		//
-		// Retail pattern (verified via casc_probe --anim-range on
-		// Marine, SCV, Tank, Vulture, Academy): the shadow lives at
-		// body_anim_num + 1 (usually), with only the diffuse layer
-		// populated, and with the same sprite bounding box as the
-		// body. Neighborhood-probe it via shadow_sprite_for(), seeded
-		// with the body's sc_r_row.
-		if (img.is_shadow) {
-			// Find the body image (is_shadow=false) on this sprite
-			// so we know which HD anim to seed the neighborhood
-			// search from. draw_sprite iterates shadow first, so the
-			// body is later in the list.
-			if (!sim) return false;
-			auto sibs = sim->current_sprite_images();
-			int body_bw_id = -1;
-			for (const auto& s : sibs) {
-				if (!s.is_shadow && !s.hidden
-				    && s.grp_filename_index >= 0) {
-					body_bw_id = s.grp_filename_index;
-					break;
-				}
-			}
-			if (body_bw_id < 0) {
-				std::fprintf(stderr,
-					"[hd-dbg] shadow: no body sibling on sprite\n");
-				return false;
-			}
-			int body_sc_r = loader->sc_r_row_for_bw_id(body_bw_id);
-			if (body_sc_r < 0) {
-				std::fprintf(stderr,
-					"[hd-dbg] shadow: body bw_id=%d has no sc_r_row\n",
-					body_bw_id);
-				return false;
-			}
-			hd = loader->shadow_sprite_for(body_sc_r);
-			if (!hd) {
-				std::fprintf(stderr,
-					"[hd-dbg] shadow: shadow_sprite_for(body_sc_r=%d) "
-					"returned null\n", body_sc_r);
-				return false;
-			}
-		} else {
-			// Body path first: images.rel-mapped grp_filename_index.
-			// Covers the ~230 canonical unit body sprites the
-			// mapping table validates. Cached by gfi so a whole
-			// swarm of the same unit type shares one decoded atlas.
-			int sc_r = loader->sc_r_row_for_bw_id(
-				img.grp_filename_index);
-			if (sc_r >= 0) {
-				auto& cache = owner->hd_image_cache;
-				auto it = cache.find(img.grp_filename_index);
-				if (it == cache.end()) {
-					auto sp = loader->load_sprite(sc_r);
-					if (!sp) return false;
-					it = cache.emplace(img.grp_filename_index,
-						std::move(sp)).first;
-				}
-				hd = it->second.get();
-			} else if (img.image_id >= 0) {
-				// Overlay fallback: iscript spawns image_ts for
-				// engine flames (SCV, Vulture), firebat spray,
-				// siege blast, casting glow, etc. Their gfi lives
-				// outside our mapping table because they aren't
-				// unit bodies, but their image_id (from openBW's
-				// image.dat) corresponds directly to an anim file
-				// on disk -- SCV flame image_id=249 lives in
-				// anim\main_249.anim, even though images.rel[249]
-				// is marked SD-only. Open it directly.
-				// Cached by image_id (parallel to the body cache
-				// keyed by gfi) so we don't re-decode per frame.
-				auto& cache = owner->hd_image_by_image_id_cache;
-				auto it = cache.find(img.image_id);
-				if (it == cache.end()) {
-					auto sp = loader->load_sprite_layer_by_anim(
-						(uint32_t)img.image_id, "diffuse");
-					// Cache both hits and misses -- a miss means
-					// "no anim file for this image_id"; there's
-					// no point retrying every frame.
-					it = cache.emplace(img.image_id,
-						std::move(sp)).first;
-				}
-				hd = it->second.get();
-				if (!hd) return false;   // remembered null
-			} else {
-				return false;
-			}
+		// Cache decoded sprites by image_id. Both bodies and
+		// overlays live here -- the composited/diffuse choice
+		// happens automatically inside load_by_image_id.
+		auto& cache = owner->hd_image_by_image_id_cache;
+		auto it = cache.find(img.image_id);
+		if (it == cache.end()) {
+			auto sp = loader->load_by_image_id(img.image_id);
+			// Cache both hits and misses. A miss means "no HD anim
+			// on disk for this image_id" (rare -- Carbot-only or
+			// truly-SD-only ids); no point retrying every frame.
+			it = cache.emplace(img.image_id, std::move(sp)).first;
 		}
+		HdSprite* hd = it->second.get();
 		if (!hd || hd->frames.empty()) return false;
 
 		int f = img.frame_index;
@@ -240,29 +171,32 @@ protected:
 		double s = hd_vp_scale_ / 4.0;
 
 		// Two offsets contribute to placement:
-		//   * fr.offset_{x,y}: per-frame atlas anchor. Positions the
-		//     frame within the sprite's own bounding box.
-		//   * img.offset_{x,y}: image_t draw offset. openBW's
-		//     sprite_t owns a list of image_t entries (body,
-		//     shadow, overlays); each image_t carries its own
-		//     x/y offset from the sprite center in *SD* pixels
-		//     (image.dat "Draw start" field). Shadows typically
-		//     have offset_y>0 to sit below the body. Without
-		//     applying this, the shadow lands on top of the body
-		//     instead of under it.
+		//   * fr.offset_{x,y}: per-frame atlas anchor. Its X sign
+		//     flips when img.flipped is set (SD art is a mirror of
+		//     an authored facing; the anchor moves to the other side
+		//     of the bounding box). Matches bwgame.h:13331-13335
+		//     get_image_map_position.
+		//   * img.offset_{x,y}: image_t draw offset. This is authored
+		//     PLACEMENT for the image_t on its sprite -- shadows sit
+		//     below the body, turrets sit ~5px in front of the tank
+		//     base, etc. The sim already handles mirroring for us:
+		//     when the base sprite flips, get_image_lo_offset()
+		//     negates the .x it hands the turret, so img.offset_x is
+		//     already pre-flipped by the time we see it (bwgame.h
+		//     line 13349). Adding it unchanged matches SD's
+		//     get_image_map_position which does the same on line
+		//     13329 (`sprite->position + image->offset`).
 		//
 		// image_t offsets are authored in SD pixels; HD sprite pixels
-		// are 4x SD (the same ratio that s = vp_scale/4 accounts for
-		// for atlas geometry). Multiply img.offset by 4 first so its
-		// units match hd->sprite_w / fr.offset. Then multiply the
-		// combined offset by s to convert to widget pixels.
+		// are 4x SD. Multiply img.offset by 4 so its units match
+		// hd->sprite_w / fr.offset, then apply s to reach widget px.
 		int img_off_x_hd = (int)img.offset_x * 4;
 		int img_off_y_hd = (int)img.offset_y * 4;
 		double dx, dy;
 		if (img.flipped) {
 			dx = cx + s * ((int)hd->sprite_w / 2
 			        - ((int)fr.offset_x + (int)fr.w)
-			        - img_off_x_hd);
+			        + img_off_x_hd);
 		} else {
 			dx = cx + s * ((int)fr.offset_x
 			        - (int)hd->sprite_w / 2

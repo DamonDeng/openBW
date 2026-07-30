@@ -903,7 +903,136 @@ HdAssetLoader::load_sprite_layer_by_anim(uint32_t anim_num,
 	return sprite_from_parsed_layer(bytes, pa, layer_name, err_);
 }
 
+// Layer decode + optional teamcolor composite. Shared by both the
+// legacy sc_image_id -> images.rel -> anim_num path and the newer
+// SC:R-native image_id -> anim_num path. Returns an owning HdSprite
+// on success; sets err_ and returns nullptr on failure.
+static std::unique_ptr<HdSprite> decode_anim_bytes(
+    const std::vector<u8>& anim_bytes,
+    const char* trace_name,          // for err_ messages only
+    QString& err_out)
+{
+	ParsedAnim pa;
+	std::string perr;
+	if (!parse_anim(anim_bytes, pa, perr)) {
+		err_out = QString::fromStdString("parse " + std::string(trace_name)
+			+ ": " + perr);
+		return nullptr;
+	}
+
+	// Find the diffuse layer.
+	const LayerInfo* diff = nullptr;
+	for (const auto& li : pa.layers) {
+		if (li.name == "diffuse") { diff = &li; break; }
+	}
+	if (!diff || diff->data_offset == 0) {
+		err_out = "diffuse layer absent";
+		return nullptr;
+	}
+	if (diff->data_offset + diff->data_size > anim_bytes.size()) {
+		err_out = "diffuse layer range OOB";
+		return nullptr;
+	}
+
+	QImage atlas = decode_dxt5_dds(
+		anim_bytes.data() + diff->data_offset,
+		diff->data_size,
+		diff->atlas_w, diff->atlas_h, perr);
+	if (atlas.isNull()) {
+		err_out = QString::fromStdString("DXT5 decode: " + perr);
+		return nullptr;
+	}
+
+	// Teamcolor composite -- only if the layer exists AND has data.
+	// Shadow/overlay anims are diffuse-only and skip this branch;
+	// their HdSprite.composited stays null and callers fall back to
+	// .diffuse (which is what the shadow blend + overlay paint want).
+	static constexpr uint8_t PLAYER_RED[3]   = { 224,   0,   0 };
+	static constexpr uint8_t PLAYER_COLOR[3] = { PLAYER_RED[0],
+	                                             PLAYER_RED[1],
+	                                             PLAYER_RED[2] };
+	QImage composited;
+	const LayerInfo* tc = nullptr;
+	for (const auto& li : pa.layers) {
+		if (li.name == "teamcolor") { tc = &li; break; }
+	}
+	if (tc && tc->data_offset != 0
+	    && tc->data_offset + tc->data_size <= anim_bytes.size())
+	{
+		composited = atlas;   // copy diffuse
+		QImage tc_atlas = decode_bc1_dds(
+			anim_bytes.data() + tc->data_offset,
+			tc->data_size,
+			tc->atlas_w, tc->atlas_h, perr);
+		if (!tc_atlas.isNull()
+		    && tc_atlas.width() == composited.width()
+		    && tc_atlas.height() == composited.height())
+		{
+			int H = composited.height();
+			int W = composited.width();
+			for (int y = 0; y < H; ++y) {
+				uint8_t* dst = composited.scanLine(y);
+				const uint8_t* mask = tc_atlas.scanLine(y);
+				for (int x = 0; x < W; ++x) {
+					int g = mask[x * 4];
+					if (g == 0) continue;
+					uint8_t* p = dst + x * 4;
+					int fr = 255 + (g * ((int)PLAYER_COLOR[0] - 255)) / 255;
+					int fg = 255 + (g * ((int)PLAYER_COLOR[1] - 255)) / 255;
+					int fb = 255 + (g * ((int)PLAYER_COLOR[2] - 255)) / 255;
+					int r  = (p[0] * fr) / 255;
+					int gg = (p[1] * fg) / 255;
+					int b  = (p[2] * fb) / 255;
+					p[0] = (uint8_t)(r  > 255 ? 255 : r);
+					p[1] = (uint8_t)(gg > 255 ? 255 : gg);
+					p[2] = (uint8_t)(b  > 255 ? 255 : b);
+				}
+			}
+		}
+	}
+
+	auto sp = std::make_unique<HdSprite>();
+	sp->diffuse    = std::move(atlas);
+	sp->composited = std::move(composited);
+	sp->sprite_w   = pa.sprite_w;
+	sp->sprite_h   = pa.sprite_h;
+	sp->frames     = std::move(pa.frames);
+	return sp;
+}
+
+std::unique_ptr<HdSprite>
+HdAssetLoader::load_by_image_id(int image_id) {
+	if (!is_open()) {
+		err_ = "loader not open";
+		return nullptr;
+	}
+	if (image_id < 0) {
+		err_ = "image_id negative";
+		return nullptr;
+	}
+	char name[64];
+	snprintf(name, sizeof(name), "anim\\main_%03d.anim", image_id);
+	std::vector<u8> anim_bytes;
+	std::string ce;
+	if (!casc_read_file(impl_->storage, name, anim_bytes, ce)) {
+		err_ = QString::fromStdString("read " + std::string(name)
+			+ ": " + ce);
+		return nullptr;
+	}
+	return decode_anim_bytes(anim_bytes, name, err_);
+}
+
 std::unique_ptr<HdSprite> HdAssetLoader::load_sprite(int sc_image_id) {
+	// Legacy entry point: takes a row into images.rel (0..998) and
+	// resolves to the referenced anim_num. Only body rows survive
+	// this route (flag=8/4 with a valid anim_num); shadow and
+	// overlay rows are SD-only in the table.
+	//
+	// Newer callers should use load_by_image_id() -- iscript's
+	// image_id maps directly to anim\main_<image_id>.anim on disk,
+	// no intermediate table lookup needed. This entry point stays
+	// alive for the HD Mapping tab, which enumerates by images.rel
+	// row (that's the semantics the mapping-table validator wants).
 	if (!is_open()) {
 		err_ = "loader not open";
 		return nullptr;
@@ -915,15 +1044,9 @@ std::unique_ptr<HdSprite> HdAssetLoader::load_sprite(int sc_image_id) {
 	}
 	const auto& e = impl_->images_rel[sc_image_id];
 	// Prefer full-res HD (flag=8). Fall back to HD2 (flag=4) if
-	// the row we hit isn't HD. If neither, bail -- caller can
-	// probe adjacent image_ids or fall back to SD.
-	u32 anim_num = 0;
-	bool got = false;
-	if ((e.flag == 8 || e.flag == 4) && e.anim_num != 0xffffffff) {
-		anim_num = e.anim_num;
-		got = true;
-	}
-	if (!got) {
+	// the row we hit isn't HD. If neither, bail -- shadow / overlay
+	// rows land here (flag=1 SD-only).
+	if ((e.flag != 8 && e.flag != 4) || e.anim_num == 0xffffffff) {
 		err_ = QString("image_id %1 has no HD anim "
 			"(flag=%2, anim_num=0x%3)")
 			.arg(sc_image_id).arg(e.flag)
@@ -931,9 +1054,8 @@ std::unique_ptr<HdSprite> HdAssetLoader::load_sprite(int sc_image_id) {
 		return nullptr;
 	}
 
-	// Load anim\main_NNN.anim.
 	char name[64];
-	snprintf(name, sizeof(name), "anim\\main_%03u.anim", anim_num);
+	snprintf(name, sizeof(name), "anim\\main_%03u.anim", e.anim_num);
 	std::vector<u8> anim_bytes;
 	std::string ce;
 	if (!casc_read_file(impl_->storage, name, anim_bytes, ce)) {
@@ -941,117 +1063,7 @@ std::unique_ptr<HdSprite> HdAssetLoader::load_sprite(int sc_image_id) {
 			+ ": " + ce);
 		return nullptr;
 	}
-
-	ParsedAnim pa;
-	std::string perr;
-	if (!parse_anim(anim_bytes, pa, perr)) {
-		err_ = QString::fromStdString("parse " + std::string(name)
-			+ ": " + perr);
-		return nullptr;
-	}
-
-	// Find the diffuse layer.
-	const LayerInfo* diff = nullptr;
-	for (const auto& li : pa.layers) {
-		if (li.name == "diffuse") { diff = &li; break; }
-	}
-	if (!diff || diff->data_offset == 0) {
-		err_ = "diffuse layer absent";
-		return nullptr;
-	}
-	if (diff->data_offset + diff->data_size > anim_bytes.size()) {
-		err_ = "diffuse layer range OOB";
-		return nullptr;
-	}
-
-	// Decode DXT5 -> RGBA.
-	QImage atlas = decode_dxt5_dds(
-		anim_bytes.data() + diff->data_offset,
-		diff->data_size,
-		diff->atlas_w, diff->atlas_h, perr);
-	if (atlas.isNull()) {
-		err_ = QString::fromStdString("DXT5 decode: " + perr);
-		return nullptr;
-	}
-
-	// Optional teamcolor layer (DXT1 grayscale mask). SC:R's shader
-	// adds "teamcolor.rgb * playerColor" on top of the diffuse to
-	// pull dark diffuse regions toward the player's color. Blizzard
-	// authors diffuse dark on purpose expecting this pass -- if we
-	// skip it, HD units look drained of color (the "dark Marine"
-	// problem we saw before wiring this in).
-	//
-	// Hardcoded player color: red (Player 1 default). Matches
-	// openBW's slot-0 palette convention. Will be lifted to an
-	// argument once we care about non-red owners.
-	static constexpr uint8_t PLAYER_RED[3]   = { 224,   0,   0 };
-	static constexpr uint8_t PLAYER_COLOR[3] = { PLAYER_RED[0],
-	                                             PLAYER_RED[1],
-	                                             PLAYER_RED[2] };
-
-	QImage composited = atlas;   // starts as a copy of diffuse
-	const LayerInfo* tc = nullptr;
-	for (const auto& li : pa.layers) {
-		if (li.name == "teamcolor") { tc = &li; break; }
-	}
-	if (tc && tc->data_offset != 0
-	    && tc->data_offset + tc->data_size <= anim_bytes.size())
-	{
-		QImage tc_atlas = decode_bc1_dds(
-			anim_bytes.data() + tc->data_offset,
-			tc->data_size,
-			tc->atlas_w, tc->atlas_h, perr);
-		if (tc_atlas.isNull()) {
-			// Non-fatal: unit gets un-tinted diffuse.
-			fprintf(stderr,
-				"warn: teamcolor decode failed for %s: %s\n",
-				name, perr.c_str());
-		} else if (tc_atlas.width() == composited.width()
-		           && tc_atlas.height() == composited.height())
-		{
-			// SC:R teamcolor blend is a modulate, not an addition:
-			//   tint_factor = mix(vec3(1), player_color/255, mask)
-			//   final.rgb   = diffuse.rgb * tint_factor
-			//
-			// Additive was wrong -- it saturated highlights toward
-			// white ("pink Marine" symptom the user hit). Modulate
-			// preserves the diffuse shading and tints only what the
-			// mask marks: mask=0 leaves diffuse alone, mask=1 makes
-			// a white armor plate become pure player color with the
-			// original shading multiplied in.
-			int H = composited.height();
-			int W = composited.width();
-			for (int y = 0; y < H; ++y) {
-				uint8_t* dst = composited.scanLine(y);
-				const uint8_t* mask = tc_atlas.scanLine(y);
-				for (int x = 0; x < W; ++x) {
-					int g = mask[x * 4];   // R channel = mask
-					if (g == 0) continue;
-					uint8_t* p = dst + x * 4;
-					// Per-channel modulate factor in fixed-point
-					// [0..255]: at mask=0 factor=255 (no change),
-					// at mask=255 factor=PLAYER_COLOR[c].
-					int fr = 255 + (g * ((int)PLAYER_COLOR[0] - 255)) / 255;
-					int fg = 255 + (g * ((int)PLAYER_COLOR[1] - 255)) / 255;
-					int fb = 255 + (g * ((int)PLAYER_COLOR[2] - 255)) / 255;
-					int r = (p[0] * fr) / 255;
-					int gg = (p[1] * fg) / 255;
-					int b = (p[2] * fb) / 255;
-					p[0] = (uint8_t)(r > 255 ? 255 : r);
-					p[1] = (uint8_t)(gg > 255 ? 255 : gg);
-					p[2] = (uint8_t)(b > 255 ? 255 : b);
-				}
-			}
-		}
-	}
-
-	auto sp = std::make_unique<HdSprite>();
-	sp->diffuse     = std::move(atlas);
-	sp->composited  = std::move(composited);
-	sp->sprite_w    = pa.sprite_w;
-	sp->sprite_h    = pa.sprite_h;
-	sp->frames      = std::move(pa.frames);
-	return sp;
+	return decode_anim_bytes(anim_bytes, name, err_);
 }
 
 // ---- mapping table --------------------------------------------------

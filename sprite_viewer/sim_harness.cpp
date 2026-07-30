@@ -430,42 +430,49 @@ SimHarness::current_sprite_images() const {
 	// first -- shadow first, main body next, muzzle-flash / attack
 	// overlays last. Consumers blit in the returned order so
 	// higher-index entries land on top.
+	//
+	// Two-part units (Siege Tank, Goliath, Vulture) own a `subunit`
+	// pointer with its own sprite -- the turret. In real gameplay
+	// ui.h renders every sprite in st.sprites_on_tile_line, which
+	// naturally picks up both the base and the turret. Here we only
+	// have one unit and one center, so we splice the subunit's images
+	// onto the tail of the same list. Draw order is base-first
+	// (shadow + body + base overlays), then turret (shadow + body +
+	// muzzle flash) -- matches sprite_depth_order's convention that
+	// the turret paints ON TOP of the base.
 	std::vector<SpriteImage> out;
 	if (!ui || !unit_is_alive_for_render(unit)) return out;
-	for (const auto& image : bwgame::reverse(unit->sprite->images)) {
-		SpriteImage e;
-		// grp_filename_index is 1-based in openBW (index 0 = "no
-		// GRP"). Convert to 0-based for the mapping-table key; -1
-		// means "no HD candidate at all".
-		int gfi = (int)image.image_type->grp_filename_index;
-		e.grp_filename_index = (gfi == 0) ? -1 : (gfi - 1);
-		e.frame_index = (int)image.frame_index;
-		e.offset_x    = image.offset.x;
-		e.offset_y    = image.offset.y;
-		e.flipped     = (image.flags
-			& bwgame::image_t::flag_horizontally_flipped) != 0;
-		e.hidden      = (image.flags
-			& bwgame::image_t::flag_hidden) != 0;
-		// openBW's ui.h treats modifier==10 as the shadow blend;
-		// tag it here so the HD renderer can dim/tint the image.
-		e.is_shadow   = (image.modifier == 10);
-		// ImageTypes id -- distinct per iscript-defined image kind;
-		// unlike grp_filename_index (which can be shared), this is
-		// unique per image_type row in images.dat. Used by the HD
-		// renderer to look up shadow anims by their ACTUAL image_id
-		// rather than probing adjacent anims from the body's row.
-		e.image_id    = (int)image.image_type->id;
-		// SD grp dimensions -- the sprite bounding box the SD
-		// renderer uses at bwgame.h:13332-13337 for its own
-		// anchor math. HD renderer reads these to derive an
-		// on-screen-size match between SD and HD without a magic
-		// constant. Guarded because image->grp can be null for
-		// virtual/synthetic images.
-		if (image.grp) {
-			e.grp_width  = (int)image.grp->width;
-			e.grp_height = (int)image.grp->height;
+
+	auto push_sprite = [&](const bwgame::sprite_t* sprite) {
+		if (!sprite) return;
+		for (const auto& image : bwgame::reverse(sprite->images)) {
+			SpriteImage e;
+			int gfi = (int)image.image_type->grp_filename_index;
+			e.grp_filename_index = (gfi == 0) ? -1 : (gfi - 1);
+			e.frame_index = (int)image.frame_index;
+			e.offset_x    = image.offset.x;
+			e.offset_y    = image.offset.y;
+			e.flipped     = (image.flags
+				& bwgame::image_t::flag_horizontally_flipped) != 0;
+			e.hidden      = (image.flags
+				& bwgame::image_t::flag_hidden) != 0;
+			e.is_shadow   = (image.modifier == 10);
+			e.image_id    = (int)image.image_type->id;
+			if (image.grp) {
+				e.grp_width  = (int)image.grp->width;
+				e.grp_height = (int)image.grp->height;
+			}
+			out.push_back(e);
 		}
-		out.push_back(e);
+	};
+
+	push_sprite(unit->sprite);
+	// Turret: only splice the subunit if it IS a turret (flag_turret
+	// set in unit.dat). Non-turret subunits (rare -- Terran Larva
+	// building subunit, etc.) shouldn't be rendered on top of the
+	// parent.
+	if (unit->subunit && ui->ut_turret(unit->subunit)) {
+		push_sprite(unit->subunit->sprite);
 	}
 	return out;
 }
