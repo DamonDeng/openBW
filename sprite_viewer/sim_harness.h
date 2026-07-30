@@ -201,6 +201,7 @@ struct SimHarness {
 		int  offset_y = 0;
 		bool flipped = false;
 		bool is_shadow = false;        // modifier == 10 -> shadow blend
+		int  image_id  = -1;           // ImageTypes enum value (unique per image_t kind)
 		bool hidden = false;           // flag_hidden set -> skip
 		int  grp_width = 0;            // SD grp bounding-box width, used
 		int  grp_height = 0;           //  by HD renderer to compute the

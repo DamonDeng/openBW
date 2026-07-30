@@ -449,6 +449,12 @@ SimHarness::current_sprite_images() const {
 		// openBW's ui.h treats modifier==10 as the shadow blend;
 		// tag it here so the HD renderer can dim/tint the image.
 		e.is_shadow   = (image.modifier == 10);
+		// ImageTypes id -- distinct per iscript-defined image kind;
+		// unlike grp_filename_index (which can be shared), this is
+		// unique per image_type row in images.dat. Used by the HD
+		// renderer to look up shadow anims by their ACTUAL image_id
+		// rather than probing adjacent anims from the body's row.
+		e.image_id    = (int)image.image_type->id;
 		// SD grp dimensions -- the sprite bounding box the SD
 		// renderer uses at bwgame.h:13332-13337 for its own
 		// anchor math. HD renderer reads these to derive an

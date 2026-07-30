@@ -42,6 +42,7 @@ class SpriteCanvas;
 struct SimHarness;
 class HdAssetLoader;
 struct HdSprite;
+class FramesTab;
 
 // Registry entry for one unit. For the MVP we only ship Marine;
 // the structure is here so extending to more is one entry per line.
@@ -104,6 +105,12 @@ private:
 	// time hd_cache should probably fold into this map, but for
 	// now the two coexist.
 	std::unordered_map<int, std::unique_ptr<HdSprite>> hd_image_cache;
+	// Parallel cache keyed by SD image_id (0..998), used by the
+	// shadow path since a shadow's grp_filename_index typically
+	// matches its body's -- the two can't share a single cache
+	// keyed on gfi. images.rel gives us a direct image_id -> HD
+	// anim mapping, so this cache is the natural key.
+	std::unordered_map<int, std::unique_ptr<HdSprite>> hd_image_by_image_id_cache;
 	// Currently displayed HD sprite (non-owning view into hd_cache).
 	HdSprite* current_hd = nullptr;
 
@@ -119,6 +126,9 @@ private:
 	// lockstep and both views represent the same tick.
 	SpriteCanvas* sd_canvas = nullptr;
 	SpriteCanvas* hd_canvas = nullptr;
+	// Frames tab: HD-only, updated on unit change to auto-browse
+	// the current unit's body anim.
+	FramesTab* frames_tab = nullptr;
 
 	// Sim tick timer -- retail is 42 ms/frame (~24 FPS).
 	QTimer tick_timer;

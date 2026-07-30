@@ -113,6 +113,40 @@ public:
 	// several MB of RAM per unit.
 	std::unique_ptr<HdSprite> load_sprite(int sc_image_id);
 
+	// Loader debug helper: load the anim for `sc_image_id` and
+	// decode a SPECIFIC layer by name (e.g. "diffuse", "ao_depth",
+	// "bright"). Fills the diffuse field of the returned HdSprite
+	// so the frames tab can render it uniformly. teamcolor layer is
+	// NOT composited in -- we want to see the raw layer. Returns
+	// null on any failure; last_error() has the details.
+	std::unique_ptr<HdSprite> load_sprite_layer(int sc_image_id,
+	                                             const std::string& layer_name);
+
+	// List the layer names present in a given image_id's anim file.
+	// Returns empty on failure; last_error() has details. Meant
+	// for the frames browser's layer dropdown.
+	std::vector<std::string> list_layers_for_image_id(int sc_image_id);
+
+	// Anim-number variants of the two loader helpers above. Bypass
+	// images.rel entirely -- open anim\main_<anim_num>.anim directly.
+	// Useful for the frames browser when the user wants to inspect
+	// an orphan anim (no images.rel row points at it, e.g. SCV's
+	// shadow anim=248 or its engine-flame overlay anim=249) or a
+	// row whose flag isn't in {8, 4} (Carbot=16, SD-only=1). If the
+	// anim file doesn't exist in CASC, returns empty / null; the
+	// error message names the anim path we looked at.
+	std::vector<std::string> list_layers_for_anim(uint32_t anim_num);
+	std::unique_ptr<HdSprite> load_sprite_layer_by_anim(
+	    uint32_t anim_num, const std::string& layer_name);
+
+	// Look up the first images.rel row whose anim_num equals
+	// `anim_num` and whose flag is HD (8) or HD2 (4). Returns
+	// -1 if no such row exists. Used by the frames-browser tab
+	// to accept anim numbers as input (matching what shows up
+	// in the anim filenames on disk) rather than requiring users
+	// to know which SD image_id maps to that anim.
+	int image_id_for_anim(uint32_t anim_num) const;
+
 	// Enumerate every images.rel row with the given variant flag,
 	// decoding just enough of each entry's .anim to fill an
 	// HdRowInfo (metadata + a 128x128 preview crop of frame 0's
@@ -176,8 +210,12 @@ public:
 	// nullptr when no plausible shadow anim exists.
 	HdSprite* shadow_sprite_for(int body_sc_r_row);
 
-private:
+public:
+	// Public only so file-scope helpers inside hd_asset_loader.cpp
+	// can dereference the fields. Not a stable API -- treat as
+	// implementation-private for all external callers.
 	struct Impl;
+private:
 	std::unique_ptr<Impl> impl_;
 	QString err_;
 };

@@ -702,6 +702,204 @@ std::vector<HdRowInfo> HdAssetLoader::enumerate_rows(
 	return out;
 }
 
+int HdAssetLoader::image_id_for_anim(uint32_t anim_num) const {
+	if (!impl_) return -1;
+	for (size_t i = 0; i < impl_->images_rel.size(); ++i) {
+		const auto& e = impl_->images_rel[i];
+		if (e.anim_num != anim_num) continue;
+		if (e.flag == 8 || e.flag == 4) return (int)i;
+	}
+	return -1;
+}
+
+// Inline helper to read + parse the anim file for a given
+// image_id. Lives inside the class impl so it can dereference
+// impl_ directly.
+static bool read_anim_for_anim_num(HdAssetLoader::Impl& impl,
+                                   uint32_t anim_num,
+                                   std::vector<u8>& bytes,
+                                   ParsedAnim& pa,
+                                   std::string& err)
+{
+	if (anim_num == 0xffffffff) {
+		err = "anim_num sentinel (0xffffffff)";
+		return false;
+	}
+	char name[64];
+	snprintf(name, sizeof(name), "anim\\main_%03u.anim",
+		(unsigned)anim_num);
+	std::string ce;
+	if (!casc_read_file(impl.storage, name, bytes, ce)) {
+		err = std::string("casc read ") + name + ": " + ce;
+		return false;
+	}
+	std::string perr;
+	if (!parse_anim(bytes, pa, perr)) {
+		err = "parse anim: " + perr;
+		return false;
+	}
+	return true;
+}
+
+static bool read_anim_for_image_id(HdAssetLoader::Impl& impl,
+                                   int sc_image_id,
+                                   std::vector<u8>& bytes,
+                                   ParsedAnim& pa,
+                                   std::string& err)
+{
+	if (sc_image_id < 0
+	    || (size_t)sc_image_id >= impl.images_rel.size()) {
+		err = "image_id out of range";
+		return false;
+	}
+	const auto& e = impl.images_rel[sc_image_id];
+	if ((e.flag != 8 && e.flag != 4) || e.anim_num == 0xffffffff) {
+		err = "image_id has no HD anim (flag/anim_num not HD)";
+		return false;
+	}
+	return read_anim_for_anim_num(impl, e.anim_num, bytes, pa, err);
+}
+
+// Decode one anim's named layer into an HdSprite. Shared by both
+// the image_id and anim_num entry points -- the two paths only
+// differ in how they resolve the .anim file, not in how they
+// decode a layer once parsed.
+static std::unique_ptr<HdSprite> sprite_from_parsed_layer(
+    const std::vector<u8>& bytes,
+    const ParsedAnim& pa,
+    const std::string& layer_name,
+    QString& err_out)
+{
+	const LayerInfo* target = nullptr;
+	for (const auto& li : pa.layers) {
+		if (li.name == layer_name && li.data_offset != 0) {
+			target = &li;
+			break;
+		}
+	}
+	if (!target) {
+		err_out = QString("layer '%1' absent from anim")
+			.arg(QString::fromStdString(layer_name));
+		return nullptr;
+	}
+	if (target->data_offset + target->data_size > bytes.size()) {
+		err_out = "layer range OOB";
+		return nullptr;
+	}
+	std::string perr;
+	QImage atlas;
+	size_t pixels = (size_t)target->atlas_w * target->atlas_h;
+	size_t expected_dxt5 = 128 + pixels;
+	size_t expected_bc1  = 128 + pixels / 2;
+	if (target->data_size == expected_dxt5) {
+		atlas = decode_dxt5_dds(bytes.data() + target->data_offset,
+			target->data_size, target->atlas_w, target->atlas_h,
+			perr);
+	} else if (target->data_size == expected_bc1) {
+		atlas = decode_bc1_dds(bytes.data() + target->data_offset,
+			target->data_size, target->atlas_w, target->atlas_h,
+			perr);
+	} else {
+		err_out = QString("layer '%1' has unknown payload size %2 "
+			"(dxt5 wants %3, bc1 wants %4)")
+			.arg(QString::fromStdString(layer_name))
+			.arg((qulonglong)target->data_size)
+			.arg((qulonglong)expected_dxt5)
+			.arg((qulonglong)expected_bc1);
+		return nullptr;
+	}
+	if (atlas.isNull()) {
+		err_out = QString::fromStdString("decode: " + perr);
+		return nullptr;
+	}
+	auto sp = std::make_unique<HdSprite>();
+	sp->diffuse    = std::move(atlas);
+	sp->sprite_w   = pa.sprite_w;
+	sp->sprite_h   = pa.sprite_h;
+	sp->frames.reserve(pa.frames.size());
+	for (const auto& f : pa.frames) {
+		HdFrame hf;
+		hf.atlas_x  = f.atlas_x;
+		hf.atlas_y  = f.atlas_y;
+		hf.offset_x = f.offset_x;
+		hf.offset_y = f.offset_y;
+		hf.w        = f.w;
+		hf.h        = f.h;
+		hf.flags    = f.flags;
+		sp->frames.push_back(hf);
+	}
+	return sp;
+}
+
+std::vector<std::string>
+HdAssetLoader::list_layers_for_image_id(int sc_image_id) {
+	std::vector<std::string> out;
+	if (!impl_) return out;
+	std::vector<u8> bytes;
+	ParsedAnim pa;
+	std::string e;
+	if (!read_anim_for_image_id(*impl_, sc_image_id, bytes, pa, e)) {
+		err_ = QString::fromStdString(e);
+		return out;
+	}
+	for (const auto& li : pa.layers) {
+		// Skip layers with no data -- Blizzard reserves 10 slots
+		// per anim but usually only fills 6-7 of them.
+		if (li.data_offset == 0 || li.data_size == 0) continue;
+		out.push_back(li.name);
+	}
+	return out;
+}
+
+std::unique_ptr<HdSprite>
+HdAssetLoader::load_sprite_layer(int sc_image_id,
+                                  const std::string& layer_name)
+{
+	if (!impl_) return nullptr;
+	std::vector<u8> bytes;
+	ParsedAnim pa;
+	std::string e;
+	if (!read_anim_for_image_id(*impl_, sc_image_id, bytes, pa, e)) {
+		err_ = QString::fromStdString(e);
+		return nullptr;
+	}
+	return sprite_from_parsed_layer(bytes, pa, layer_name, err_);
+}
+
+std::vector<std::string>
+HdAssetLoader::list_layers_for_anim(uint32_t anim_num)
+{
+	std::vector<std::string> out;
+	if (!impl_) return out;
+	std::vector<u8> bytes;
+	ParsedAnim pa;
+	std::string e;
+	if (!read_anim_for_anim_num(*impl_, anim_num, bytes, pa, e)) {
+		err_ = QString::fromStdString(e);
+		return out;
+	}
+	for (const auto& li : pa.layers) {
+		if (li.data_offset == 0 || li.data_size == 0) continue;
+		out.push_back(li.name);
+	}
+	return out;
+}
+
+std::unique_ptr<HdSprite>
+HdAssetLoader::load_sprite_layer_by_anim(uint32_t anim_num,
+                                          const std::string& layer_name)
+{
+	if (!impl_) return nullptr;
+	std::vector<u8> bytes;
+	ParsedAnim pa;
+	std::string e;
+	if (!read_anim_for_anim_num(*impl_, anim_num, bytes, pa, e)) {
+		err_ = QString::fromStdString(e);
+		return nullptr;
+	}
+	return sprite_from_parsed_layer(bytes, pa, layer_name, err_);
+}
+
 std::unique_ptr<HdSprite> HdAssetLoader::load_sprite(int sc_image_id) {
 	if (!is_open()) {
 		err_ = "loader not open";
@@ -912,10 +1110,14 @@ int HdAssetLoader::sc_r_row_for_bw_id(int bw_id) const {
 // true iff the file exists AND its layer layout matches that
 // signature. Fetches the anim bytes as a side effect stored into
 // `out_bytes` when true (so the caller doesn't reload). Also emits
-// the frame count so the caller can pick a shadow that matches its
-// body's frame count when multiple only-diffuse candidates exist.
+// the frame count + sprite dimensions so the caller can pick a
+// shadow that matches its body's frame count AND has a shadow-like
+// aspect ratio (wide + short); this filters out cases like SCV
+// where a walking-engine-flame overlay is authored as an
+// only-diffuse anim with the same frame count as the body.
 static bool try_shadow_anim(HANDLE storage, uint32_t anim_num,
-	std::vector<u8>& out_bytes, int& out_frame_count)
+	std::vector<u8>& out_bytes, int& out_frame_count,
+	int& out_sprite_w, int& out_sprite_h)
 {
 	char name[64];
 	snprintf(name, sizeof(name), "anim\\main_%03u.anim", anim_num);
@@ -937,21 +1139,50 @@ static bool try_shadow_anim(HANDLE storage, uint32_t anim_num,
 		}
 	}
 	out_frame_count = pa.frame_count;
+	out_sprite_w    = pa.sprite_w;
+	out_sprite_h    = pa.sprite_h;
 	return has_diffuse;
+}
+
+// Shadow candidates share the body's sprite bounding box (the
+// atlas dimensions blizzard authored the layers at).
+// Retail samples (from `casc_probe --anim-range`):
+//   Marine  body 313x226, shadow 313x226   (both anims share w/h)
+//   SCV     body 288x282, shadow 288x282
+//   Tank    body 512x506, shadow 512x506
+// Anims whose sprite differs from the body's are overlays for a
+// different unit or a different LOD. The old aspect-ratio gate
+// (w >= 1.15*h) was wrong: SCV's shadow is near-square. Match on
+// exact bounding box instead -- that's what actually distinguishes
+// the shadow anim from stray neighborhood entries.
+static bool matches_body_sprite(int cand_w, int cand_h,
+                                int body_w, int body_h)
+{
+	if (cand_w <= 0 || cand_h <= 0) return false;
+	if (body_w <= 0 || body_h <= 0) return false;
+	return cand_w == body_w && cand_h == body_h;
 }
 
 HdSprite* HdAssetLoader::shadow_sprite_for(int body_sc_r_row) {
 	if (!is_open() || body_sc_r_row < 0
-	    || (size_t)body_sc_r_row >= impl_->images_rel.size())
+	    || (size_t)body_sc_r_row >= impl_->images_rel.size()) {
+		std::fprintf(stderr,
+			"[hd-dbg] shadow_sprite_for(%d): out of range\n",
+			body_sc_r_row);
 		return nullptr;
+	}
 
 	// Cached?
 	auto cit = impl_->shadow_cache.find(body_sc_r_row);
-	if (cit != impl_->shadow_cache.end())
+	if (cit != impl_->shadow_cache.end()) {
 		return cit->second.get();
+	}
 
 	// Body's anim_num is the reference point.
 	const auto& body = impl_->images_rel[body_sc_r_row];
+	std::fprintf(stderr,
+		"[hd-dbg] shadow_sprite_for(%d): body.anim_num=%u\n",
+		body_sc_r_row, (unsigned)body.anim_num);
 	if (body.anim_num == 0xffffffff) {
 		impl_->shadow_cache.emplace(body_sc_r_row, nullptr);
 		return nullptr;
@@ -965,6 +1196,7 @@ HdSprite* HdAssetLoader::shadow_sprite_for(int body_sc_r_row) {
 	// only-diffuse anims (255=6 frames, 257=17 frames, 259=12
 	// frames); only 257 matches the Vulture body's 17.
 	int body_frame_count = -1;
+	int body_sprite_w = -1, body_sprite_h = -1;
 	{
 		char body_name[64];
 		snprintf(body_name, sizeof(body_name),
@@ -976,17 +1208,30 @@ HdSprite* HdAssetLoader::shadow_sprite_for(int body_sc_r_row) {
 			std::string perr;
 			if (parse_anim(body_bytes, body_pa, perr)) {
 				body_frame_count = body_pa.frame_count;
+				body_sprite_w    = body_pa.sprite_w;
+				body_sprite_h    = body_pa.sprite_h;
 			}
 		}
 	}
 
-	// Search deltas in order of empirical likelihood. Data from
-	// the retail sample: shadow_anim - body_anim landed at +1
-	// (Marine, SCV) or +2 (Tank, Academy) or occasionally -1 (some
-	// buildings). Widen to +/-3, then prefer a candidate whose
-	// frame count MATCHES the body's; fall back to the first
-	// only-diffuse hit if none match exactly.
-	static const int kDeltas[] = { 1, 2, 3, -1, -2, -3 };
+	// Search deltas in order of empirical likelihood. From the
+	// retail sample (casc_probe --anim-range across Marine/SCV/
+	// Tank/Vulture/Academy):
+	//   body_anim -> shadow lands at +1 in the vast majority of
+	//   cases. When something else takes that slot the shadow
+	//   walks outward. Try +1 first, then widen.
+	// Filter: the shadow anim must (a) be an only-diffuse anim,
+	// AND (b) share the body's sprite bounding box exactly. That
+	// bounding-box match is what actually distinguishes shadow
+	// from stray adjacent overlays -- SCV's shadow is near-square
+	// (288x282), so aspect ratio can't be the gate.
+	// Prefer a candidate whose frame_count matches the body's;
+	// fall back to the first bounding-box match if none match
+	// exactly.
+	static const int kDeltas[] = {
+		 1,  2,  3,  4,  5,  6,  7,  8,
+		-1, -2, -3, -4, -5, -6, -7, -8,
+	};
 	std::vector<u8> anim_bytes;
 	int shadow_anim = -1;
 	std::vector<u8> best_bytes;
@@ -996,8 +1241,18 @@ HdSprite* HdAssetLoader::shadow_sprite_for(int body_sc_r_row) {
 		if (candidate < 0) continue;
 		std::vector<u8> tmp;
 		int fc = -1;
-		if (!try_shadow_anim(impl_->storage, (uint32_t)candidate,
-		                     tmp, fc)) continue;
+		int sw = -1, sh = -1;
+		bool ok = try_shadow_anim(impl_->storage, (uint32_t)candidate,
+		                          tmp, fc, sw, sh);
+		bool bbox_ok = matches_body_sprite(sw, sh,
+			body_sprite_w, body_sprite_h);
+		std::fprintf(stderr,
+			"[hd-dbg]   probe anim=%d ok=%d fc=%d body_fc=%d "
+			"sprite=%dx%d body_sprite=%dx%d bbox_ok=%d\n",
+			candidate, (int)ok, fc, body_frame_count,
+			sw, sh, body_sprite_w, body_sprite_h, (int)bbox_ok);
+		if (!ok) continue;
+		if (!bbox_ok) continue;
 		if (fc == body_frame_count) {
 			shadow_anim = candidate;
 			anim_bytes = std::move(tmp);
@@ -1013,6 +1268,9 @@ HdSprite* HdAssetLoader::shadow_sprite_for(int body_sc_r_row) {
 		shadow_anim = best_anim;
 		anim_bytes = std::move(best_bytes);
 	}
+	std::fprintf(stderr,
+		"[hd-dbg]   selected shadow_anim=%d best_anim=%d\n",
+		shadow_anim, best_anim);
 	if (shadow_anim < 0) {
 		impl_->shadow_cache.emplace(body_sc_r_row, nullptr);
 		return nullptr;

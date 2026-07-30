@@ -56,6 +56,15 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/deps/CascLib/CMakeLists.txt)
 	target_include_directories(anim_dump PRIVATE
 		${CMAKE_SOURCE_DIR}/deps/CascLib/src)
 	target_link_libraries(anim_dump PRIVATE casc_static)
+
+	# casc_probe: enumerate a small set of candidate .rel/.dat
+	# paths inside SC:R's CASC. Used to discover the file that
+	# maps HD sprite -> body/shadow/overlay images so we can stop
+	# heuristically probing anim_num neighborhoods for shadows.
+	add_executable(casc_probe ./casc_probe.cpp)
+	target_include_directories(casc_probe PRIVATE
+		${CMAKE_SOURCE_DIR}/deps/CascLib/src)
+	target_link_libraries(casc_probe PRIVATE casc_static)
 else()
 	message(STATUS
 		"deps/CascLib not present -- anim_dump target skipped. "

@@ -12,6 +12,7 @@
 #include "sim_harness.h"
 #include "hd_asset_loader.h"
 #include "mapping_tab.h"
+#include "frames_tab.h"
 
 #include <QtCore/QDebug>
 #include <QtCore/QDir>
@@ -62,14 +63,25 @@ public:
 		setAttribute(Qt::WA_OpaquePaintEvent);
 		setAttribute(Qt::WA_NoSystemBackground);
 		// Small minimum so both canvases fit side by side on a
-		// laptop screen. Startup uses sizeHint() below (~480x400
-		// per canvas); user can resize freely.
-		setMinimumSize(320, 320);
+		// laptop screen. Startup uses sizeHint() below; user can
+		// resize freely. HD canvas is 2x the SD baseline so the
+		// hi-res sprites are readable without zooming; the
+		// internal tile/sprite ratio (see paint_hd_image) is
+		// derived from widget size so doubling here scales both
+		// together and preserves proportions.
+		const int min_side = (mode_ == CanvasMode::HD) ? 640 : 320;
+		setMinimumSize(min_side, min_side);
 		background_color = QColor(0x80, 0x80, 0x80);
 	}
 
-	QSize sizeHint()    const override { return QSize(480, 400); }
-	QSize minimumSizeHint() const override { return QSize(320, 320); }
+	QSize sizeHint() const override {
+		return (mode_ == CanvasMode::HD) ? QSize(960, 800)
+		                                 : QSize(480, 400);
+	}
+	QSize minimumSizeHint() const override {
+		return (mode_ == CanvasMode::HD) ? QSize(640, 640)
+		                                 : QSize(320, 320);
+	}
 
 	void request_repaint() { update(); }
 
@@ -92,24 +104,53 @@ protected:
 
 		HdSprite* hd = nullptr;
 
-		// Shadows: the mapping tab doesn't include *Shad.grp
-		// entries, but SC:R stores shadow sprites in adjacent
-		// only-diffuse anim files. Use the body's HD sc_r_row
-		// (from the current unit) as the seed and probe adjacent
-		// anim_nums for an only-diffuse anim whose frame count
-		// matches the body's -- see HdAssetLoader::shadow_sprite_for.
+		// Shadows: images.rel does contain rows for shadow image_ids
+		// (SCV shadow is image_id=248), but those rows are marked
+		// SD-only (flag=0x1, anim_num=0xffffffff) -- SC:R keeps the
+		// actual HD shadow anim as an orphan main_NNN.anim file with
+		// no images.rel entry. Direct image_id -> anim_num lookup
+		// therefore returns nothing.
+		//
+		// Retail pattern (verified via casc_probe --anim-range on
+		// Marine, SCV, Tank, Vulture, Academy): the shadow lives at
+		// body_anim_num + 1 (usually), with only the diffuse layer
+		// populated, and with the same sprite bounding box as the
+		// body. Neighborhood-probe it via shadow_sprite_for(), seeded
+		// with the body's sc_r_row.
 		if (img.is_shadow) {
-			HdSprite* body = owner->current_hd;
-			if (!body) return false;
-			int body_sc_r = -1;
-			if (sim) {
-				int body_bw = sim->current_grp_filename_index();
-				if (body_bw >= 0)
-					body_sc_r = loader->sc_r_row_for_bw_id(body_bw);
+			// Find the body image (is_shadow=false) on this sprite
+			// so we know which HD anim to seed the neighborhood
+			// search from. draw_sprite iterates shadow first, so the
+			// body is later in the list.
+			if (!sim) return false;
+			auto sibs = sim->current_sprite_images();
+			int body_bw_id = -1;
+			for (const auto& s : sibs) {
+				if (!s.is_shadow && !s.hidden
+				    && s.grp_filename_index >= 0) {
+					body_bw_id = s.grp_filename_index;
+					break;
+				}
 			}
-			if (body_sc_r < 0) return false;
+			if (body_bw_id < 0) {
+				std::fprintf(stderr,
+					"[hd-dbg] shadow: no body sibling on sprite\n");
+				return false;
+			}
+			int body_sc_r = loader->sc_r_row_for_bw_id(body_bw_id);
+			if (body_sc_r < 0) {
+				std::fprintf(stderr,
+					"[hd-dbg] shadow: body bw_id=%d has no sc_r_row\n",
+					body_bw_id);
+				return false;
+			}
 			hd = loader->shadow_sprite_for(body_sc_r);
-			if (!hd) return false;
+			if (!hd) {
+				std::fprintf(stderr,
+					"[hd-dbg] shadow: shadow_sprite_for(body_sc_r=%d) "
+					"returned null\n", body_sc_r);
+				return false;
+			}
 		} else {
 			int sc_r = loader->sc_r_row_for_bw_id(
 				img.grp_filename_index);
@@ -170,16 +211,38 @@ protected:
 		// selected in hd_asset_loader.cpp::open_hd_tileset.
 		double s = hd_vp_scale_ / 4.0;
 
+		// Two offsets contribute to placement:
+		//   * fr.offset_{x,y}: per-frame atlas anchor. Positions the
+		//     frame within the sprite's own bounding box.
+		//   * img.offset_{x,y}: image_t draw offset. openBW's
+		//     sprite_t owns a list of image_t entries (body,
+		//     shadow, overlays); each image_t carries its own
+		//     x/y offset from the sprite center in *SD* pixels
+		//     (image.dat "Draw start" field). Shadows typically
+		//     have offset_y>0 to sit below the body. Without
+		//     applying this, the shadow lands on top of the body
+		//     instead of under it.
+		//
+		// image_t offsets are authored in SD pixels; HD sprite pixels
+		// are 4x SD (the same ratio that s = vp_scale/4 accounts for
+		// for atlas geometry). Multiply img.offset by 4 first so its
+		// units match hd->sprite_w / fr.offset. Then multiply the
+		// combined offset by s to convert to widget pixels.
+		int img_off_x_hd = (int)img.offset_x * 4;
+		int img_off_y_hd = (int)img.offset_y * 4;
 		double dx, dy;
 		if (img.flipped) {
 			dx = cx + s * ((int)hd->sprite_w / 2
-			        - ((int)fr.offset_x + (int)fr.w));
+			        - ((int)fr.offset_x + (int)fr.w)
+			        - img_off_x_hd);
 		} else {
 			dx = cx + s * ((int)fr.offset_x
-			        - (int)hd->sprite_w / 2);
+			        - (int)hd->sprite_w / 2
+			        + img_off_x_hd);
 		}
 		dy = cy + s * ((int)fr.offset_y
-		        - (int)hd->sprite_h / 2);
+		        - (int)hd->sprite_h / 2
+		        + img_off_y_hd);
 		QRectF dst(dx, dy, fr.w * s, fr.h * s);
 
 		// Shadow blend: openBW's SD renderer uses modifier=10 with
@@ -307,6 +370,33 @@ protected:
 		// classic mode.
 		if (!sim) return false;
 		auto images = sim->current_sprite_images();
+		// One-shot per-unit dump: emit the sprite's image list the
+		// first time we see each distinct (image_id) tuple so we can
+		// tell whether the sim is emitting a shadow entry at all.
+		{
+			static int last_first_iid = -0x7fffffff;
+			int first_iid = images.empty() ? -1 : images.front().image_id;
+			if (first_iid != last_first_iid) {
+				last_first_iid = first_iid;
+				int shadow_count = 0;
+				for (const auto& im : images) {
+					if (im.is_shadow) ++shadow_count;
+				}
+				std::fprintf(stderr,
+					"[hd-dbg] sprite image list changed: n=%zu "
+					"shadow_entries=%d\n",
+					images.size(), shadow_count);
+				for (const auto& im : images) {
+					std::fprintf(stderr,
+						"    image_id=%d gfi=%d frame=%d shadow=%d "
+						"hidden=%d off=(%d,%d) flip=%d\n",
+						im.image_id, im.grp_filename_index,
+						im.frame_index, (int)im.is_shadow,
+						(int)im.hidden, im.offset_x, im.offset_y,
+						(int)im.flipped);
+				}
+			}
+		}
 		for (const auto& img : images) paint_hd_image(p, img);
 		return true;
 	}
@@ -639,6 +729,8 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 		new MappingTab(hd_loader.get(), autosave_path,
 		               sd_previews_dir, tabs),
 		"HD Mapping");
+	frames_tab = new FramesTab(hd_loader.get(), tabs);
+	tabs->addTab(frames_tab, "Frames");
 }
 
 ViewerWindow::~ViewerWindow() = default;
@@ -760,6 +852,27 @@ void ViewerWindow::on_unit_changed(int index) {
 	refresh_readout();
 	if (sd_canvas) sd_canvas->request_repaint();
 	if (hd_canvas) hd_canvas->request_repaint();
+
+	// Tell the frames-browser tab which image_id to show. We use
+	// the image_id of the CURRENT main image on the freshly-spawned
+	// sprite (not the body-only image_id), because SC:R's images.rel
+	// distinguishes body vs shadow vs overlay by row -- we want
+	// whatever the sim is walking right now.
+	if (frames_tab && sim) {
+		auto images = sim->current_sprite_images();
+		int primary_id = -1;
+		// Prefer the body image (is_shadow=false, hidden=false).
+		for (const auto& im : images) {
+			if (!im.is_shadow && !im.hidden) {
+				primary_id = im.image_id;
+				break;
+			}
+		}
+		if (primary_id < 0 && !images.empty()) {
+			primary_id = images.front().image_id;
+		}
+		frames_tab->set_current_image_id(primary_id);
+	}
 }
 
 void ViewerWindow::on_anim_changed(int index) {
