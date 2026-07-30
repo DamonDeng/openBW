@@ -67,6 +67,13 @@ struct SimHarness {
 	// Current iscript animation running on unit->sprite->main_image.
 	int current_anim = -1;   // -1 = never started
 
+	// User-requested turret heading in slider-space (0..16), or -1
+	// meaning "no explicit turret override -- let the sim's own
+	// tracking (turn_turret snap-back to base heading) decide". Set
+	// by set_turret_heading_from_slider; reapplied every tick() so
+	// the sim can't drag the turret back to face the base each frame.
+	int turret_dir_override = -1;
+
 	// Map dimensions in world (pixel) coords, cached after map load.
 	int map_pixel_width = 0;
 	int map_pixel_height = 0;
@@ -105,6 +112,18 @@ struct SimHarness {
 	// raw byte via direction_from_index. See bwgame.h:13281 for how
 	// this drives frame_index_offset.
 	void set_heading_from_slider(int slider_dir);
+
+	// True if the current unit owns a turret subunit (flag_turret on
+	// unit->subunit). Used by the UI to gate the turret direction
+	// slider so we don't show it for Marine et al.
+	bool has_turret() const;
+
+	// Same as set_heading_from_slider, but targets unit->subunit --
+	// the turret sub-unit for two-part units (Siege Tank, Goliath,
+	// Vulture). No-op when the current unit has no turret. Base and
+	// turret headings are independent in-sim: openBW's set_unit_heading
+	// only touches the unit's own sprite images.
+	void set_turret_heading_from_slider(int slider_dir);
 
 	// One iscript / sim tick. Advances all animation state machines,
 	// same as retail's per-frame update (bwgame.h:13185 next_frame).

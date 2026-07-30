@@ -507,11 +507,28 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 	anim_cb = new QComboBox();
 	left->addWidget(anim_cb);
 
-	left->addWidget(new QLabel("Direction (0=up, 4=right, 8=down, 12=left)"));
+	left->addWidget(new QLabel(
+		"Direction (0=up, 4=right, 8=down, 12=left)"));
 	dir_slider = new QSlider(Qt::Horizontal);
 	dir_slider->setRange(0, 16);
 	dir_slider->setValue(current_dir);
 	left->addWidget(dir_slider);
+
+	// Turret direction: only meaningful for two-part units. Base and
+	// turret headings are independent in-sim (openBW's
+	// set_unit_heading only touches the given unit's own sprite
+	// images), so a Tank in real gameplay can drive north while its
+	// turret aims east.
+	turret_dir_label = new QLabel("Turret direction");
+	left->addWidget(turret_dir_label);
+	turret_dir_slider = new QSlider(Qt::Horizontal);
+	turret_dir_slider->setRange(0, 16);
+	turret_dir_slider->setValue(current_turret_dir);
+	left->addWidget(turret_dir_slider);
+	// Hidden by default -- on_unit_changed reveals it when the newly
+	// selected unit reports has_turret().
+	turret_dir_label->setVisible(false);
+	turret_dir_slider->setVisible(false);
 
 	playpause_btn = new QPushButton("⏸ Pause");
 	left->addWidget(playpause_btn);
@@ -630,6 +647,8 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 		        this, &ViewerWindow::on_anim_changed);
 		connect(dir_slider, &QSlider::valueChanged,
 		        this, &ViewerWindow::on_direction_changed);
+		connect(turret_dir_slider, &QSlider::valueChanged,
+		        this, &ViewerWindow::on_turret_direction_changed);
 		connect(playpause_btn, &QPushButton::clicked,
 		        this, &ViewerWindow::on_playpause_clicked);
 		connect(&tick_timer, &QTimer::timeout,
@@ -730,6 +749,14 @@ void ViewerWindow::on_unit_changed(int index) {
 		return;
 	}
 	sim->set_heading_from_slider(current_dir);
+	// Reveal / hide the turret slider based on whether the newly-
+	// spawned unit has a subunit turret. Applies the current slider
+	// value so a fresh unit doesn't inherit the previous unit's
+	// turret facing at the SD-default direction 0.
+	bool turret = sim->has_turret();
+	if (turret_dir_label)  turret_dir_label->setVisible(turret);
+	if (turret_dir_slider) turret_dir_slider->setVisible(turret);
+	if (turret) sim->set_turret_heading_from_slider(current_turret_dir);
 	// Log what got spawned + how many anims iscript reports for it.
 	// Helps diagnose "unit picker changed but anim list didn't"
 	// symptoms; a proper unit swap always produces a distinct count.
@@ -842,6 +869,14 @@ void ViewerWindow::on_anim_changed(int index) {
 void ViewerWindow::on_direction_changed(int value) {
 	current_dir = value;
 	if (sim) sim->set_heading_from_slider(current_dir);
+	refresh_readout();
+	if (sd_canvas) sd_canvas->request_repaint();
+	if (hd_canvas) hd_canvas->request_repaint();
+}
+
+void ViewerWindow::on_turret_direction_changed(int value) {
+	current_turret_dir = value;
+	if (sim) sim->set_turret_heading_from_slider(current_turret_dir);
 	refresh_readout();
 	if (sd_canvas) sd_canvas->request_repaint();
 	if (hd_canvas) hd_canvas->request_repaint();

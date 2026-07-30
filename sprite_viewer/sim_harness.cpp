@@ -160,6 +160,10 @@ bool SimHarness::spawn_unit(int unit_type_id) {
 	// Default facing "up" (dir 0 in retail).
 	funcs.set_unit_heading(unit, funcs.direction_from_index(0));
 	current_anim = -1;
+	// New unit -> drop any previous unit's turret override so the
+	// new subunit (if any) starts free-tracking the base. UI will
+	// reapply its own slider value right after spawn_unit returns.
+	turret_dir_override = -1;
 	return true;
 }
 
@@ -233,6 +237,23 @@ void SimHarness::set_heading_from_slider(int slider_dir) {
 	ui->set_unit_heading(unit, ui->direction_from_index((size_t)raw));
 }
 
+bool SimHarness::has_turret() const {
+	if (!ui || !unit_is_alive_for_render(unit)) return false;
+	return unit->subunit && ui->ut_turret(unit->subunit);
+}
+
+void SimHarness::set_turret_heading_from_slider(int slider_dir) {
+	turret_dir_override = slider_dir;
+	if (!has_turret()) return;
+	int raw = (slider_dir * 16) % 256;
+	if (raw < 0) raw = 0;
+	if (raw > 255) raw = 255;
+	// set_unit_heading on the SUBUNIT -- iterates its own sprite's
+	// images, not the base's, so the base facing is untouched.
+	ui->set_unit_heading(unit->subunit,
+		ui->direction_from_index((size_t)raw));
+}
+
 void SimHarness::tick() {
 	if (!ui) return;
 	// ui_functions IS-A state_functions (via ui_util_functions ->
@@ -244,6 +265,20 @@ void SimHarness::tick() {
 	// runs iscript_execute for every image + steps `wait` counters
 	// (bwgame.h:13185 -> process_frame -> update_thingies).
 	ui->state_functions::next_frame();
+
+	// Reassert the user's turret heading. openBW's turn_turret sets
+	// status flag 0x2000000 ("auto-follow base") when the turret is
+	// idle and its heading matches the base's, then snaps
+	// turret->heading = base->heading each tick until an order
+	// target appears (bwgame.h:12381-12398). For a viewer we want
+	// the slider to be authoritative, so overwrite here every tick.
+	if (turret_dir_override >= 0 && has_turret()) {
+		int raw = (turret_dir_override * 16) % 256;
+		if (raw < 0) raw = 0;
+		if (raw > 255) raw = 255;
+		ui->set_unit_heading(unit->subunit,
+			ui->direction_from_index((size_t)raw));
+	}
 
 	// Non-looping actions (GndAttkInit, GndAttkRpt, GndAttkToIdle,
 	// AirAttk*, CastSpell, ...) run to completion in iscript, then

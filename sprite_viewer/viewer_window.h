@@ -73,6 +73,7 @@ private slots:
 	void on_unit_changed(int index);
 	void on_anim_changed(int index);
 	void on_direction_changed(int value);
+	void on_turret_direction_changed(int value);
 	void on_playpause_clicked();
 	void on_tick();
 
@@ -88,6 +89,7 @@ private:
 	bool booted = false;
 	bool playing = true;
 	int current_dir = 4;
+	int current_turret_dir = 4;
 
 	// HD mode. Both empty in classic mode.
 	QString sc_version;
@@ -119,6 +121,11 @@ private:
 	QComboBox* unit_cb = nullptr;
 	QComboBox* anim_cb = nullptr;
 	QSlider* dir_slider = nullptr;
+	// Turret direction slider + its label. Only visible for units
+	// with a subunit turret (Tank, Goliath, Vulture). We keep both
+	// hide/show as a pair so the layout doesn't gap when hidden.
+	QLabel*  turret_dir_label = nullptr;
+	QSlider* turret_dir_slider = nullptr;
 	QPushButton* playpause_btn = nullptr;
 	QLabel* readout = nullptr;
 	// Split canvas: SD on the left, HD on the right. Both driven
