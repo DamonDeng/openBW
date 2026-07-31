@@ -206,19 +206,33 @@ bool SimHarness::run_anim(int anim_id) {
 		return true;
 	}
 
-	auto* image = unit->sprite->main_image;
-	// Check that this image_type has an anim_pc for the requested
-	// animation before dispatch; iscript_run_anim would error
-	// (fatal) otherwise (bwgame.h:15145).
-	auto* image_type = image->image_type;
-	auto script_it = ui->global_st.iscript.scripts.find(
-		image_type->iscript_id);
-	if (script_it == ui->global_st.iscript.scripts.end()) return false;
-	const auto& anim_pcs = script_it->second.animation_pc;
-	if ((size_t)anim_id >= anim_pcs.size() || anim_pcs[anim_id] == 0) {
-		return false;
+	// Try the base first, then the turret if any. Two-part units
+	// (Tank, Goliath, Vulture) split attack scripts across the two:
+	// the base's GndAttkInit is often a short settle / recoil while
+	// the turret's is the actual muzzle flash + firing anim. Dispatch
+	// to whichever image_type declares an anim_pc for the requested
+	// anim id, or both when both do. iscript_run_anim would error
+	// fatally if the anim_pc is 0, so anim_pc>0 is the gate.
+	auto try_run = [&](bwgame::image_t* image) -> bool {
+		if (!image) return false;
+		auto* image_type = image->image_type;
+		auto script_it = ui->global_st.iscript.scripts.find(
+			image_type->iscript_id);
+		if (script_it == ui->global_st.iscript.scripts.end()) return false;
+		const auto& anim_pcs = script_it->second.animation_pc;
+		if ((size_t)anim_id >= anim_pcs.size() || anim_pcs[anim_id] == 0) {
+			return false;
+		}
+		ui->iscript_run_anim(image, anim_id);
+		return true;
+	};
+
+	bool base_ran = try_run(unit->sprite->main_image);
+	bool turret_ran = false;
+	if (has_turret()) {
+		turret_ran = try_run(unit->subunit->sprite->main_image);
 	}
-	ui->iscript_run_anim(image, anim_id);
+	if (!base_ran && !turret_ran) return false;
 	current_anim = anim_id;
 	return true;
 }
@@ -292,15 +306,54 @@ void SimHarness::tick() {
 	// current_anim < 0 means the user hasn't picked an action yet.
 	// Anim 0 (Init) is the "just spawned" state -- don't touch it.
 	if (!unit_dying && current_anim > 0 && unit_is_alive_for_render(unit)) {
-		auto* image = unit->sprite->main_image;
-		if (image->iscript_state.animation != current_anim) {
-			// iscript has transitioned away from the selected anim.
-			// Re-fire it. Guard with anim_available in case the
-			// image_type doesn't have this anim (shouldn't happen
-			// since we filter the dropdown, but be defensive).
-			if (anim_available(current_anim)) {
+		// Re-fire the anim on any image that (a) declares the anim
+		// in its iscript AND (b) has moved off it. Two-part units
+		// need both base + turret watched independently -- the
+		// turret's GndAttkRpt cycles while the base sits in Idle,
+		// and either can be the one that dropped back first.
+		// Attack anims (GndAttkInit / GndAttkRpt / AirAttkInit /
+		// AirAttkRpt / CastSpell) run to completion once and then
+		// iscript's animation slot stays at that value even though
+		// the script has ended -- iscript_state.animation is only
+		// overwritten by iscript_run_anim, not by opc_end. So
+		// "animation == current_anim" is not a reliable "still
+		// playing" signal for these.
+		//
+		// Simulate gameplay's retrigger by periodically re-firing.
+		// Every ~KRefireTicks the loop calls iscript_run_anim on
+		// the image again. On a settled/ended image that restarts
+		// the anim; on an in-flight one it's a no-op-ish reset
+		// (openBW's iscript_run_anim resets pc/return/wait/animation
+		// -- bwgame.h:15146-15149). For non-attack anims (Walking,
+		// IsWorking) which the sim naturally loops via iscript
+		// opc_goto, the retrigger is redundant but harmless.
+		//
+		// Also refire when the image drops back to Idle (anim 0) --
+		// covers the case where an attack anim ended and iscript
+		// itself moved the slot back.
+		static int refire_ctr = 0;
+		++refire_ctr;
+		constexpr int KRefireTicks = 24;  // ~1s at 24Hz
+		bool time_to_refire = (refire_ctr % KRefireTicks) == 0;
+		auto watch = [&](bwgame::image_t* image) {
+			if (!image) return;
+			auto* image_type = image->image_type;
+			auto sit = ui->global_st.iscript.scripts.find(
+				image_type->iscript_id);
+			if (sit == ui->global_st.iscript.scripts.end()) return;
+			const auto& anim_pcs = sit->second.animation_pc;
+			if ((size_t)current_anim >= anim_pcs.size()
+			    || anim_pcs[current_anim] == 0) return;
+			int cur = (int)image->iscript_state.animation;
+			bool dropped_to_idle = (cur == 0 /*Init*/
+				&& current_anim != 0);
+			if (dropped_to_idle || time_to_refire) {
 				ui->iscript_run_anim(image, current_anim);
 			}
+		};
+		watch(unit->sprite->main_image);
+		if (has_turret()) {
+			watch(unit->subunit->sprite->main_image);
 		}
 	}
 }
@@ -392,13 +445,24 @@ SimHarness::FrameInfo SimHarness::current_frame_info() const {
 
 bool SimHarness::anim_available(int anim_id) const {
 	if (!ui || !unit_is_alive_for_render(unit)) return false;
-	auto* image = unit->sprite->main_image;
-	int iscript_id = image->image_type->iscript_id;
-	auto it = ui->global_st.iscript.scripts.find(iscript_id);
-	if (it == ui->global_st.iscript.scripts.end()) return false;
-	const auto& anim_pcs = it->second.animation_pc;
-	if ((size_t)anim_id >= anim_pcs.size()) return false;
-	return anim_pcs[anim_id] != 0;
+	// Union of base + turret. Tank base's iscript_id doesn't declare
+	// GndAttkInit; only the turret does. Reporting available if
+	// EITHER declares the anim lets the UI enable "Firing" for the
+	// combined unit and run_anim's per-image dispatch takes care of
+	// running it on whichever side actually has an anim_pc.
+	auto has = [&](const bwgame::image_t* image) -> bool {
+		if (!image) return false;
+		int iscript_id = image->image_type->iscript_id;
+		auto it = ui->global_st.iscript.scripts.find(iscript_id);
+		if (it == ui->global_st.iscript.scripts.end()) return false;
+		const auto& anim_pcs = it->second.animation_pc;
+		if ((size_t)anim_id >= anim_pcs.size()) return false;
+		return anim_pcs[anim_id] != 0;
+	};
+	if (has(unit->sprite->main_image)) return true;
+	if (unit->subunit && ui->ut_turret(unit->subunit)
+	    && has(unit->subunit->sprite->main_image)) return true;
+	return false;
 }
 
 int SimHarness::tileset_index() const {
