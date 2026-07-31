@@ -187,9 +187,17 @@ protected:
 		//     get_image_map_position which does the same on line
 		//     13329 (`sprite->position + image->offset`).
 		//
-		// image_t offsets are authored in SD pixels; HD sprite pixels
-		// are 4x SD. Multiply img.offset by 4 so its units match
-		// hd->sprite_w / fr.offset, then apply s to reach widget px.
+		// image_t offsets are authored in SD-world pixels (the same
+		// coordinate space openBW uses everywhere -- xy positions,
+		// tiles, LO offsets all live in SD-map units). HD renders
+		// at 4x that scale (128 HD atlas pixels per 32 SD tile
+		// pixels), so multiplying img.offset by 4 lifts SD-world
+		// units into the same HD atlas space fr.offset / hd->sprite_w
+		// use. Applies uniformly across bodies, shadows, overlays --
+		// there's no per-image scale variation; earlier per-axis
+		// grp/HD scaling was a misdiagnosis of a different bug (the
+		// sieged tank turret/base slider decoupling, since fixed in
+		// sim_harness).
 		int img_off_x_hd = (int)img.offset_x * 4;
 		int img_off_y_hd = (int)img.offset_y * 4;
 		double dx, dy;
@@ -332,9 +340,35 @@ protected:
 		// classic mode.
 		if (!sim) return false;
 		auto images = sim->current_sprite_images();
-		// One-shot per-unit dump: emit the sprite's image list the
-		// first time we see each distinct (image_id) tuple so we can
-		// tell whether the sim is emitting a shadow entry at all.
+		// Fingerprint-guarded dump: fires on any change in the
+		// image list (image_id, frame, offset, flip). Used to
+		// diagnose per-facing offset behavior for iscript-spawned
+		// overlays (muzzle flashes, engine flames, ...).
+		{
+			static uint64_t last_fp = 0;
+			uint64_t fp = images.size();
+			for (const auto& im : images) {
+				fp = fp * 1315423911u
+					+ (uint32_t)(im.image_id + 1) * 2654435761u
+					+ (uint32_t)im.frame_index * 1000003u
+					+ (uint32_t)(im.offset_x + 32768) * 7919u
+					+ (uint32_t)(im.offset_y + 32768) * 5171u
+					+ (uint32_t)im.flipped * 31u;
+			}
+			if (fp != last_fp) {
+				last_fp = fp;
+				std::fprintf(stderr, "[dump] n=%zu\n", images.size());
+				for (const auto& im : images) {
+					std::fprintf(stderr,
+						"    id=%d gfi=%d fr=%d shd=%d hid=%d "
+						"off=(%d,%d) flip=%d\n",
+						im.image_id, im.grp_filename_index,
+						im.frame_index, (int)im.is_shadow,
+						(int)im.hidden, im.offset_x, im.offset_y,
+						(int)im.flipped);
+				}
+			}
+		}
 		for (const auto& img : images) paint_hd_image(p, img);
 		return true;
 	}
@@ -463,7 +497,16 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 		{"Ghost",          /*Terran_Ghost*/                 1},
 		{"Vulture",        /*Terran_Vulture*/               2},
 		{"Goliath",        /*Terran_Goliath*/               3},
-		{"Siege Tank",     /*Terran_Siege_Tank_Tank_Mode*/  5},
+		{"Siege Tank",       /*Terran_Siege_Tank_Tank_Mode*/    5},
+		// Sieged Siege Tank. The `unit_type_id` here is a UnitTypes
+		// ordinal, but Terran_Siege_Tank_Siege_Mode's numeric value
+		// depends on how the enum is packed alongside Hero_* entries
+		// -- eyeballing bwenums.h is easy to miscount. Verified via
+		// runtime scan: unit_type=30 -> image_id 253 (sieged base),
+		// which auto-attaches its subunit (unit_type=31 -> image 254,
+		// the sieged turret).
+		{"Siege Tank (Sieged)",
+		                     /*Terran_Siege_Tank_Siege_Mode*/ 30},
 		{"SCV",            /*Terran_SCV*/                   7},
 		{"Wraith",         /*Terran_Wraith*/                8},
 		{"Science Vessel", /*Terran_Science_Vessel*/        9},

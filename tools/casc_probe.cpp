@@ -274,6 +274,35 @@ int main(int argc, char** argv) {
 						"  layer_names @ 0x0C..0x148 (32B each):\n",
 						lo, (unsigned)got, magic, version, layers,
 						sw, sh, frame_count);
+					// Hexdump the body header (0x140..0x180) so we
+					// can spot anim-specific reference-point fields
+					// that the current parser doesn't touch.
+					std::printf("  body-region hexdump 0x140..0x180:\n");
+					for (int off = 0x140; off < 0x180 && off < (int)got;
+					     off += 16) {
+						std::printf("    %04X:", off);
+						for (int i = 0; i < 16 && off + i < (int)got; ++i) {
+							std::printf(" %02X", buf[off + i]);
+						}
+						std::printf("\n");
+					}
+					// Also print the first few frame entries so we
+					// can look for a per-frame anchor / reference point
+					// beyond the 16 bytes we currently parse.
+					unsigned ft_off = (unsigned)buf[0x154]
+						| ((unsigned)buf[0x155] << 8)
+						| ((unsigned)buf[0x156] << 16)
+						| ((unsigned)buf[0x157] << 24);
+					std::printf("  frame table @ 0x%X, first 3 frames "
+						"(16 bytes each):\n", ft_off);
+					for (int i = 0; i < 3 && ft_off + i*16 + 16 <= got; ++i) {
+						std::printf("    frame[%d] 0x%X:", i,
+							ft_off + i * 16);
+						for (int j = 0; j < 16; ++j) {
+							std::printf(" %02X", buf[ft_off + i * 16 + j]);
+						}
+						std::printf("\n");
+					}
 					for (unsigned i = 0; i < layers && i < 10; ++i) {
 						const unsigned char* n32 = buf.data() + 0x0C + i * 32;
 						// Layer descriptors that we can peek at later --

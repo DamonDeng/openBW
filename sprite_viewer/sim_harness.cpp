@@ -262,10 +262,23 @@ void SimHarness::set_turret_heading_from_slider(int slider_dir) {
 	int raw = (slider_dir * 16) % 256;
 	if (raw < 0) raw = 0;
 	if (raw > 255) raw = 255;
-	// set_unit_heading on the SUBUNIT -- iterates its own sprite's
-	// images, not the base's, so the base facing is untouched.
-	ui->set_unit_heading(unit->subunit,
-		ui->direction_from_index((size_t)raw));
+	auto dir = ui->direction_from_index((size_t)raw);
+	// set_unit_heading on the SUBUNIT rotates only its own sprite's
+	// images; the base's facing is untouched.
+	ui->set_unit_heading(unit->subunit, dir);
+	// Bases that can't visually turn (sieged tank chassis) still
+	// have a heading value the sim uses for iscript LO lookups --
+	// notably, iscript-spawned overlays like the turret's muzzle
+	// flash pull their sprite-relative anchor from
+	// get_image_lo_offset(base->main_image, 2, 0), which is
+	// indexed by the BASE's heading. If the base's heading doesn't
+	// match the turret's, the flame lands where a differently-
+	// facing barrel would be. On non-turnable bases we can safely
+	// keep the base heading in sync -- its art doesn't rotate
+	// anyway, so this is invisible other than fixing overlays.
+	if (!ui->u_can_turn(unit)) {
+		ui->set_unit_heading(unit, dir);
+	}
 }
 
 void SimHarness::tick() {
@@ -290,8 +303,15 @@ void SimHarness::tick() {
 		int raw = (turret_dir_override * 16) % 256;
 		if (raw < 0) raw = 0;
 		if (raw > 255) raw = 255;
-		ui->set_unit_heading(unit->subunit,
-			ui->direction_from_index((size_t)raw));
+		auto dir = ui->direction_from_index((size_t)raw);
+		ui->set_unit_heading(unit->subunit, dir);
+		// Keep non-turnable bases in sync so iscript's
+		// get_image_lo_offset(base, 2, 0) resolves to the same
+		// facing the turret is aimed at -- see the comment in
+		// set_turret_heading_from_slider().
+		if (!ui->u_can_turn(unit)) {
+			ui->set_unit_heading(unit, dir);
+		}
 	}
 
 	// Non-looping actions (GndAttkInit, GndAttkRpt, GndAttkToIdle,
