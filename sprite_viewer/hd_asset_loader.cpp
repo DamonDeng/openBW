@@ -1010,16 +1010,82 @@ HdAssetLoader::load_by_image_id(int image_id) {
 		err_ = "image_id negative";
 		return nullptr;
 	}
-	char name[64];
-	snprintf(name, sizeof(name), "anim\\main_%03d.anim", image_id);
+
+	// Resolve `image_id` to an actual anim file on disk. Two cases
+	// Blizzard's authoring uses:
+	//
+	//  (A) Unit / overlay image_ids where `main_<image_id>.anim` is
+	//      literally the file on disk. Rows in images.rel for such
+	//      ids are commonly flag=0x1 (SD-only) with no anim_num, but
+	//      the file exists as an orphan. This covers Marine, SCV,
+	//      Firebat, engine flames, muzzle overlays, shadows -- all
+	//      the units we already had working.
+	//
+	//  (B) Building bodies (and some other "primary" image_ids) where
+	//      no file with the raw image_id number exists. The image_id
+	//      given to us by the sim is the "reference" row in images.rel
+	//      but its HD companion sits at a nearby row with flag=0x8
+	//      that carries the actual `anim_num`. Command Center is
+	//      image_id 275 (flag=0x200); its HD companion is images.rel
+	//      row 277 (flag=0x8, anim_num=63) pointing at
+	//      `anim\main_063.anim`.
+	//
+	// Strategy: try (A) first (fast, matches what we've been doing
+	// for units). If the file doesn't exist, walk images.rel forward
+	// from `image_id` looking for a nearby HD (flag=8) or HD2
+	// (flag=4) row and use its anim_num. Cap the scan at a small
+	// distance so we don't wander to an unrelated unit's row.
+	auto try_open = [&](uint32_t anim_num,
+	                    std::vector<u8>& out) -> bool {
+		char name[64];
+		snprintf(name, sizeof(name), "anim\\main_%03u.anim", anim_num);
+		std::string ce;
+		if (!casc_read_file(impl_->storage, name, out, ce)) return false;
+		return true;
+	};
+
 	std::vector<u8> anim_bytes;
-	std::string ce;
-	if (!casc_read_file(impl_->storage, name, anim_bytes, ce)) {
-		err_ = QString::fromStdString("read " + std::string(name)
-			+ ": " + ce);
-		return nullptr;
+
+	// (A): main_<image_id>.anim as a direct file.
+	if (try_open((uint32_t)image_id, anim_bytes)) {
+		char dbg[64];
+		snprintf(dbg, sizeof(dbg), "anim\\main_%03d.anim", image_id);
+		return decode_anim_bytes(anim_bytes, dbg, err_);
 	}
-	return decode_anim_bytes(anim_bytes, name, err_);
+
+	// (B): scan images.rel forward for an HD companion row.
+	// A tight window (≤ 4 rows ahead) is empirically enough:
+	// Command Center 275 → row 277 = +2, Barracks / Refinery / etc.
+	// follow the same near-neighbor pattern in Blizzard's data.
+	// Going too wide would risk grabbing an unrelated unit's anim.
+	constexpr int kScanAhead = 4;
+	if (impl_ && !impl_->images_rel.empty()) {
+		int limit = std::min<int>(
+			(int)impl_->images_rel.size() - 1, image_id + kScanAhead);
+		for (int i = image_id + 1; i <= limit; ++i) {
+			const auto& e = impl_->images_rel[i];
+			if ((e.flag == 8 || e.flag == 4)
+			    && e.anim_num != 0xffffffff)
+			{
+				if (try_open(e.anim_num, anim_bytes)) {
+					char dbg[64];
+					snprintf(dbg, sizeof(dbg),
+						"anim\\main_%03u.anim (via images.rel row %d)",
+						(unsigned)e.anim_num, i);
+					return decode_anim_bytes(anim_bytes, dbg, err_);
+				}
+			}
+		}
+	}
+
+	err_ = QString("no anim file found for image_id %1 "
+		"(main_%2.anim missing and no HD companion in "
+		"images.rel[%3..%4])")
+		.arg(image_id)
+		.arg(image_id, 3, 10, QChar('0'))
+		.arg(image_id + 1)
+		.arg(image_id + kScanAhead);
+	return nullptr;
 }
 
 std::unique_ptr<HdSprite> HdAssetLoader::load_sprite(int sc_image_id) {
