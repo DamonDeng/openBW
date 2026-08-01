@@ -68,10 +68,34 @@ private slots:
 	void on_spawn_clicked();
 	void on_center_clicked();
 	void on_tick();
+	void on_units_selection_changed();
+	void on_move_clicked();
+	void on_attack_clicked();
+	void on_stop_clicked();
+	void on_hold_clicked();
+	void on_siege_clicked();
+	void on_unsiege_clicked();
+	void on_kill_clicked();
+	void on_canvas_clicked(int world_x, int world_y);
 
 private:
 	void refresh_unit_list();
 	void populate_units_for_race(int race_index);
+	int  selected_unit_id() const;
+	// Update button enabled states based on the currently-selected
+	// unit (Siege/Unsiege only for the right type, etc.).
+	void update_action_buttons();
+	// Interaction modes: "pending click will be interpreted as..."
+	// None = clicks are informational (log). Move/Attack = the
+	// next click on the canvas dispatches that order.
+	enum class ClickMode { None, Move, Attack };
+	void set_click_mode(ClickMode m, const char* status);
+	ClickMode click_mode_ = ClickMode::None;
+	// Tracks the last known selected-unit id so we can distinguish
+	// "list rebuilt, selection kept" from "user actually picked a
+	// different unit". Cancelling a Move/Attack toggle only happens
+	// on the latter.
+	int last_seen_selection_ = -1;
 
 	std::string data_path_;
 	std::string map_relpath_;
@@ -90,6 +114,16 @@ private:
 	QListWidget*  units_list_    = nullptr;
 	PlaygroundCanvas* canvas_    = nullptr;
 	QTimer*       tick_timer_    = nullptr;
+	// Action buttons -- kept as members so we can toggle their
+	// enabled state when selection changes (Siege only for Tank
+	// Mode, Unsiege only for Siege Mode, etc.).
+	QPushButton*  move_btn_      = nullptr;
+	QPushButton*  attack_btn_    = nullptr;
+	QPushButton*  stop_btn_      = nullptr;
+	QPushButton*  hold_btn_      = nullptr;
+	QPushButton*  siege_btn_     = nullptr;
+	QPushButton*  unsiege_btn_   = nullptr;
+	QPushButton*  kill_btn_      = nullptr;
 };
 
 }   // namespace sprite_viewer

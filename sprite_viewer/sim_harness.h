@@ -182,6 +182,34 @@ struct SimHarness {
 	// Empty string if the type id is out of range.
 	std::string unit_type_name(int unit_type_id) const;
 
+	// Return the unit_type_id of the unit with the given handle, or
+	// -1 if the handle is invalid / the unit has died. Used by the
+	// UI to gate buttons that only make sense for specific types
+	// (Siege / Unsiege).
+	int unit_type_id_of(int unit_id) const;
+
+	// Find the alive non-turret unit whose sprite is closest to
+	// (world_x, world_y), within `radius` SD-pixels. Returns the
+	// unit id or -1 if nothing is in range. Used by the playground
+	// to resolve a click on the canvas to either "click on ground"
+	// (nothing in range) or "click on unit" (unit id in range).
+	int unit_near(int world_x, int world_y, int radius) const;
+
+	// Order dispatch. All go through openBW's set_unit_order --
+	// same entry retail uses -- so downstream sim state (order
+	// queue, cooldowns, iscript spawn of muzzle flashes etc.) is
+	// identical to gameplay. No-op when the unit handle is invalid
+	// or the order isn't legal for that unit type. Returns true on
+	// dispatch success.
+	bool order_move(int unit_id, int world_x, int world_y);
+	bool order_attack_move(int unit_id, int world_x, int world_y);
+	bool order_attack_unit(int unit_id, int target_unit_id);
+	bool order_stop(int unit_id);
+	bool order_hold_position(int unit_id);
+	bool order_siege(int unit_id);
+	bool order_unsiege(int unit_id);
+	bool kill_unit_id(int unit_id);
+
 	// Paint the current unit into ui's indexed_surface + blit to
 	// window_surface. Returns pointer to the RGBA window surface
 	// data + width/height/pitch so the caller can copy pixels onto
@@ -281,6 +309,11 @@ struct SimHarness {
 
 private:
 	bool tried_first_update = false;
+
+	// Resolve a playground unit handle to an alive unit_t*, or
+	// nullptr if the handle is stale (unit died) or invalid. Used
+	// by every order_* wrapper -- keeps their bodies short.
+	bwgame::unit_t* unit_from_id(int unit_id) const;
 };
 
 // Names for the iscript_anims enum in data_types.h:446. Indexed by

@@ -170,8 +170,28 @@ PlaygroundTab::PlaygroundTab(std::string data_path,
 
 	left->addWidget(new QLabel("<b>Alive units</b>"));
 	units_list_ = new QListWidget();
-	units_list_->setMinimumHeight(300);
+	units_list_->setMinimumHeight(200);
 	left->addWidget(units_list_, /*stretch*/ 1);
+
+	// Action buttons for the selected unit. Move/Attack are two-
+	// step: pressing the button arms a click-mode that the next
+	// canvas click consumes. Stop/HoldPosition/Siege/Unsiege/Kill
+	// fire immediately.
+	left->addWidget(new QLabel("<b>Actions</b>"));
+	move_btn_     = new QPushButton("Move");
+	move_btn_->setCheckable(true);
+	attack_btn_   = new QPushButton("Attack");
+	attack_btn_->setCheckable(true);
+	stop_btn_     = new QPushButton("Stop");
+	hold_btn_     = new QPushButton("Hold Position");
+	siege_btn_    = new QPushButton("Siege");
+	unsiege_btn_  = new QPushButton("Unsiege");
+	kill_btn_     = new QPushButton("Kill");
+	for (auto* b : { move_btn_, attack_btn_, stop_btn_, hold_btn_,
+	                 siege_btn_, unsiege_btn_, kill_btn_ }) {
+		left->addWidget(b);
+		b->setEnabled(false);
+	}
 
 	root->addLayout(left, 0);
 
@@ -192,12 +212,23 @@ PlaygroundTab::PlaygroundTab(std::string data_path,
 		            QStringLiteral("world: %1, %2").arg(x).arg(y));
 	        });
 	connect(canvas_, &PlaygroundCanvas::clicked,
-	        this, [this](int x, int y) {
-		        // Phase 1: log the click. Phase 2 will use this to
-		        // issue orders (Move, Attack).
-		        std::fprintf(stderr,
-		            "[playground] click world=(%d,%d)\n", x, y);
-	        });
+	        this, &PlaygroundTab::on_canvas_clicked);
+	connect(units_list_, &QListWidget::itemSelectionChanged,
+	        this, &PlaygroundTab::on_units_selection_changed);
+	connect(move_btn_,    &QPushButton::clicked,
+	        this, &PlaygroundTab::on_move_clicked);
+	connect(attack_btn_,  &QPushButton::clicked,
+	        this, &PlaygroundTab::on_attack_clicked);
+	connect(stop_btn_,    &QPushButton::clicked,
+	        this, &PlaygroundTab::on_stop_clicked);
+	connect(hold_btn_,    &QPushButton::clicked,
+	        this, &PlaygroundTab::on_hold_clicked);
+	connect(siege_btn_,   &QPushButton::clicked,
+	        this, &PlaygroundTab::on_siege_clicked);
+	connect(unsiege_btn_, &QPushButton::clicked,
+	        this, &PlaygroundTab::on_unsiege_clicked);
+	connect(kill_btn_,    &QPushButton::clicked,
+	        this, &PlaygroundTab::on_kill_clicked);
 
 	on_race_changed(0);
 }
@@ -308,6 +339,14 @@ void PlaygroundTab::refresh_unit_list() {
 	if (auto* item = units_list_->currentItem()) {
 		selected_id = item->data(Qt::UserRole).toInt();
 	}
+	// Rebuilding the QListWidget's rows clears then repopulates
+	// its selection, which would fire itemSelectionChanged twice
+	// (once on clear, once on the re-select). Our handler would
+	// then cancel any armed Move/Attack targeting mode -- which
+	// makes the toggled Move button auto-untoggle after ~1s.
+	// Block signals for the rebuild so only real user selection
+	// changes trigger the handler.
+	units_list_->blockSignals(true);
 	units_list_->clear();
 	for (const auto& u : units) {
 		auto* item = new QListWidgetItem(
@@ -322,6 +361,167 @@ void PlaygroundTab::refresh_unit_list() {
 		if (u.id == selected_id) {
 			units_list_->setCurrentItem(item);
 		}
+	}
+	units_list_->blockSignals(false);
+	update_action_buttons();
+}
+
+int PlaygroundTab::selected_unit_id() const {
+	auto* item = units_list_ ? units_list_->currentItem() : nullptr;
+	if (!item) return -1;
+	return item->data(Qt::UserRole).toInt();
+}
+
+void PlaygroundTab::update_action_buttons() {
+	int id = selected_unit_id();
+	bool has = (id >= 0 && sim_);
+	int type_id = has ? sim_->unit_type_id_of(id) : -1;
+	if (type_id < 0) has = false;   // stale selection (unit died)
+
+	// While a target-picking mode is armed, keep the toggled button
+	// enabled (so the user can un-toggle it) and disable every other
+	// action. This makes it visually obvious what click will do
+	// next, and prevents accidentally firing Kill/Siege while
+	// aiming a Move/Attack.
+	bool targeting = (click_mode_ != ClickMode::None);
+	auto set_common = [&](QPushButton* b, bool ok) {
+		if (b) b->setEnabled(ok && !targeting);
+	};
+	set_common(stop_btn_, has);
+	set_common(hold_btn_, has);
+	set_common(kill_btn_, has);
+	// Siege/Unsiege only for the tank chassis in the right mode.
+	// Numbers match the runtime scan: Tank_Mode base=5,
+	// Siege_Mode base=30 (Hero Duke's are 25/26).
+	set_common(siege_btn_,
+		has && (type_id == 5  || type_id == 25));
+	set_common(unsiege_btn_,
+		has && (type_id == 30 || type_id == 26));
+
+	// Move/Attack: enabled when a unit is selected, OR when they
+	// are the currently-toggled targeting button (so the user can
+	// cancel by clicking again). Never both toggled at once.
+	if (move_btn_) {
+		move_btn_->setEnabled(
+			has || click_mode_ == ClickMode::Move);
+		move_btn_->setChecked(click_mode_ == ClickMode::Move);
+	}
+	if (attack_btn_) {
+		attack_btn_->setEnabled(
+			has || click_mode_ == ClickMode::Attack);
+		attack_btn_->setChecked(click_mode_ == ClickMode::Attack);
+	}
+}
+
+void PlaygroundTab::set_click_mode(ClickMode m, const char* status) {
+	click_mode_ = m;
+	if (status_label_) status_label_->setText(QString::fromUtf8(status));
+	update_action_buttons();
+}
+
+void PlaygroundTab::on_units_selection_changed() {
+	// Only reset a targeting click-mode if the selection actually
+	// moved to a different unit -- rebuilding the list every second
+	// can nudge the "current item" briefly, and we don't want that
+	// to yank the toggled Move/Attack button off mid-aim.
+	int now = selected_unit_id();
+	if (now != last_seen_selection_ && click_mode_ != ClickMode::None) {
+		set_click_mode(ClickMode::None, "");
+	}
+	last_seen_selection_ = now;
+	update_action_buttons();
+}
+
+void PlaygroundTab::on_move_clicked() {
+	// Toggle: clicking Move again while already in Move-mode cancels.
+	if (click_mode_ == ClickMode::Move) {
+		set_click_mode(ClickMode::None, "");
+	} else {
+		set_click_mode(ClickMode::Move,
+			"Click on the map to set the move destination. "
+			"Click Move again to cancel.");
+	}
+}
+
+void PlaygroundTab::on_attack_clicked() {
+	if (click_mode_ == ClickMode::Attack) {
+		set_click_mode(ClickMode::None, "");
+	} else {
+		set_click_mode(ClickMode::Attack,
+			"Click on the map (or on a unit) to attack. "
+			"Click Attack again to cancel.");
+	}
+}
+
+void PlaygroundTab::on_stop_clicked() {
+	if (sim_) sim_->order_stop(selected_unit_id());
+}
+
+void PlaygroundTab::on_hold_clicked() {
+	if (sim_) sim_->order_hold_position(selected_unit_id());
+}
+
+void PlaygroundTab::on_siege_clicked() {
+	if (!sim_) return;
+	if (!sim_->order_siege(selected_unit_id())) {
+		status_label_->setText("Siege not allowed for this unit.");
+	}
+}
+
+void PlaygroundTab::on_unsiege_clicked() {
+	if (!sim_) return;
+	if (!sim_->order_unsiege(selected_unit_id())) {
+		status_label_->setText("Unsiege not allowed for this unit.");
+	}
+}
+
+void PlaygroundTab::on_kill_clicked() {
+	if (!sim_) return;
+	int id = selected_unit_id();
+	if (sim_->kill_unit_id(id)) {
+		refresh_unit_list();
+	}
+}
+
+void PlaygroundTab::on_canvas_clicked(int world_x, int world_y) {
+	if (!sim_) return;
+	int uid = selected_unit_id();
+	switch (click_mode_) {
+	case ClickMode::Move: {
+		if (uid >= 0) sim_->order_move(uid, world_x, world_y);
+		set_click_mode(ClickMode::None, "");
+		break;
+	}
+	case ClickMode::Attack: {
+		if (uid >= 0) {
+			// Prefer AttackUnit when the click landed on a unit
+			// (24 SD-pixel tolerance ≈ 3/4 tile), else AttackMove
+			// on the ground.
+			int target = sim_->unit_near(world_x, world_y, 24);
+			if (target >= 0 && target != uid) {
+				sim_->order_attack_unit(uid, target);
+			} else {
+				sim_->order_attack_move(uid, world_x, world_y);
+			}
+		}
+		set_click_mode(ClickMode::None, "");
+		break;
+	}
+	case ClickMode::None:
+	default: {
+		// No armed action: clicking on a unit selects it.
+		int hit = sim_->unit_near(world_x, world_y, 24);
+		if (hit >= 0 && units_list_) {
+			for (int i = 0; i < units_list_->count(); ++i) {
+				auto* item = units_list_->item(i);
+				if (item && item->data(Qt::UserRole).toInt() == hit) {
+					units_list_->setCurrentItem(item);
+					break;
+				}
+			}
+		}
+		break;
+	}
 	}
 }
 

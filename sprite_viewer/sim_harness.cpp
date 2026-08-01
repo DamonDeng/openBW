@@ -721,6 +721,113 @@ std::vector<SimHarness::UnitInfo> SimHarness::list_units() const {
 	return out;
 }
 
+int SimHarness::unit_type_id_of(int unit_id) const {
+	if (!ui || unit_id < 0) return -1;
+	auto* u = ui->st.units_container.try_get((size_t)unit_id);
+	if (!u || ui->unit_dead(u)) return -1;
+	return (int)u->unit_type->id;
+}
+
+int SimHarness::unit_near(int world_x, int world_y, int radius) const {
+	if (!ui) return -1;
+	long long best_d2 = (long long)radius * radius;
+	int best_id = -1;
+	auto scan = [&](const bwgame::unit_t* u) {
+		if (!u || !u->sprite) return;
+		if (ui->ut_turret(u)) return;   // turrets aren't clickable
+		long long dx = u->sprite->position.x - world_x;
+		long long dy = u->sprite->position.y - world_y;
+		long long d2 = dx * dx + dy * dy;
+		if (d2 <= best_d2) { best_d2 = d2; best_id = (int)u->index; }
+	};
+	for (const bwgame::unit_t* u : bwgame::ptr(ui->st.visible_units)) {
+		scan(u);
+	}
+	return best_id;
+}
+
+// Look up an alive unit by its playground handle (unit index).
+// Returns nullptr for dead / invalid handles. Small helper used by
+// all the order_* wrappers below.
+bwgame::unit_t* SimHarness::unit_from_id(int unit_id) const {
+	if (!ui || unit_id < 0) return nullptr;
+	auto* u = ui->st.units_container.try_get((size_t)unit_id);
+	if (!u || ui->unit_dead(u)) return nullptr;
+	return u;
+}
+
+bool SimHarness::order_move(int unit_id, int world_x, int world_y) {
+	auto* u = unit_from_id(unit_id);
+	if (!u) return false;
+	ui->set_unit_order(u, ui->get_order_type(bwgame::Orders::Move),
+		bwgame::xy(world_x, world_y));
+	return true;
+}
+
+bool SimHarness::order_attack_move(int unit_id,
+                                    int world_x, int world_y)
+{
+	auto* u = unit_from_id(unit_id);
+	if (!u) return false;
+	ui->set_unit_order(u, ui->get_order_type(bwgame::Orders::AttackMove),
+		bwgame::xy(world_x, world_y));
+	return true;
+}
+
+bool SimHarness::order_attack_unit(int unit_id, int target_unit_id) {
+	auto* u = unit_from_id(unit_id);
+	auto* t = unit_from_id(target_unit_id);
+	if (!u || !t) return false;
+	ui->set_unit_order(u, ui->get_order_type(bwgame::Orders::AttackUnit), t);
+	return true;
+}
+
+bool SimHarness::order_stop(int unit_id) {
+	auto* u = unit_from_id(unit_id);
+	if (!u) return false;
+	ui->set_unit_order(u, ui->get_order_type(bwgame::Orders::Stop));
+	return true;
+}
+
+bool SimHarness::order_hold_position(int unit_id) {
+	auto* u = unit_from_id(unit_id);
+	if (!u) return false;
+	ui->set_unit_order(u, ui->get_order_type(bwgame::Orders::HoldPosition));
+	return true;
+}
+
+bool SimHarness::order_siege(int unit_id) {
+	auto* u = unit_from_id(unit_id);
+	if (!u) return false;
+	// Only Tank_Mode can siege. UnSiege for the reverse.
+	if (u->unit_type->id != bwgame::UnitTypes::Terran_Siege_Tank_Tank_Mode
+	    && u->unit_type->id != bwgame::UnitTypes::Hero_Edmund_Duke_Tank_Mode)
+	{
+		return false;
+	}
+	ui->set_unit_order(u, ui->get_order_type(bwgame::Orders::Sieging));
+	return true;
+}
+
+bool SimHarness::order_unsiege(int unit_id) {
+	auto* u = unit_from_id(unit_id);
+	if (!u) return false;
+	if (u->unit_type->id != bwgame::UnitTypes::Terran_Siege_Tank_Siege_Mode
+	    && u->unit_type->id != bwgame::UnitTypes::Hero_Edmund_Duke_Siege_Mode)
+	{
+		return false;
+	}
+	ui->set_unit_order(u, ui->get_order_type(bwgame::Orders::Unsieging));
+	return true;
+}
+
+bool SimHarness::kill_unit_id(int unit_id) {
+	auto* u = unit_from_id(unit_id);
+	if (!u) return false;
+	ui->kill_unit(u);
+	return true;
+}
+
 std::string SimHarness::unit_type_name(int unit_type_id) const {
 	// openBW doesn't load arr/units.tbl (the string table with
 	// display names) -- it isn't used for gameplay. For phase 1 the
