@@ -584,6 +584,50 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 		{"Templar Archives",   /*Protoss_Templar_Archives*/     165},
 	}});
 
+	// Zerg roster. Numeric unit_type ids from a runtime scan (same
+	// technique as Terran/Protoss). Includes pre-hatch morph states
+	// (Larva, Egg, Cocoon, Lurker Egg) for completeness -- they
+	// render as their morph visuals, useful for eyeballing the
+	// pre-transformation animations.
+	races.push_back({"Zerg", {
+		{"Drone",              /*Zerg_Drone*/                    41},
+		{"Zergling",           /*Zerg_Zergling*/                 37},
+		{"Hydralisk",          /*Zerg_Hydralisk*/                38},
+		{"Lurker",             /*Zerg_Lurker*/                  103},
+		{"Ultralisk",          /*Zerg_Ultralisk*/                39},
+		{"Defiler",            /*Zerg_Defiler*/                  46},
+		{"Overlord",           /*Zerg_Overlord*/                 42},
+		{"Mutalisk",           /*Zerg_Mutalisk*/                 43},
+		{"Guardian",           /*Zerg_Guardian*/                 44},
+		{"Devourer",           /*Zerg_Devourer*/                 62},
+		{"Queen",              /*Zerg_Queen*/                    45},
+		{"Scourge",            /*Zerg_Scourge*/                  47},
+		{"Infested Terran",    /*Zerg_Infested_Terran*/          50},
+		{"Broodling",          /*Zerg_Broodling*/                40},
+		{"Larva",              /*Zerg_Larva*/                    35},
+		{"Egg",                /*Zerg_Egg*/                      36},
+		{"Cocoon",             /*Zerg_Cocoon*/                   59},
+		{"Lurker Egg",         /*Zerg_Lurker_Egg*/               97},
+		{"Hatchery",           /*Zerg_Hatchery*/                131},
+		{"Lair",               /*Zerg_Lair*/                    132},
+		{"Hive",               /*Zerg_Hive*/                    133},
+		{"Extractor",          /*Zerg_Extractor*/               149},
+		{"Creep Colony",       /*Zerg_Creep_Colony*/            143},
+		{"Sunken Colony",      /*Zerg_Sunken_Colony*/           146},
+		{"Spore Colony",       /*Zerg_Spore_Colony*/            144},
+		{"Spawning Pool",      /*Zerg_Spawning_Pool*/           142},
+		{"Evolution Chamber",  /*Zerg_Evolution_Chamber*/       139},
+		{"Hydralisk Den",      /*Zerg_Hydralisk_Den*/           135},
+		{"Spire",              /*Zerg_Spire*/                   141},
+		{"Greater Spire",      /*Zerg_Greater_Spire*/           137},
+		{"Queens Nest",        /*Zerg_Queens_Nest*/             138},
+		{"Nydus Canal",        /*Zerg_Nydus_Canal*/             134},
+		{"Defiler Mound",      /*Zerg_Defiler_Mound*/           136},
+		{"Ultralisk Cavern",   /*Zerg_Ultralisk_Cavern*/        140},
+		{"Infested Command Center",
+		                       /*Zerg_Infested_Command_Center*/ 130},
+	}});
+
 	// --- widgets ---
 	// Two-tab layout: "Classic" hosts the original per-unit
 	// anim browser; "HD Mapping" is the eyeball-driven
