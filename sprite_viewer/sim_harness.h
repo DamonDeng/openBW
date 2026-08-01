@@ -28,6 +28,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace bwgame {
 	struct unit_t;
@@ -73,6 +74,11 @@ struct SimHarness {
 	// by set_turret_heading_from_slider; reapplied every tick() so
 	// the sim can't drag the turret back to face the base each frame.
 	int turret_dir_override = -1;
+
+	// Toggled true by the Playground tab. render_frame() then draws
+	// every alive unit (not just the single `unit`) and skips the
+	// auto-center-on-unit camera behavior.
+	bool playground_mode = false;
 
 	// Map dimensions in world (pixel) coords, cached after map load.
 	int map_pixel_width = 0;
@@ -130,8 +136,51 @@ struct SimHarness {
 	void tick();
 
 	// Center the viewport on the current unit so `draw_sprite`
-	// paints it at the canvas center.
+	// paints it at the canvas center. No-op in playground mode --
+	// the caller drives the camera itself via set_screen_pos.
 	void center_viewport();
+
+	// Playground mode: render_frame() paints ALL alive units, doesn't
+	// snap the camera to a single "current" unit, and doesn't require
+	// a `unit` to be spawned. Screen position is caller-controlled.
+	// Distinct from the animation-browser mode which is single-unit
+	// centric. Toggle before render_frame(); no state changes needed
+	// after the flip.
+	void set_playground_mode(bool on) { playground_mode = on; }
+	bool is_playground_mode() const { return playground_mode; }
+
+	// Free-camera control for playground mode. World coords in SD
+	// pixels. Getters mirror the underlying ui state -- callers use
+	// them to compute a "screen click x/y -> world x/y" map when
+	// dispatching orders to a click.
+	void set_screen_pos(int world_x, int world_y);
+	int  screen_pos_x() const;
+	int  screen_pos_y() const;
+	int  map_width_px()  const { return map_pixel_width;  }
+	int  map_height_px() const { return map_pixel_height; }
+
+	// Playground unit management. `spawn_at` places a new unit at
+	// (world_x, world_y) owned by `owner` (0..7). Returns the unit
+	// id (openBW's addressable handle) on success, or -1 on failure.
+	// Unlike spawn_unit() this does NOT kill the "current" unit --
+	// it grows the world. Multiple units of any type coexist.
+	int  spawn_at(int unit_type_id, int world_x, int world_y, int owner);
+
+	// Live unit listing. One entry per alive unit in the world,
+	// regardless of ownership. Ordered by unit id for stable UI.
+	struct UnitInfo {
+		int id = -1;                // opaque handle
+		int unit_type_id = -1;
+		int owner = -1;
+		int world_x = 0, world_y = 0;
+		int hp_int = 0;             // truncated fp8 hp
+		std::string type_name;      // arr/units.tbl string
+	};
+	std::vector<UnitInfo> list_units() const;
+
+	// Look up a unit_type_t's display name from arr/units.tbl.
+	// Empty string if the type id is out of range.
+	std::string unit_type_name(int unit_type_id) const;
 
 	// Paint the current unit into ui's indexed_surface + blit to
 	// window_surface. Returns pointer to the RGBA window surface

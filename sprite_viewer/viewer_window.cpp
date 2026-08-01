@@ -13,6 +13,7 @@
 #include "hd_asset_loader.h"
 #include "mapping_tab.h"
 #include "frames_tab.h"
+#include "playground_tab.h"
 
 #include <QtCore/QDebug>
 #include <QtCore/QDir>
@@ -731,6 +732,13 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 		"HD Mapping");
 	frames_tab = new FramesTab(hd_loader.get(), tabs);
 	tabs->addTab(frames_tab, "Frames");
+	// SD Playground: live openBW gameplay sandbox on its own
+	// SimHarness. Lazy-booted on first tab visit so the app opens
+	// as fast as before -- boot cost is a few seconds of MPQ +
+	// GRP load, incurred only if the user opens this tab.
+	tabs->addTab(
+		new PlaygroundTab(data_path, map_relpath, tabs),
+		"SD Playground");
 }
 
 ViewerWindow::~ViewerWindow() = default;

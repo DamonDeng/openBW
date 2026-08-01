@@ -9,6 +9,7 @@
 #include "bwgame.h"
 #include "ui.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <string>
@@ -380,6 +381,8 @@ void SimHarness::tick() {
 
 void SimHarness::center_viewport() {
 	if (!ui || !unit_is_alive_for_render(unit)) return;
+	// Playground drives its own camera; skip the auto-snap-to-unit.
+	if (playground_mode) return;
 	// screen_pos is subtracted from world coords in draw_image (see
 	// ui.h:877). Setting it to (unit_pos - screen_center) places
 	// the unit at the pixel center of the viewport.
@@ -387,6 +390,21 @@ void SimHarness::center_viewport() {
 		unit->sprite->position.x - (int)ui->screen_width / 2,
 		unit->sprite->position.y - (int)ui->screen_height / 2,
 	};
+}
+
+void SimHarness::set_screen_pos(int world_x, int world_y) {
+	if (!ui) return;
+	ui->screen_pos = { world_x, world_y };
+}
+
+int SimHarness::screen_pos_x() const {
+	if (!ui) return 0;
+	return ui->screen_pos.x;
+}
+
+int SimHarness::screen_pos_y() const {
+	if (!ui) return 0;
+	return ui->screen_pos.y;
 }
 
 SimHarness::FramePixels SimHarness::render_frame(bool draw_sprite) {
@@ -425,8 +443,27 @@ SimHarness::FramePixels SimHarness::render_frame(bool draw_sprite) {
 	// too produces a double-draw (SD unit at 2x behind the HD
 	// unit at 1x, both offset by kHdScale). See render_frame's
 	// draw_sprite parameter docs.
-	if (draw_sprite && unit_is_alive_for_render(unit)) {
-		ui->draw_sprite(unit->sprite, data, pitch);
+	if (draw_sprite) {
+		if (playground_mode) {
+			// Playground: iterate every sprite in visible bounds
+			// like retail's draw_sprites does. That naturally picks
+			// up bases + turrets + shadows for every unit on-screen
+			// via the sprite_t list stored in tile bins.
+			ui->draw_sprites(data, pitch);
+		} else if (unit_is_alive_for_render(unit)) {
+			// Animation-browser mode: single-unit focus. Two-part
+			// units (Siege Tank, Goliath, Vulture) own a separate
+			// `subunit` sprite for the turret; here we only render
+			// the current unit's sprite so we have to explicitly
+			// emit the turret too. Draw order matches
+			// sprite_depth_order's convention (base first, then
+			// turret on top). Mirrors current_sprite_images's own
+			// splice for the HD path.
+			ui->draw_sprite(unit->sprite, data, pitch);
+			if (unit->subunit && ui->ut_turret(unit->subunit)) {
+				ui->draw_sprite(unit->subunit->sprite, data, pitch);
+			}
+		}
 	}
 	idx->unlock();
 
@@ -628,6 +665,70 @@ int SimHarness::current_grp_filename_index() const {
 	int idx = (int)image->image_type->grp_filename_index;
 	if (idx == 0) return -1;
 	return idx - 1;   // 1-based -> 0-based
+}
+
+// ---- Playground API -------------------------------------------------
+
+int SimHarness::spawn_at(int unit_type_id, int world_x, int world_y,
+                          int owner)
+{
+	if (!ui) return -1;
+	auto& funcs = *ui;
+	const unit_type_t* ut = funcs.get_unit_type(
+		(UnitTypes)unit_type_id);
+	if (!ut) return -1;
+	// Bail if the position isn't a legal spawn (out of bounds,
+	// collision, water for a ground unit, etc.).
+	xy pos(world_x, world_y);
+	unit_t* u = funcs.create_completed_unit(ut, pos, owner);
+	if (!u) return -1;
+	funcs.set_unit_heading(u, funcs.direction_from_index(0));
+	return (int)u->index;
+}
+
+std::vector<SimHarness::UnitInfo> SimHarness::list_units() const {
+	std::vector<UnitInfo> out;
+	if (!ui) return out;
+	// Walk both visible + hidden lists so buildings-in-progress and
+	// dying units show up too. Callers can filter by status if
+	// needed. Turrets (subunits) are intentionally excluded: they
+	// have their own unit_t entries but they're rendered as part of
+	// their parent, so listing them separately would double up the
+	// UI. `flag_turret` on the type is the correct filter.
+	auto push = [&](const bwgame::unit_t* u) {
+		if (!u) return;
+		if (ui->ut_turret(u)) return;   // skip subunits
+		UnitInfo info;
+		info.id           = (int)u->index;
+		info.unit_type_id = (int)u->unit_type->id;
+		info.owner        = (int)u->owner;
+		info.world_x      = u->sprite ? u->sprite->position.x : 0;
+		info.world_y      = u->sprite ? u->sprite->position.y : 0;
+		info.hp_int       = u->hp.integer_part();
+		info.type_name    = unit_type_name(info.unit_type_id);
+		out.push_back(std::move(info));
+	};
+	for (const bwgame::unit_t* u : bwgame::ptr(ui->st.visible_units)) {
+		push(u);
+	}
+	for (const bwgame::unit_t* u : bwgame::ptr(ui->st.hidden_units)) {
+		push(u);
+	}
+	std::sort(out.begin(), out.end(),
+		[](const UnitInfo& a, const UnitInfo& b) {
+			return a.id < b.id;
+		});
+	return out;
+}
+
+std::string SimHarness::unit_type_name(int unit_type_id) const {
+	// openBW doesn't load arr/units.tbl (the string table with
+	// display names) -- it isn't used for gameplay. For phase 1 the
+	// UI just shows "type=NN"; a later polish pass can load the tbl
+	// and index it here.
+	char buf[32];
+	std::snprintf(buf, sizeof(buf), "type=%d", unit_type_id);
+	return buf;
 }
 
 }   // namespace sprite_viewer

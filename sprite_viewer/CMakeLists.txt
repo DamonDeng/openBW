@@ -61,6 +61,7 @@ add_executable(sprite_viewer
     hd_asset_loader.cpp
     mapping_tab.cpp
     frames_tab.cpp
+    playground_tab.cpp
     # Reuse the Qt drawing backend from simsc_app directly. It
     # provides native_window::* + native_window_drawing::* symbols
     # that ui.h and its friends need. No .qrc means the HUD chrome
