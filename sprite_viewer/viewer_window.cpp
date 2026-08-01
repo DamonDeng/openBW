@@ -14,6 +14,7 @@
 #include "mapping_tab.h"
 #include "frames_tab.h"
 #include "playground_tab.h"
+#include "drawing_playground_tab.h"
 
 #include <QtCore/QDebug>
 #include <QtCore/QDir>
@@ -247,8 +248,14 @@ protected:
 	}
 
 	bool paint_hd(QPainter& p) {
-		HdSprite* hd = owner ? owner->current_hd : nullptr;
-		if (!hd || hd->frames.empty()) return false;
+		// Legacy gate: this used to early-return if the unit-level
+		// current_hd (looked up via the mapping table at unit-change
+		// time) was null. That gate silently hid every unit that
+		// wasn't in the mapping table -- Medic, Valkyrie, etc. --
+		// even though the per-image loop below is self-sufficient:
+		// it loads each image_id directly via load_by_image_id.
+		// Requiring an HD loader is enough.
+		if (!owner || !owner->hd_loader) return false;
 
 		// Ground + sprite share one viewport: a centered square
 		// scaled to fit whichever side of the widget is shorter.
@@ -732,6 +739,14 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 		"HD Mapping");
 	frames_tab = new FramesTab(hd_loader.get(), tabs);
 	tabs->addTab(frames_tab, "Frames");
+	// Drawing Playground: manual pixel-offset calibration for
+	// image_t overlays that drift from where they should render
+	// (e.g. the sieged tank muzzle flash). Spawns a firing sieged
+	// tank, arrow keys nudge either the turret or the flame layer.
+	// Lazy-booted on first show (same pattern as PlaygroundTab).
+	tabs->addTab(
+		new DrawingPlaygroundTab(data_path, map_relpath, tabs),
+		"Drawing Playground");
 	// SD Playground: live openBW gameplay sandbox on its own
 	// SimHarness. Lazy-booted on first tab visit so the app opens
 	// as fast as before -- boot cost is a few seconds of MPQ +

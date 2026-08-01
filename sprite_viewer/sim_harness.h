@@ -80,6 +80,24 @@ struct SimHarness {
 	// auto-center-on-unit camera behavior.
 	bool playground_mode = false;
 
+	// Debug offset deltas for the calibration tab. Applied every
+	// tick after openBW's own next_frame -- iscript would otherwise
+	// keep overwriting image->offset back to its authored value.
+	// base_dx/dy affect every image_t on unit->sprite;
+	// turret_dx/dy affect the turret's main image (subunit main
+	// image); overlay_dx/dy affect every non-main image on the
+	// turret sprite (muzzle flash, spider mine trail, ...).
+	int debug_base_dx    = 0, debug_base_dy    = 0;
+	int debug_turret_dx  = 0, debug_turret_dy  = 0;
+	int debug_overlay_dx = 0, debug_overlay_dy = 0;
+
+	// Overlay compensation table (per-image_id fix-ups for retail-
+	// authored offsets that don't land where they should). Enabled
+	// by default because we want production renders to look correct;
+	// the Drawing Playground tab disables it while calibrating so
+	// the raw retail drift is visible for tuning.
+	bool overlay_compensation_enabled = true;
+
 	// Map dimensions in world (pixel) coords, cached after map load.
 	int map_pixel_width = 0;
 	int map_pixel_height = 0;
@@ -210,6 +228,26 @@ struct SimHarness {
 	bool order_unsiege(int unit_id);
 	bool kill_unit_id(int unit_id);
 
+	// Debug offset overrides for the calibration tab. Sets a per-
+	// frame image->offset delta applied to every image_t on the
+	// unit's sprite (turret_delta) or its subunit's sprite
+	// (flame_delta -- iscript-spawned overlays like the muzzle
+	// flash live on the turret sprite). Applied every tick so it
+	// persists through the sim's own next_frame() work. Delta = (0,0)
+	// means "leave openBW's authored value alone".
+	void set_debug_offset_delta(int base_dx, int base_dy,
+	                             int turret_dx, int turret_dy,
+	                             int overlay_dx, int overlay_dy);
+
+	// Enable/disable the built-in per-image_id compensation table
+	// (see the tick() body for the current entries -- sieged tank
+	// muzzle flash, etc.). Default = enabled. The Drawing Playground
+	// tab flips this off while calibrating so the raw uncompensated
+	// drift is visible.
+	void set_overlay_compensation_enabled(bool on) {
+		overlay_compensation_enabled = on;
+	}
+
 	// Paint the current unit into ui's indexed_surface + blit to
 	// window_surface. Returns pointer to the RGBA window surface
 	// data + width/height/pitch so the caller can copy pixels onto
@@ -314,6 +352,13 @@ private:
 	// nullptr if the handle is stale (unit died) or invalid. Used
 	// by every order_* wrapper -- keeps their bodies short.
 	bwgame::unit_t* unit_from_id(int unit_id) const;
+
+	// Post-tick nudge for image_ts whose authored offsets in retail
+	// SC:BW don't land where they should. Only fires when the sim's
+	// tracked unit is a known-affected type (see the fast-path gate
+	// in the implementation). The correction table itself is in
+	// sim_harness.cpp; add entries there after visual calibration.
+	void apply_retail_offset_compensation();
 };
 
 // Names for the iscript_anims enum in data_types.h:446. Indexed by

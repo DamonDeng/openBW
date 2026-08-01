@@ -315,6 +315,49 @@ void SimHarness::tick() {
 		}
 	}
 
+	// Debug offset deltas (calibration tab): applied AFTER
+	// next_frame each tick so iscript can't reset them. Splits by
+	// which sprite the image lives on:
+	//   * base_dx/dy  -> every image on unit->sprite
+	//   * turret_dx/dy -> the turret main image only (subunit main)
+	//   * overlay_dx/dy -> every non-main image on the turret sprite
+	//     (muzzle flash, spider mine trail, etc.)
+	if (unit_is_alive_for_render(unit)
+	    && (debug_base_dx | debug_base_dy | debug_turret_dx |
+	        debug_turret_dy | debug_overlay_dx | debug_overlay_dy) != 0)
+	{
+		for (auto& img : unit->sprite->images) {
+			img.offset.x += debug_base_dx;
+			img.offset.y += debug_base_dy;
+		}
+		if (unit->subunit && ui->ut_turret(unit->subunit)) {
+			auto* main = unit->subunit->sprite->main_image;
+			for (auto& img : unit->subunit->sprite->images) {
+				if (&img == main) {
+					img.offset.x += debug_turret_dx;
+					img.offset.y += debug_turret_dy;
+				} else {
+					img.offset.x += debug_overlay_dx;
+					img.offset.y += debug_overlay_dy;
+				}
+			}
+		}
+	}
+
+	// Retail SC:BW ships a handful of image_ts whose iscript-authored
+	// offsets don't land on their intended anchor -- the sieged tank
+	// muzzle flash is the known case, drifting ~7 px right and 11 px
+	// down of the barrel tip. openBW faithfully reproduces the drift.
+	//
+	// Only applied in the sprite-viewer sim wrapper because that's
+	// the only consumer that renders idle-firing scenarios in
+	// isolation where the drift is glaring; real gameplay doesn't
+	// notice. Costs nothing when no compensated unit is present
+	// (the early return below is the fast path).
+	if (overlay_compensation_enabled) {
+		apply_retail_offset_compensation();
+	}
+
 	// Non-looping actions (GndAttkInit, GndAttkRpt, GndAttkToIdle,
 	// AirAttk*, CastSpell, ...) run to completion in iscript, then
 	// iscript falls back to Idle -- so a firing marine shoots once
@@ -819,6 +862,85 @@ bool SimHarness::order_unsiege(int unit_id) {
 	}
 	ui->set_unit_order(u, ui->get_order_type(bwgame::Orders::Unsieging));
 	return true;
+}
+
+// Fixed table of per-image_id offset corrections for retail SC:BW's
+// authoring inaccuracies. Applied post-tick by SimHarness::tick when
+// overlay compensation is enabled. Each row: { image_id, dx, dy }.
+// Kept small on purpose -- only add an entry after verifying the
+// drift via the Drawing Playground calibration tab.
+namespace {
+
+struct OffsetCorrection {
+	int image_id;
+	int dx;
+	int dy;
+	// Fast-path predicate: for units of these types, no images on
+	// the unit sprite ever match, so we can skip the loop entirely.
+	// Empty means "always scan".
+};
+
+// Sieged Siege Tank muzzle flash. image_id 537 spawned via
+// opc_imgoluselo with LO offsets that Blizzard authored ~(7, 11)
+// off from the actual barrel tip. Retail SC:BW shows the same
+// drift; openBW is faithful. Correction calibrated 2026-08-01
+// via the Drawing Playground.
+constexpr OffsetCorrection kCorrections[] = {
+	{ /*image_id=*/537, /*dx=*/-7, /*dy=*/-11 },
+};
+
+// Returns dx/dy for image_id, or {0,0} if no correction applies.
+inline bool correction_for(int image_id, int& dx, int& dy) {
+	for (const auto& c : kCorrections) {
+		if (c.image_id == image_id) {
+			dx = c.dx; dy = c.dy; return true;
+		}
+	}
+	dx = 0; dy = 0; return false;
+}
+
+}   // namespace
+
+void SimHarness::apply_retail_offset_compensation() {
+	// Fast path: sieged tank = unit_type 30 (Hero Duke variant is
+	// 26). If our single tracked unit isn't one of those, the sprite
+	// tree can't contain image_id 537 (the sieged muzzle flash) and
+	// we skip the scan entirely. Real gameplay-scale sims would
+	// need a broader gate; this harness is single-unit.
+	if (!unit_is_alive_for_render(unit)) return;
+	int type_id = (int)unit->unit_type->id;
+	if (type_id != 30 && type_id != 26) {
+		// Not a unit that owns a compensated overlay: return early.
+		// Update this gate if kCorrections grows.
+		return;
+	}
+	// Scan the unit + turret sprites and apply corrections.
+	auto scan = [&](bwgame::sprite_t* sprite) {
+		if (!sprite) return;
+		for (auto& img : sprite->images) {
+			int dx, dy;
+			if (correction_for((int)img.image_type->id, dx, dy)) {
+				img.offset.x += dx;
+				img.offset.y += dy;
+			}
+		}
+	};
+	scan(unit->sprite);
+	if (unit->subunit && ui->ut_turret(unit->subunit)) {
+		scan(unit->subunit->sprite);
+	}
+}
+
+void SimHarness::set_debug_offset_delta(int base_dx, int base_dy,
+                                         int turret_dx, int turret_dy,
+                                         int overlay_dx, int overlay_dy)
+{
+	debug_base_dx    = base_dx;
+	debug_base_dy    = base_dy;
+	debug_turret_dx  = turret_dx;
+	debug_turret_dy  = turret_dy;
+	debug_overlay_dx = overlay_dx;
+	debug_overlay_dy = overlay_dy;
 }
 
 bool SimHarness::kill_unit_id(int unit_id) {
