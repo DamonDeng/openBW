@@ -1057,7 +1057,16 @@ HdAssetLoader::load_by_image_id(int image_id) {
 	// A tight window (≤ 4 rows ahead) is empirically enough:
 	// Command Center 275 → row 277 = +2, Barracks / Refinery / etc.
 	// follow the same near-neighbor pattern in Blizzard's data.
-	// Going too wide would risk grabbing an unrelated unit's anim.
+	//
+	// We must also gate on `e.anim_num <= image_id`. Why: Blizzard's
+	// images.rel packs each unit's rows in a tight group whose HD
+	// companion row's anim_num points BACKWARD at the group's "base"
+	// SD row. Command Center: rows 275/276/277 all point at anim_num=63
+	// (which is <= 275). But an overlay row like Probe Warp Flash
+	// (row 139, flag=0x200) has no HD companion of its own -- the
+	// next HD row (141) belongs to the NEXT unit (Scout body) and
+	// its anim_num=140 is > 139. Without the gate, we'd render the
+	// Scout body for a Probe warp-flash.
 	constexpr int kScanAhead = 4;
 	if (impl_ && !impl_->images_rel.empty()) {
 		int limit = std::min<int>(
@@ -1065,7 +1074,8 @@ HdAssetLoader::load_by_image_id(int image_id) {
 		for (int i = image_id + 1; i <= limit; ++i) {
 			const auto& e = impl_->images_rel[i];
 			if ((e.flag == 8 || e.flag == 4)
-			    && e.anim_num != 0xffffffff)
+			    && e.anim_num != 0xffffffff
+			    && (int)e.anim_num <= image_id)   // in-group gate
 			{
 				if (try_open(e.anim_num, anim_bytes)) {
 					char dbg[64];

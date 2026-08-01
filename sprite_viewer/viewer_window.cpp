@@ -543,6 +543,47 @@ ViewerWindow::ViewerWindow(std::string data_path_,
 		{"Bunker",             /*Terran_Bunker*/            125},
 	}});
 
+	// Protoss roster. Numeric unit_type ids taken from a runtime
+	// scan against game_st.unit_types.vec (see the git history
+	// around Terran buildings for the same technique) -- bwenums.h
+	// interleaves Hero_* entries between retail types, so source
+	// line numbering doesn't equal the numeric enum value.
+	races.push_back({"Protoss", {
+		{"Probe",              /*Protoss_Probe*/                 64},
+		{"Zealot",             /*Protoss_Zealot*/                65},
+		{"Dragoon",            /*Protoss_Dragoon*/               66},
+		{"High Templar",       /*Protoss_High_Templar*/          67},
+		{"Archon",             /*Protoss_Archon*/                68},
+		{"Dark Templar",       /*Protoss_Dark_Templar*/          61},
+		{"Dark Archon",        /*Protoss_Dark_Archon*/           63},
+		{"Shuttle",            /*Protoss_Shuttle*/               69},
+		{"Scout",              /*Protoss_Scout*/                 70},
+		{"Corsair",            /*Protoss_Corsair*/               60},
+		{"Arbiter",            /*Protoss_Arbiter*/               71},
+		{"Carrier",            /*Protoss_Carrier*/               72},
+		{"Interceptor",        /*Protoss_Interceptor*/           73},
+		{"Reaver",             /*Protoss_Reaver*/                83},
+		{"Scarab",             /*Protoss_Scarab*/                85},
+		{"Observer",           /*Protoss_Observer*/              84},
+		{"Nexus",              /*Protoss_Nexus*/                154},
+		{"Pylon",              /*Protoss_Pylon*/                156},
+		{"Assimilator",        /*Protoss_Assimilator*/          157},
+		{"Gateway",            /*Protoss_Gateway*/              160},
+		{"Forge",              /*Protoss_Forge*/                166},
+		{"Photon Cannon",      /*Protoss_Photon_Cannon*/        162},
+		{"Cybernetics Core",   /*Protoss_Cybernetics_Core*/     164},
+		{"Shield Battery",     /*Protoss_Shield_Battery*/       172},
+		{"Robotics Facility",  /*Protoss_Robotics_Facility*/    155},
+		{"Robotics Support Bay",
+		                       /*Protoss_Robotics_Support_Bay*/ 171},
+		{"Observatory",        /*Protoss_Observatory*/          159},
+		{"Stargate",           /*Protoss_Stargate*/             167},
+		{"Fleet Beacon",       /*Protoss_Fleet_Beacon*/         169},
+		{"Arbiter Tribunal",   /*Protoss_Arbiter_Tribunal*/     170},
+		{"Citadel of Adun",    /*Protoss_Citadel_of_Adun*/      163},
+		{"Templar Archives",   /*Protoss_Templar_Archives*/     165},
+	}});
+
 	// --- widgets ---
 	// Two-tab layout: "Classic" hosts the original per-unit
 	// anim browser; "HD Mapping" is the eyeball-driven
