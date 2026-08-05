@@ -395,9 +395,11 @@ Rough sequence for a 2-hour workshop:
   a local SC:R install and the sprite_viewer target.
 - **The `arena_server` MOBA mode** — planned but not built. See
   the design discussion in the team's notes.
-- **Reproducing the private EKS deployment at
-  `simsc.agentnumber47.com`** — that's the organizer's own
-  infrastructure. This doc covers vanilla single-host deployment.
+- **The specific values behind the maintainer's private EKS
+  deployment at `simsc.agentnumber47.com`** (account ID, Cognito
+  pool ARN, ACM cert ARN, etc.) — those live in gitignored
+  `aws_account_info/`. Section 10 covers the shape of a simsc
+  deployment; fill in your own AWS values.
 - **Agent programming** — see `agent_readme.md`,
   `agent_integration.md`, and `python_agent/agents/*.py`.
 
@@ -431,3 +433,190 @@ cmake --build build_desktop --target simsc_desktop
 2. Open observer window pointed at `ws://<server>:6114/observer`
 3. Run own agent code against `ws://<server>:6113/agent` with the
    assigned alias + api_key
+
+---
+
+## 10. Optional: deploy the simsc lobby (create-game / list-games)
+
+The `openbw_server` binary is one C++ process that hosts **one
+match** with a fixed user list. That's fine for direct-connect
+workshops (section 4a). If you want attendees to log into a web
+UI, browse open games, and click "join," you need the **simsc**
+service too.
+
+### 10a. What simsc is
+
+A FastAPI web app in this same repo, under `simsc/`. It provides:
+
+- **User accounts + API keys** — attendees log in via Cognito, get
+  a per-user API key they configure in simsc_desktop
+- **REST endpoints** for game lifecycle:
+  - `POST /api/games` create a game (draft → pending)
+  - `GET /api/games` list games visible to the caller
+  - `POST /api/games/{id}/accept` invitee accepts
+  - `POST /api/games/{id}/decline` invitee declines (deletes game)
+  - `POST /api/games/{id}/cancel` creator cancels
+- **Kubernetes launcher** — on accept, simsc creates a Pod running
+  the `openbw_server` image with the right `--user` specs
+  auto-populated from the game's players, plus an Ingress rule so
+  attendees can reach the pod at `wss://<host>/game/<id>/agent`
+- **Static SPA** — a browser client for the same REST API (for
+  attendees who prefer the web to the Qt desktop app)
+
+Runs as **one container per pod**: Debian 12 + Postgres 16 +
+Python 3.12 + uvicorn on port 8080. Postgres data lives on a PVC.
+
+### 10b. Build the simsc-app image
+
+```bash
+docker build -f simsc/Dockerfile -t simsc-app:workshop simsc/
+```
+
+The build takes ~5 min the first time (installs Postgres, Python,
+FastAPI stack). Result: single image runs Postgres + web + alembic
+migrations at startup via `simsc/start.sh`.
+
+### 10c. Environment variables simsc needs
+
+Set these before running the container. Read by
+`simsc/app/core/config.py`:
+
+| Variable | Purpose |
+|---|---|
+| `COGNITO_POOL_ID` | Cognito user pool id for auth |
+| `COGNITO_CLIENT_ID` | Cognito app client id |
+| `COGNITO_DOMAIN` | Cognito hosted-UI domain |
+| `COGNITO_REGION` | AWS region of the pool (default `ap-northeast-1`) |
+| `SITE_ORIGIN` | Public https URL of the simsc instance (used for CORS + Cognito redirect) |
+| `ADMIN_TOKEN` | Random secret enabling admin routes. Generate with `openssl rand -hex 32` |
+| `OPENBW_SERVER_IMAGE` | Full ECR path to the openbw_server image simsc should launch (e.g. `<accountid>.dkr.ecr.<region>.amazonaws.com/openbw-server:tag`) |
+| `GAMES_NAMESPACE` | k8s namespace to create game Pods in (default `simsc-games`) |
+| `GAMES_HOST` | The hostname attendees will use to reach games (used in Ingress rules) |
+| `GAMES_ACM_CERT_ARN` | ACM certificate ARN for TLS on the games Ingress |
+| `DATABASE_URL` | Postgres URL. Default is the in-pod cluster; override for external DB |
+
+The `SITE_ORIGIN` and `GAMES_HOST` are typically the same
+DNS name (e.g. `simsc.workshop.example.com`), served by the same
+ALB.
+
+### 10d. Deploy: standalone (no Kubernetes)
+
+Simsc alone can run in a single container against a local
+Postgres — useful for testing before deploying to k8s. Won't be
+able to launch game pods, but the REST + login flow work:
+
+```bash
+docker run --rm -p 8080:8080 \
+    -e COGNITO_POOL_ID=us-east-1_XXXXXX \
+    -e COGNITO_CLIENT_ID=xxxxxxxxxx \
+    -e COGNITO_DOMAIN=your-domain.auth.us-east-1.amazoncognito.com \
+    -e SITE_ORIGIN=http://localhost:8080 \
+    -e ADMIN_TOKEN=$(openssl rand -hex 32) \
+    -e OPENBW_SERVER_IMAGE=openbw-server:workshop \
+    simsc-app:workshop
+```
+
+Open `http://localhost:8080/` in a browser. The Cognito login redirect will fail without a real pool, so this mode is mostly for testing the shape of the app.
+
+### 10e. Deploy: EKS with k8s
+
+Production shape. Templates live in `simsc/deploy/*.yaml.tmpl` and
+`simsc/deploy/render.sh` renders them by substituting env vars:
+
+```
+simsc/deploy/
+├── 00-secret.yaml.tmpl        Kubernetes Secret with env vars
+├── 01-pvc.yaml.tmpl           PersistentVolumeClaim for Postgres data
+├── 02-deployment.yaml.tmpl    Deployment: 1 replica of simsc-app
+├── 03-ingress-public.yaml.tmpl  ALB Ingress, public paths (no auth)
+├── 04-ingress-cognito.yaml.tmpl ALB Ingress, Cognito-gated paths
+├── 05-rbac.yaml.tmpl          Role/RoleBinding — simsc's k8s access to launch games
+└── render.sh                  Substitutes env vars into all templates
+```
+
+Required env vars for `render.sh` (from `render.sh` itself):
+
+```
+AWS_REGION
+AWS_ACCOUNT_ID
+ECR_IMAGE              # simsc-app image URI in ECR
+IMAGE_TAG              # tag to deploy
+OPENBW_SERVER_IMAGE    # openbw_server image URI simsc will launch
+K8S_NAMESPACE
+COGNITO_POOL_ARN
+COGNITO_CLIENT_ID
+COGNITO_DOMAIN
+COGNITO_REGION
+ACM_CERT_ARN
+SITE_ORIGIN
+SITE_HOST
+ADMIN_TOKEN_BASE64
+```
+
+Deploy flow, once those are exported in the shell:
+
+```bash
+cd simsc/deploy
+./render.sh                        # creates *.yaml from *.yaml.tmpl
+kubectl apply -f 00-secret.yaml
+kubectl apply -f 01-pvc.yaml
+kubectl apply -f 05-rbac.yaml
+kubectl apply -f 02-deployment.yaml
+kubectl apply -f 03-ingress-public.yaml
+kubectl apply -f 04-ingress-cognito.yaml
+```
+
+The rendered `*.yaml` files are gitignored — they contain account
+IDs and are meant to be regenerated per environment.
+
+Post-deploy checks:
+
+```bash
+kubectl -n <ns> get pods                        # simsc-app pod Running
+kubectl -n <ns> logs deploy/simsc-app -f        # migrations + uvicorn boot
+curl https://<SITE_HOST>/api/health             # 200
+```
+
+Then open `https://<SITE_HOST>/` in a browser, log in with a
+Cognito user, and try creating a game.
+
+### 10f. What simsc automates that direct-connect doesn't
+
+Once simsc is running, an attendee's workflow becomes:
+
+1. Log in at `https://<SITE_HOST>/`, copy their API key from the profile page (revealed exactly once)
+2. Paste the API key + `SITE_HOST` into simsc_desktop's Settings tab
+3. Open the **Remote Games** tab → see games → click "Create" or "Join"
+4. simsc_desktop's UI shows the game state (pending → accepted → running)
+5. Once the game is running, "Open Observer" launches the observer window automatically pointed at the k8s-ingress URL
+
+No hostname/port table to hand out. No `--user` inline specs. simsc
+manages user identity, game pods, and observer URLs for you.
+
+### 10g. Prerequisites simsc pulls in
+
+Deploying simsc is a real project vs. direct-connect. You need:
+
+- **AWS account** with EKS cluster (single cluster is fine)
+- **Cognito user pool** with app client + hosted UI domain (attendees log in through this)
+- **ACM certificate** for your workshop hostname
+- **Route53 (or equivalent DNS)** pointing the hostname at the ALB
+- **ECR** for the two images (simsc-app, openbw-server)
+- **AWS Load Balancer Controller** installed in the cluster (creates ALBs from Ingress resources)
+- **StorageClass** with dynamic provisioning (for the Postgres PVC)
+
+If you don't have these, direct-connect (section 4a) is far
+cheaper for a one-off workshop. simsc pays for itself when you're
+running many workshops or want persistent user identity across
+sessions.
+
+### 10h. What's still deliberately out of scope
+
+The specific hostname / account ID / Cognito pool / ACM ARN values
+for the maintainer's existing deployment
+(`simsc.agentnumber47.com`) live in the gitignored
+`aws_account_info/` directory. They're the organizer's own
+infrastructure and aren't reproducible from this doc alone. If
+you're standing up a **new** simsc instance in a **new** AWS
+account, use this section as a checklist and fill in your own
+values.
