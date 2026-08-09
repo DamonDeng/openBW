@@ -123,6 +123,12 @@ class CreateGameIn(BaseModel):
     # against the closed vocabulary (`GAME_SPEEDS`). Default matches
     # openbw_server's baked-in default of 42 ms/frame.
     game_speed: str = "fastest"
+    # When true, the (race, alias) pairs get permuted server-side
+    # before the game is created. Off by default so existing callers
+    # (SPA, curl scripts) keep deterministic slot placement. The
+    # (race, alias) pair travels together so a player still gets the
+    # race they picked, just possibly in a different slot.
+    shuffle_slots: bool = False
 
 
 @router.post("", response_model=GameOut)
@@ -134,6 +140,7 @@ def create_game_route(
     game = games_service.create(
         db, user, body.map, body.races, body.player_aliases,
         game_speed=body.game_speed,
+        shuffle_slots=body.shuffle_slots,
     )
     return _to_out(db, game, user, include_pod_phase=True)
 

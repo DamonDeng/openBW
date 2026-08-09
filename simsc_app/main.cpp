@@ -273,6 +273,11 @@ int main(int argc, char** argv) {
 		int last_slot = -2;
 		int last_inv  = -1;
 		bool rand_logged = false;
+		// Set true the first time we handle id_game_info. Used to
+		// promote the window title from a URL placeholder to the
+		// map name + resolved-race summary the server shipped, and
+		// to log a one-line record for post-hoc debugging.
+		bool game_info_logged = false;
 	};
 	loop_state loop_st;
 
@@ -302,6 +307,26 @@ int main(int argc, char** argv) {
 	QObject::connect(&sim_timer, &QTimer::timeout, &app,
 		[&funcs, &server, &sync_st, &ui, &loop_st, &wnd]() {
 		funcs.next_frame(server);
+
+		// One-time snapshot when the server's id_game_info arrives:
+		// log the resolved map + per-slot races so post-hoc log
+		// diffing can confirm the observer's sim mirror booted with
+		// the same shape the server did. Server rejects 'random' at
+		// the CLI boundary now (see server/main.cpp), so races here
+		// are always concrete.
+		if (!loop_st.game_info_logged && sync_st.game_info_received) {
+			loop_st.game_info_logged = true;
+			ui::log("[simsc_app] game_info: map=\"%s\"\n",
+				sync_st.map_name.c_str());
+			for (int s = 0; s < 8; ++s) {
+				int r = (int)ui.st.players[s].race;
+				const char* rn = (r == 0) ? "zerg"
+				               : (r == 1) ? "terran"
+				               : (r == 2) ? "protoss"
+				               : "?";
+				ui::log("[simsc_app]   slot %d: race=%s\n", s, rn);
+			}
+		}
 
 		if (!loop_st.rand_logged && sync_st.game_started
 		    && sync_st.sync_log) {

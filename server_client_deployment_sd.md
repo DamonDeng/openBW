@@ -120,7 +120,7 @@ docker run --rm -p 6113:6113 -p 6114:6114 openbw-server:workshop \
 ```
 
 Notes on the flags:
-- `--race N=RACE` overrides slot N's race regardless of the map's default. Values: `zerg`, `terran`, `protoss`, `random`.
+- `--race N=RACE` overrides slot N's race regardless of the map's default. Values: `zerg`, `terran`, `protoss`. `random` and `any` are rejected (exit 2) — callers (Qt lobby / simsc REST) resolve random before spawning openbw_server. This keeps the observer's local sim mirror deterministic without a re-derivation from the wire.
 - `--game-speed fastest` runs the sim at retail's fastest speed (~24 fps). Options: `slowest`, `slower`, `slow`, `normal`, `fast`, `faster`, `fastest`, `fastest+`, `fastest++`, `fastest+++`, `fastest++++`. `fastest++++` is roughly 10ms/frame.
 - `--any-ws-path` lets clients connect at any WS path (`ws://host:6113/anything`) instead of requiring `/agent`. Useful if you're behind a path-routing reverse proxy.
 - `--data-path` is baked into the Docker ENTRYPOINT as `/opt/openbw/data`. If you're running the raw binary from source, add `--data-path <path/to/original_resources>`.

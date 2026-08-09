@@ -190,6 +190,14 @@ inline bool parse_resources_override(const std::string& v, int& slot,
 
 // Parse "N=NAME" (e.g., "0=protoss") into (slot, race_id). Returns
 // false on malformed input. race_id matches game_types.h race_t.
+//
+// Invariant: openbw_server does NOT resolve "random". Callers (Qt
+// lobby for local games, simsc REST for remote games) roll random
+// into a concrete race BEFORE spawning us, so the observer's sim
+// mirror can install identical races via id_game_info instead of
+// re-running the server's PRNG. Passing "random" is a caller bug
+// and produces exit 2 with a distinct message (see the --race
+// argv handler below).
 inline bool parse_race_override(const std::string& v, int& slot, int8_t& race_id) {
 	auto eq_pos = v.find('=');
 	if (eq_pos == std::string::npos) return false;
@@ -202,6 +210,15 @@ inline bool parse_race_override(const std::string& v, int& slot, int8_t& race_id
 	if (rhs == "terran")  { race_id = 1; return true; }
 	if (rhs == "protoss") { race_id = 2; return true; }
 	return false;
+}
+
+// Extract the race token (right of '=') without validation. Used
+// to distinguish "random" (caller-boundary bug) from other bad
+// input in the --race handler.
+inline std::string race_token_of(const std::string& v) {
+	auto eq_pos = v.find('=');
+	if (eq_pos == std::string::npos) return {};
+	return v.substr(eq_pos + 1);
 }
 
 inline const char* race_name(int8_t r) {
@@ -251,6 +268,18 @@ args_t parse_args(int argc, char** argv) {
 		else if (eq("--race") && i + 1 < argc) {
 			std::string v = argv[++i];
 			int slot; int8_t race_id;
+			// Distinct exit code + message when caller passes
+			// "random": that's a boundary bug in the lobby / REST
+			// layer, not a typo. See parse_race_override doc.
+			std::string tok = race_token_of(v);
+			if (tok == "random" || tok == "any") {
+				fprintf(stderr,
+					"error: --race got %s; openbw_server does not "
+					"resolve random races. Callers (Qt lobby, simsc "
+					"REST) must pick a concrete zerg|terran|protoss "
+					"before spawning the server.\n", v.c_str());
+				std::exit(2);
+			}
 			if (!parse_race_override(v, slot, race_id)) {
 				fprintf(stderr,
 					"error: --race expects <slot>=<zerg|terran|protoss>, "
@@ -379,6 +408,8 @@ args_t parse_args(int argc, char** argv) {
 				"                     the map assigned to that slot. Only\n"
 				"                     meaningful on melee maps where\n"
 				"                     starting units are spawned by race.\n"
+				"                     Note: 'random' is rejected (exit 2).\n"
+				"                     Callers must roll random locally.\n"
 				"  --resources N=M,G  override slot N's starting resources\n"
 				"                     to M minerals and G gas (both int,\n"
 				"                     0..1000000). Applied post-map-load,\n"

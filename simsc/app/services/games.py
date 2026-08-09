@@ -70,6 +70,24 @@ def _resolve_races(races: list[str]) -> list[str]:
     ]
 
 
+def _shuffle_slots(
+    races: list[str], player_aliases: list[str | None]
+) -> tuple[list[str], list[str | None]]:
+    """Permute the (race, alias) pairs together. Preserves the count
+    of real players / AIBot / empty slots; only their positional
+    assignment changes. Uses secrets.SystemRandom so the shuffle is
+    unpredictable to the caller — matters because the assignment
+    ends up on the DB and drives whose agent connects to which slot.
+    """
+    if len(races) != len(player_aliases):
+        raise ValueError("_shuffle_slots: length mismatch")
+    pairs = list(zip(races, player_aliases))
+    secrets.SystemRandom().shuffle(pairs)
+    shuffled_races = [r for r, _ in pairs]
+    shuffled_aliases = [a for _, a in pairs]
+    return shuffled_races, shuffled_aliases
+
+
 def _real_players(player_aliases: list[str | None]) -> list[str]:
     """Return only the real user aliases (drop AIBot/None)."""
     return [
@@ -122,6 +140,7 @@ def create(
     races: list[str],
     player_aliases: list[str | None],
     game_speed: str = DEFAULT_GAME_SPEED,
+    shuffle_slots: bool = False,
 ) -> Game:
     """Create a game. If any slot points at a *different* real user,
     the game enters pending_invitations. Otherwise (only creator +
@@ -170,7 +189,24 @@ def create(
     # Resolve 'random' NOW so the DB is authoritative. Observers,
     # analytics, and replays all read game.races directly and don't
     # have to re-derive from the wire.
+    #
+    # Invariant: after this point neither race==random nor any
+    # non-concrete race value ever reaches openbw_server. The server
+    # rejects race=random at its CLI parse (exit 2) as a defense-in-
+    # depth check; getting here with an unresolved race would surface
+    # as a create-time failure rather than a silent divergence.
     resolved_races = _resolve_races(races)
+    resolved_aliases = list(player_aliases)
+
+    # Optional slot-user shuffling. Applied AFTER race resolution so
+    # that a slot's race travels with its assigned alias -- otherwise
+    # "mingxuan wanted Zerg but shuffled into slot 3 and got slot 3's
+    # race" would break the promise the create dialog makes to the
+    # user. secrets.SystemRandom keeps the roll unpredictable.
+    if shuffle_slots:
+        resolved_races, resolved_aliases = _shuffle_slots(
+            resolved_races, resolved_aliases
+        )
 
     game_id = k8s_client.make_game_id()
     game = Game(
@@ -178,7 +214,7 @@ def create(
         owner_user_id=creator.id,
         map=map_name,
         races=resolved_races,
-        player_aliases=list(player_aliases),
+        player_aliases=resolved_aliases,
         game_speed=game_speed,
         state="pending_invitations" if invitees else "running",
     )

@@ -180,6 +180,19 @@ struct sync_state {
 
 	std::array<a_string, 12> player_names;
 
+	// Populated on the observer side when id_game_info arrives. The
+	// UI reads this to set the window title; the sim mirror uses the
+	// per-slot races that get installed into st.players[i].race by
+	// the id_game_info handler. Empty on the server side.
+	a_string map_name;
+	// Set true on the first id_game_info arrival. UI code polls this
+	// to know when it's safe to enter the sim tick loop; before it
+	// flips, the observer's start_game_local would run with the raw
+	// map-default races (including race=5 "any") and roll its own
+	// random -- which is exactly the divergence source we're
+	// eliminating. See project_multi_observer_desync in memory.
+	bool game_info_received = false;
+
 	int successful_action_count = 0;
 	int failed_action_count = 0;
 	std::array<uint32_t, 4> insync_hash{};
@@ -1805,21 +1818,68 @@ struct sync_functions: action_functions {
 			client->scheduled_actions.clear();
 		}
 
+		// Ships the resolved game shape to a newly-joined client:
+		// map name, slot count, and for each slot the concrete race
+		// + occupant (if any). The observer uses this to build its
+		// sim mirror BEFORE start_game_local, which structurally
+		// eliminates the "race=5 -> observer rolls locally" branch
+		// that historically caused the multi-observer desync class
+		// of bugs (see memory: project_multi_observer_desync).
+		//
+		// Wire format (all little-endian, matches other sync msgs):
+		//   uint8_t   msg_id = id_game_info
+		//   uint8_t   slot_count           // 1..12
+		//   uint16_t  scenario_name_len    // up to 0x400
+		//   <scenario_name bytes>
+		//   for i in 0..slot_count-1:
+		//     int8_t  race                 // 0=zerg 1=terran 2=protoss
+		//                                  // (server rejects 'random'
+		//                                  // at CLI parse, so this
+		//                                  // is always concrete)
+		//     uint8_t occupied_flag        // 1 if a client sits here
+		//     if occupied_flag == 1:
+		//       4 x uint32_t uid.vals
+		//       uint8_t alias_len (<=0x20)
+		//       <alias bytes>
 		void send_game_info(const void* h) {
 			dynamic_writer<> w(0x100);
 			w.put<uint8_t>(sync_messages::id_game_info);
-			for (sync_state::client_t* c : ptr(sync_st.clients)) {
-				if (c->uid == sync_state::uid_t{}) continue;
-				w.put<uint8_t>(1);
-				for (auto& v : c->uid.vals) w.put<uint32_t>(v);
-				w.put<int8_t>(c->player_slot);
-				if (c->player_slot == -1) w.put<int8_t>(-1);
-				else w.put<int8_t>((int)st.players.at(c->player_slot).race);
-				size_t n = std::min(c->name.size(), (size_t)0x20);
-				w.put<uint8_t>(n);
-				for (size_t i = 0; i != n; ++i) w.put<uint8_t>((uint8_t)*(c->name.data() + i));
+			// Slot count: use the map's player count if available,
+			// else fall back to the state array size. game_st.players
+			// (starting_units) is authoritative but we don't need
+			// counts, we need every slot the map defines. 12 is the
+			// hard cap.
+			size_t slot_count = st.players.size();
+			if (slot_count > 12) slot_count = 12;
+			w.put<uint8_t>((uint8_t)slot_count);
+			// Map name. game_state::scenario_name is set at map-load
+			// time (bwgame.h:21305). It's an a_string with SSO; we
+			// serialize as length-prefixed bytes.
+			const auto& name = st.game->scenario_name;
+			size_t name_len = name.size();
+			if (name_len > 0x400) name_len = 0x400;
+			w.put<uint16_t>((uint16_t)name_len);
+			for (size_t i = 0; i != name_len; ++i) {
+				w.put<uint8_t>((uint8_t)name[i]);
 			}
-			w.put<uint8_t>(0);
+			for (size_t slot = 0; slot != slot_count; ++slot) {
+				w.put<int8_t>((int8_t)st.players[slot].race);
+				sync_state::client_t* occ = nullptr;
+				for (sync_state::client_t* c : ptr(sync_st.clients)) {
+					if (c->uid == sync_state::uid_t{}) continue;
+					if (c->player_slot == (int)slot) { occ = c; break; }
+				}
+				if (occ) {
+					w.put<uint8_t>(1);
+					for (auto& v : occ->uid.vals) w.put<uint32_t>(v);
+					size_t n = std::min(occ->name.size(), (size_t)0x20);
+					w.put<uint8_t>((uint8_t)n);
+					for (size_t i = 0; i != n; ++i)
+						w.put<uint8_t>((uint8_t)*(occ->name.data() + i));
+				} else {
+					w.put<uint8_t>(0);
+				}
+			}
 			send(w, h);
 		}
 
@@ -1865,6 +1925,24 @@ struct sync_functions: action_functions {
 				send(w, h);
 			}
 			send_uid(h);
+			// Ship the resolved game shape (map name + per-slot race
+			// + occupants) as part of the greeting handshake, so a
+			// pre-game observer can install concrete races into
+			// st.players[i].race BEFORE it runs start_game_local.
+			// Post-game (catchup) observers still get the same
+			// information via id_catchup_data::slot_races -- that
+			// path was fixed in SyncBreaker #3 (2026-07-11). Sending
+			// id_game_info here makes the pre-game path symmetric.
+			//
+			// Skipped when st.game hasn't been populated yet
+			// (embedder hasn't finished map load). In practice this
+			// never happens on the observer WS because the server
+			// loads the map before opening its listener, but the
+			// guard costs nothing and keeps a class of test-harness
+			// bugs off the wire.
+			if (st.game != nullptr) {
+				send_game_info(h);
+			}
 			auto frame = sync_st.sync_frame;
 			sync_st.sync_frame = 0;
 			sync_st.sync_frame = frame;
@@ -2539,32 +2617,75 @@ struct sync_functions: action_functions {
 				funcs.execute_scheduled_actions([this](sync_state::client_t* client, auto& r, void* /*tag*/) {
 					int id = r.template get<uint8_t>();
 					switch (id) {
-					case sync_messages::id_game_info:
-						while (r.template get<uint8_t>() != 0) {
-							sync_state::uid_t uid;
-							for (auto& v : uid.vals) v = r.template get<uint32_t>();
-							sync_state::client_t* c = this->get_client(uid);
-							if (!c) {
-								c = this->new_client(nullptr);
-								c->uid = uid;
+					case sync_messages::id_game_info: {
+						// See send_game_info doc in this file for the
+						// wire format. This is authoritative: whatever
+						// races the server ships here we install into
+						// st.players[i].race directly, replacing any
+						// map-default race=5 slots that would otherwise
+						// let the observer's local sim roll its own
+						// random and desync from the server.
+						size_t slot_count = r.template get<uint8_t>();
+						if (slot_count > 12) slot_count = 12;
+						size_t name_len = r.template get<uint16_t>();
+						if (name_len > 0x400) name_len = 0x400;
+						sync_st.map_name.clear();
+						sync_st.map_name.reserve(name_len);
+						for (size_t i = 0; i != name_len; ++i) {
+							sync_st.map_name.push_back((char)r.template get<uint8_t>());
+						}
+						for (size_t slot = 0; slot != slot_count; ++slot) {
+							int8_t race = r.template get<int8_t>();
+							// Server guarantees concrete race (0..2).
+							// Reject race==5 (any) or any other
+							// out-of-range value defensively -- if the
+							// server ever ships it, that's a bug and
+							// we'd rather crash loudly than silently
+							// diverge.
+							if (race < 0 || race > 2) {
+								error("id_game_info: server shipped "
+								      "unresolved race %d for slot %zu",
+								      (int)race, slot);
 							}
-							c->player_slot = r.template get<int8_t>();
-							if (c->player_slot < 0 || c->player_slot >= 12) c->player_slot = -1;
-							int race = r.template get<int8_t>();
-							if (c->player_slot != -1) {
-								for (auto* c2 : ptr(sync_st.clients)) {
-									if (c != c2 && c2->player_slot == c->player_slot) c2->player_slot = -1;
+							st.players[slot].race = (race_t)race;
+							// Also mirror into initial_slot_races so
+							// start_game_local's later reads see the
+							// concrete value and never trip its
+							// race==5 branch.
+							if (slot < sync_st.initial_slot_races.size()) {
+								sync_st.initial_slot_races[slot] = (race_t)race;
+							}
+							uint8_t occupied = r.template get<uint8_t>();
+							if (occupied) {
+								sync_state::uid_t uid;
+								for (auto& v : uid.vals) v = r.template get<uint32_t>();
+								sync_state::client_t* c = this->get_client(uid);
+								if (!c) {
+									c = this->new_client(nullptr);
+									c->uid = uid;
 								}
-								st.players[c->player_slot].controller = player_t::controller_occupied;
-								st.players[c->player_slot].race = (bwgame::race_t)race;
-							}
-							size_t n = r.template get<uint8_t>();
-							c->name.resize(std::min(n, (size_t)0x20));
-							for (size_t i = 0; i != n; ++i) {
-								if (i < c->name.size()) c->name[i] = (char)r.template get<uint8_t>();
+								// Detach any stale owner of this slot.
+								for (auto* c2 : ptr(sync_st.clients)) {
+									if (c != c2 && c2->player_slot == (int)slot) {
+										c2->player_slot = -1;
+									}
+								}
+								c->player_slot = (int)slot;
+								st.players[slot].controller =
+									player_t::controller_occupied;
+								size_t n = r.template get<uint8_t>();
+								c->name.resize(std::min(n, (size_t)0x20));
+								for (size_t i = 0; i != n; ++i) {
+									if (i < c->name.size())
+										c->name[i] = (char)r.template get<uint8_t>();
+									else
+										(void)r.template get<uint8_t>();
+								}
 							}
 						}
+						sync_st.game_info_received = true;
 						break;
+					}
 					case sync_messages::id_occupy_slot: {
 						int n = r.template get<uint8_t>();
 						for (int i = 0; i != 12; ++i) {
