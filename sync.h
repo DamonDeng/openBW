@@ -1849,8 +1849,16 @@ struct sync_functions: action_functions {
 			// (starting_units) is authoritative but we don't need
 			// counts, we need every slot the map defines. 12 is the
 			// hard cap.
+			// Cap at 8 playable slots. st.players has 12 entries but
+			// 8-11 are neutral / rescue / unused-rescue and carry
+			// race values outside 0..2. Since the observer's handler
+			// error()s on any race > 2 as a "server shipped unresolved
+			// race" defense, we deliberately don't ship those slots.
+			// If a future map ever exposes slots >=8 as playable, this
+			// cap will need to widen along with the observer's own
+			// race-range validation.
 			size_t slot_count = st.players.size();
-			if (slot_count > 12) slot_count = 12;
+			if (slot_count > 8) slot_count = 8;
 			w.put<uint8_t>((uint8_t)slot_count);
 			// Map name. game_state::scenario_name is set at map-load
 			// time (bwgame.h:21305). It's an a_string with SSO; we
@@ -1934,13 +1942,27 @@ struct sync_functions: action_functions {
 			// path was fixed in SyncBreaker #3 (2026-07-11). Sending
 			// id_game_info here makes the pre-game path symmetric.
 			//
-			// Skipped when st.game hasn't been populated yet
+			// Server-side only: sync.h's on_new_client fires on BOTH
+			// sides (server sees an incoming observer; observer sees
+			// its outgoing connect completing). Only the server has
+			// resolved races to ship; if the observer emitted this
+			// message it would carry the map's raw race==5 defaults
+			// and the receiving server would trip its own copy of
+			// the observer-side handler's "unresolved race" error().
+			//
+			// Discriminator: sync_st.catchup_provider is set only by
+			// server/main.cpp; observers never install it. This works
+			// with or without --no-auth (unlike sync_st.auth_check,
+			// which is skipped under --no-auth).
+			//
+			// Also skipped when st.game hasn't been populated yet
 			// (embedder hasn't finished map load). In practice this
 			// never happens on the observer WS because the server
 			// loads the map before opening its listener, but the
 			// guard costs nothing and keeps a class of test-harness
 			// bugs off the wire.
-			if (st.game != nullptr) {
+			const bool is_server_side = (bool)sync_st.catchup_provider;
+			if (is_server_side && st.game != nullptr) {
 				send_game_info(h);
 			}
 			auto frame = sync_st.sync_frame;
@@ -2644,8 +2666,8 @@ struct sync_functions: action_functions {
 							// diverge.
 							if (race < 0 || race > 2) {
 								error("id_game_info: server shipped "
-								      "unresolved race %d for slot %zu",
-								      (int)race, slot);
+								      "unresolved race %d for slot %d",
+								      (int)race, (int)slot);
 							}
 							st.players[slot].race = (race_t)race;
 							// Also mirror into initial_slot_races so
