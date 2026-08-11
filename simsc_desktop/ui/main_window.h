@@ -19,6 +19,8 @@ class QTabWidget;
 
 namespace simsc_desktop {
 
+class AgentCatalog;
+class AgentSupervisor;
 class AppPaths;
 class LocalGamesTab;
 class LocalServerManager;
@@ -39,12 +41,14 @@ protected:
 	void showEvent(QShowEvent* e) override;
 
 private:
-	AppPaths*           paths_    = nullptr;
-	Settings*           settings_ = nullptr;
-	LocalUserRoster*    roster_   = nullptr;
-	MapCatalog*         catalog_  = nullptr;
-	LocalServerManager* manager_  = nullptr;
-	SimscApiClient*     api_      = nullptr;
+	AppPaths*           paths_      = nullptr;
+	Settings*           settings_   = nullptr;
+	LocalUserRoster*    roster_     = nullptr;
+	MapCatalog*         catalog_    = nullptr;
+	LocalServerManager* manager_    = nullptr;
+	SimscApiClient*     api_        = nullptr;
+	AgentCatalog*       agents_     = nullptr;
+	AgentSupervisor*    supervisor_ = nullptr;
 
 	QTabWidget*     tabs_          = nullptr;
 	LocalGamesTab*  local_tab_     = nullptr;

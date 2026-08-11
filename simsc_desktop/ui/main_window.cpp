@@ -1,5 +1,7 @@
 #include "main_window.h"
 
+#include "../agent_catalog.h"
+#include "../agent_supervisor.h"
 #include "../app_paths.h"
 #include "../local_server_manager.h"
 #include "../local_user_roster.h"
@@ -35,21 +37,40 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 	catalog_  = new MapCatalog(this);
 	catalog_->loadFromFile(paths_->maps_json_path());
 
-	manager_  = new LocalServerManager(paths_, settings_, roster_, this);
-	api_      = new SimscApiClient(settings_, this);
+	manager_    = new LocalServerManager(paths_, settings_, roster_, this);
+	api_        = new SimscApiClient(settings_, this);
+	agents_     = new AgentCatalog(this);
+	agents_->set_agents_dir(settings_->agents_dir());
+	supervisor_ = new AgentSupervisor(this);
+
+	// If the user updates the agents directory later, keep the
+	// catalog in sync -- picker rescans automatically the next time
+	// it opens.
+	connect(settings_, &Settings::changed, agents_, [this] {
+		agents_->set_agents_dir(settings_->agents_dir());
+	});
 
 	// Kill every local server before we drop off the event loop.
 	// aboutToQuit fires after the last widget closes; window
 	// closeEvents have already surfaced through the QApplication
 	// event loop by this point.
+	//
+	// Order matters: kill agents FIRST so they drop their WS to
+	// openbw_server cleanly, THEN kill the server itself. Otherwise
+	// dying servers can trip agents' error paths and leave orphan
+	// python processes.
+	connect(qApp, &QCoreApplication::aboutToQuit,
+		supervisor_, &AgentSupervisor::stop_all);
 	connect(qApp, &QCoreApplication::aboutToQuit,
 		manager_, &LocalServerManager::stopAll);
 
 	tabs_         = new QTabWidget(this);
 	local_tab_    = new LocalGamesTab(
-		paths_, settings_, roster_, catalog_, manager_, tabs_);
+		paths_, settings_, roster_, catalog_, manager_,
+		agents_, supervisor_, tabs_);
 	remote_tab_   = new RemoteGamesTab(
-		paths_, settings_, catalog_, api_, tabs_);
+		paths_, settings_, catalog_, api_,
+		agents_, supervisor_, tabs_);
 	settings_tab_ = new SettingsTab(settings_, roster_, tabs_);
 
 	tabs_->addTab(local_tab_,    tr("Local games"));

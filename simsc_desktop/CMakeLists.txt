@@ -58,6 +58,7 @@ add_executable(simsc_desktop
     ui/remote_games_tab.cpp
     ui/new_local_game_dialog.cpp
     ui/new_remote_game_dialog.cpp
+    ui/attach_agent_dialog.cpp
     ui/observer_window.cpp
 
     # Reused from simsc_app -- do NOT duplicate. Contains the

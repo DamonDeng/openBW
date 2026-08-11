@@ -32,6 +32,8 @@ class QVBoxLayout;
 
 namespace simsc_desktop {
 
+class AgentCatalog;
+class AgentSupervisor;
 class AppPaths;
 class MapCatalog;
 class RemoteGamesModel;
@@ -45,6 +47,8 @@ public:
 	               Settings* settings,
 	               MapCatalog* catalog,
 	               SimscApiClient* api,
+	               AgentCatalog* agents,
+	               AgentSupervisor* supervisor,
 	               QWidget* parent = nullptr);
 
 protected:
@@ -72,11 +76,16 @@ private:
 	QString myAlias() const;
 	void openObserverForMe(const QString& game_id);
 	void copyMyAgentUrl(const QString& game_id);
+	void onAttachAgent(const QString& game_id, int slot,
+	                   const QString& alias, const QString& race);
+	void onDetachAgent(const QString& game_id, int slot);
 
-	const AppPaths*   paths_    = nullptr;
-	Settings*         settings_ = nullptr;
-	MapCatalog*       catalog_  = nullptr;
-	SimscApiClient*   api_      = nullptr;
+	const AppPaths*   paths_      = nullptr;
+	Settings*         settings_   = nullptr;
+	MapCatalog*       catalog_    = nullptr;
+	SimscApiClient*   api_        = nullptr;
+	AgentCatalog*     agents_     = nullptr;
+	AgentSupervisor*  supervisor_ = nullptr;
 
 	RemoteGamesModel* model_    = nullptr;
 	QTableView*       view_     = nullptr;

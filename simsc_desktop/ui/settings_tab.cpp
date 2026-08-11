@@ -70,6 +70,7 @@ SettingsTab::SettingsTab(Settings* settings, LocalUserRoster* roster,
 			QString::fromLatin1(opt.label), opt.ms);
 	}
 	server_binary_override_edit_ = new QLineEdit(paths_box);
+	agents_dir_edit_             = new QLineEdit(paths_box);
 
 	auto add_row_with_browse = [&](const QString& label, QLineEdit* edit,
 	                               void (SettingsTab::*slot)()) {
@@ -90,6 +91,13 @@ SettingsTab::SettingsTab(Settings* settings, LocalUserRoster* roster,
 	add_row_with_browse(tr("openbw_server override"),
 	                    server_binary_override_edit_,
 	                    &SettingsTab::onBrowseServerBinaryOverride);
+	// Agents directory: root of the tree AgentCatalog scans for
+	// launchable executables. Empty (default) = the Attach button
+	// stays hidden. See python_agent/agent_cli.py for the launch
+	// contract every file in this dir must honor.
+	add_row_with_browse(tr("Agents directory"),
+	                    agents_dir_edit_,
+	                    &SettingsTab::onBrowseAgentsDir);
 
 	// Push back into Settings on edit.
 	connect(sc1_data_path_edit_, &QLineEdit::editingFinished, this, [this] {
@@ -117,6 +125,9 @@ SettingsTab::SettingsTab(Settings* settings, LocalUserRoster* roster,
 			settings_->set_server_binary_override(
 				server_binary_override_edit_->text());
 		});
+	connect(agents_dir_edit_, &QLineEdit::editingFinished, this, [this] {
+		settings_->set_agents_dir(agents_dir_edit_->text());
+	});
 
 	// --- Local user roster ----------------------------------------
 	auto* roster_box    = new QGroupBox(tr("Local users"), this);
@@ -169,11 +180,13 @@ void SettingsTab::pushCurrentValuesToUi() {
 	QSignalBlocker b4(default_local_port_spin_);
 	QSignalBlocker b5(server_binary_override_edit_);
 	QSignalBlocker b6(default_game_speed_combo_);
+	QSignalBlocker b7(agents_dir_edit_);
 	sc1_data_path_edit_->setText(settings_->sc1_data_path());
 	simsc_api_key_edit_->setText(settings_->simsc_api_key());
 	simsc_base_url_edit_->setText(settings_->simsc_base_url());
 	default_local_port_spin_->setValue(settings_->default_local_port());
 	server_binary_override_edit_->setText(settings_->server_binary_override());
+	agents_dir_edit_->setText(settings_->agents_dir());
 
 	const int cur_ms = settings_->default_game_speed_ms();
 	int idx = default_game_speed_combo_->findData(cur_ms);
@@ -204,6 +217,15 @@ void SettingsTab::onBrowseServerBinaryOverride() {
 	if (f.isEmpty()) return;
 	server_binary_override_edit_->setText(f);
 	settings_->set_server_binary_override(f);
+}
+
+void SettingsTab::onBrowseAgentsDir() {
+	const auto d = QFileDialog::getExistingDirectory(this,
+		tr("Select agents directory (executable files to launch as agents)"),
+		agents_dir_edit_->text());
+	if (d.isEmpty()) return;
+	agents_dir_edit_->setText(d);
+	settings_->set_agents_dir(d);
 }
 
 void SettingsTab::onAddUser() {

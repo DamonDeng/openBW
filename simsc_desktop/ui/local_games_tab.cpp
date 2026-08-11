@@ -1,10 +1,13 @@
 #include "local_games_tab.h"
 
+#include "../agent_catalog.h"
+#include "../agent_supervisor.h"
 #include "../app_paths.h"
 #include "../local_server_manager.h"
 #include "../local_user_roster.h"
 #include "../map_catalog.h"
 #include "../settings.h"
+#include "attach_agent_dialog.h"
 #include "new_local_game_dialog.h"
 #include "observer_window.h"
 
@@ -27,9 +30,12 @@ LocalGamesTab::LocalGamesTab(const AppPaths* paths,
                              LocalUserRoster* roster,
                              MapCatalog* catalog,
                              LocalServerManager* manager,
+                             AgentCatalog* agents,
+                             AgentSupervisor* supervisor,
                              QWidget* parent)
 	: QWidget(parent), paths_(paths), settings_(settings),
-	  roster_(roster), catalog_(catalog), manager_(manager) {
+	  roster_(roster), catalog_(catalog), manager_(manager),
+	  agents_(agents), supervisor_(supervisor) {
 
 	auto* root = new QVBoxLayout(this);
 
@@ -104,6 +110,19 @@ LocalGamesTab::LocalGamesTab(const AppPaths* paths,
 			if (game_id == selectedGameId()) rebuildPlayersBox();
 		});
 
+	// Rebuild the players box whenever an agent attaches or exits so
+	// the button label toggles between Attach... and Detach.
+	if (supervisor_) {
+		connect(supervisor_, &AgentSupervisor::agentAttached, this,
+			[this](const QString& game_id, int /*slot*/, const QString&) {
+				if (game_id == selectedGameId()) rebuildPlayersBox();
+			});
+		connect(supervisor_, &AgentSupervisor::agentDetached, this,
+			[this](const QString& game_id, int /*slot*/, int /*rc*/) {
+				if (game_id == selectedGameId()) rebuildPlayersBox();
+			});
+	}
+
 	updateActionEnabled();
 	rebuildPlayersBox();
 }
@@ -167,15 +186,47 @@ void LocalGamesTab::rebuildPlayersBox() {
 		observe_btn->setEnabled(is_active);
 
 		const auto alias = lp.alias;
+		const auto race  = lp.race;
+		const auto slot  = lp.slot;
 		connect(observe_btn, &QPushButton::clicked, this,
 			[this, id, alias] { openObserverAs(id, alias); });
 		connect(copy_btn, &QPushButton::clicked, this,
 			[this, id, alias] { copyAgentUrlFor(id, alias); });
 
+		// Attach / Detach agent button. For local games the lobby
+		// holds every slot's api-key via LocalUserRoster, so the
+		// button is visible on every slot regardless of whose
+		// desktop this is. The button label toggles based on the
+		// supervisor's current state.
+		QPushButton* attach_btn = nullptr;
+		if (agents_ && supervisor_ && !settings_->agents_dir().isEmpty()) {
+			const bool attached = supervisor_->is_attached(id, slot);
+			attach_btn = new QPushButton(
+				attached
+					? tr("Detach agent")
+					: tr("Attach agent..."),
+				row_w);
+			attach_btn->setEnabled(is_active);
+			if (attached) {
+				attach_btn->setToolTip(
+					tr("Currently attached: %1")
+						.arg(supervisor_->attached_at(id, slot)));
+			}
+			connect(attach_btn, &QPushButton::clicked, this,
+				[this, id, slot, alias, race, attached] {
+					if (attached) {
+						onDetachAgent(id, slot);
+					} else {
+						onAttachAgent(id, slot, alias, race);
+					}
+				});
+		}
+
 		h->addWidget(label);
 		h->addStretch();
 		h->addWidget(observe_btn);
 		h->addWidget(copy_btn);
+		if (attach_btn) h->addWidget(attach_btn);
 
 		players_layout_->insertWidget(players_layout_->count() - 1, row_w);
 	}
@@ -253,6 +304,40 @@ void LocalGamesTab::copyAgentUrlFor(const QString& game_id,
 		? url
 		: QStringLiteral("%1?key=%2").arg(url, key);
 	QGuiApplication::clipboard()->setText(full);
+}
+
+void LocalGamesTab::onAttachAgent(const QString& game_id, int slot,
+                                  const QString& alias,
+                                  const QString& race) {
+	if (!agents_ || !supervisor_) return;
+	AttachAgentDialog dlg(agents_, alias, race, this);
+	if (dlg.exec() != QDialog::Accepted) return;
+	const auto path = dlg.picked_path();
+	if (path.isEmpty()) return;
+	// The agent URL for local games is what agentUrl(game_id) returns
+	// (base ws:// with no query string). Its api-key is the roster
+	// entry for this slot's alias.
+	const auto url = manager_->agentUrl(game_id);
+	const auto key = manager_->apiKeyForObserver(game_id, alias);
+	if (url.isEmpty() || key.isEmpty()) {
+		QMessageBox::warning(this, tr("Attach agent"),
+			tr("Cannot resolve URL or API key for slot %1 (%2). "
+			   "Is the game running?").arg(slot).arg(alias));
+		return;
+	}
+	if (!supervisor_->attach(game_id, slot, path,
+	                         dlg.picked_display_name(),
+	                         url, key, race)) {
+		QMessageBox::warning(this, tr("Attach agent"),
+			tr("Failed to launch %1 -- another agent is already "
+			   "attached to slot %2, or the file couldn't be "
+			   "executed.").arg(dlg.picked_display_name()).arg(slot));
+	}
+}
+
+void LocalGamesTab::onDetachAgent(const QString& game_id, int slot) {
+	if (!supervisor_) return;
+	supervisor_->detach(game_id, slot);
 }
 
 }   // namespace simsc_desktop

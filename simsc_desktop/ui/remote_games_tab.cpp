@@ -1,10 +1,13 @@
 #include "remote_games_tab.h"
 
+#include "../agent_catalog.h"
+#include "../agent_supervisor.h"
 #include "../app_paths.h"
 #include "../map_catalog.h"
 #include "../remote_games_model.h"
 #include "../settings.h"
 #include "../simsc_api_client.h"
+#include "attach_agent_dialog.h"
 #include "new_remote_game_dialog.h"
 #include "observer_window.h"
 
@@ -38,9 +41,12 @@ RemoteGamesTab::RemoteGamesTab(const AppPaths* paths,
                                Settings* settings,
                                MapCatalog* catalog,
                                SimscApiClient* api,
+                               AgentCatalog* agents,
+                               AgentSupervisor* supervisor,
                                QWidget* parent)
 	: QWidget(parent), paths_(paths), settings_(settings),
-	  catalog_(catalog), api_(api) {
+	  catalog_(catalog), api_(api),
+	  agents_(agents), supervisor_(supervisor) {
 
 	auto* root = new QVBoxLayout(this);
 
@@ -137,6 +143,19 @@ RemoteGamesTab::RemoteGamesTab(const AppPaths* paths,
 	// (e.g. user pasted a key in Settings). Cheap to just re-eval.
 	connect(settings_, &Settings::changed,
 		this, [this] { updateActionEnabled(); });
+
+	// Rebuild the players box when an agent attaches / exits so the
+	// button label toggles.
+	if (supervisor_) {
+		connect(supervisor_, &AgentSupervisor::agentAttached, this,
+			[this](const QString& game_id, int, const QString&) {
+				if (game_id == selectedGameId()) rebuildPlayersBox();
+			});
+		connect(supervisor_, &AgentSupervisor::agentDetached, this,
+			[this](const QString& game_id, int, int) {
+				if (game_id == selectedGameId()) rebuildPlayersBox();
+			});
+	}
 
 	poll_timer_ = new QTimer(this);
 	poll_timer_->setInterval(kPollIntervalMs);
@@ -262,8 +281,8 @@ void RemoteGamesTab::rebuildPlayersBox() {
 		h->addWidget(label);
 		h->addStretch();
 
-		// Only surface Observer/Copy for the row that is ME. The
-		// remote server only issues me an api key for my own
+		// Only surface Observer/Copy/Attach for the row that is ME.
+		// The remote server only issues me an api key for my own
 		// perspective; other players' rows are informational.
 		if (!me.isEmpty() && ali == me) {
 			auto* observe_btn = new QPushButton(tr("Observer"), row_w);
@@ -277,6 +296,36 @@ void RemoteGamesTab::rebuildPlayersBox() {
 				[this, id_copy] { copyMyAgentUrl(id_copy); });
 			h->addWidget(observe_btn);
 			h->addWidget(copy_btn);
+
+			// Attach / Detach agent for MY slot.
+			if (agents_ && supervisor_
+			    && !settings_->agents_dir().isEmpty()) {
+				const int slot = i;
+				const auto race_copy = race;
+				const bool attached = supervisor_->is_attached(
+					id_copy, slot);
+				auto* attach_btn = new QPushButton(
+					attached
+						? tr("Detach agent")
+						: tr("Attach agent..."),
+					row_w);
+				attach_btn->setEnabled(is_running
+				                       && !g->agent_url.isEmpty());
+				if (attached) {
+					attach_btn->setToolTip(
+						tr("Currently attached: %1").arg(
+							supervisor_->attached_at(
+								id_copy, slot)));
+				}
+				const auto ali_copy = ali;
+				connect(attach_btn, &QPushButton::clicked, this,
+					[this, id_copy, slot, ali_copy, race_copy, attached] {
+						if (attached) onDetachAgent(id_copy, slot);
+						else onAttachAgent(id_copy, slot,
+						                   ali_copy, race_copy);
+					});
+				h->addWidget(attach_btn);
+			}
 		}
 
 		players_layout_->insertWidget(players_layout_->count() - 1, row_w);
@@ -436,6 +485,37 @@ void RemoteGamesTab::copyMyAgentUrl(const QString& game_id) {
 		? g->agent_url
 		: QStringLiteral("%1?key=%2").arg(g->agent_url, key);
 	QGuiApplication::clipboard()->setText(full);
+}
+
+void RemoteGamesTab::onAttachAgent(const QString& game_id, int slot,
+                                   const QString& alias,
+                                   const QString& race) {
+	if (!agents_ || !supervisor_) return;
+	const auto* g = model_->gameById(game_id);
+	if (!g || g->agent_url.isEmpty()) return;
+	AttachAgentDialog dlg(agents_, alias, race, this);
+	if (dlg.exec() != QDialog::Accepted) return;
+	const auto path = dlg.picked_path();
+	if (path.isEmpty()) return;
+	const auto key = settings_->simsc_api_key();
+	if (key.isEmpty()) {
+		QMessageBox::warning(this, tr("Attach agent"),
+			tr("No simsc API key set. Enter one in Settings."));
+		return;
+	}
+	if (!supervisor_->attach(game_id, slot, path,
+	                         dlg.picked_display_name(),
+	                         g->agent_url, key, race)) {
+		QMessageBox::warning(this, tr("Attach agent"),
+			tr("Failed to launch %1 -- another agent is already "
+			   "attached to slot %2, or the file couldn't be "
+			   "executed.").arg(dlg.picked_display_name()).arg(slot));
+	}
+}
+
+void RemoteGamesTab::onDetachAgent(const QString& game_id, int slot) {
+	if (!supervisor_) return;
+	supervisor_->detach(game_id, slot);
 }
 
 }   // namespace simsc_desktop

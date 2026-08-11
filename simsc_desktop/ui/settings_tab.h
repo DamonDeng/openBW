@@ -30,6 +30,7 @@ public:
 private slots:
 	void onBrowseSc1DataPath();
 	void onBrowseServerBinaryOverride();
+	void onBrowseAgentsDir();
 	void onAddUser();
 	void onRemoveUser();
 	void pushCurrentValuesToUi();
@@ -44,6 +45,7 @@ private:
 	QSpinBox*    default_local_port_spin_     = nullptr;
 	QComboBox*   default_game_speed_combo_    = nullptr;
 	QLineEdit*   server_binary_override_edit_ = nullptr;
+	QLineEdit*   agents_dir_edit_             = nullptr;
 	QTableView*  roster_view_                 = nullptr;
 	QPushButton* remove_user_btn_             = nullptr;
 };

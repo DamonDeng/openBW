@@ -23,6 +23,8 @@ class QVBoxLayout;
 
 namespace simsc_desktop {
 
+class AgentCatalog;
+class AgentSupervisor;
 class LocalServerManager;
 class LocalUserRoster;
 class MapCatalog;
@@ -37,6 +39,8 @@ public:
 	              LocalUserRoster* roster,
 	              MapCatalog* catalog,
 	              LocalServerManager* manager,
+	              AgentCatalog* agents,
+	              AgentSupervisor* supervisor,
 	              QWidget* parent = nullptr);
 
 private slots:
@@ -49,12 +53,17 @@ private:
 	QString selectedGameId() const;
 	void openObserverAs(const QString& game_id, const QString& alias);
 	void copyAgentUrlFor(const QString& game_id, const QString& alias);
+	void onAttachAgent(const QString& game_id, int slot,
+	                   const QString& alias, const QString& race);
+	void onDetachAgent(const QString& game_id, int slot);
 
-	const AppPaths*      paths_    = nullptr;
-	Settings*            settings_ = nullptr;
-	LocalUserRoster*     roster_   = nullptr;
-	MapCatalog*          catalog_  = nullptr;
-	LocalServerManager*  manager_  = nullptr;
+	const AppPaths*      paths_      = nullptr;
+	Settings*            settings_   = nullptr;
+	LocalUserRoster*     roster_     = nullptr;
+	MapCatalog*          catalog_    = nullptr;
+	LocalServerManager*  manager_    = nullptr;
+	AgentCatalog*        agents_     = nullptr;
+	AgentSupervisor*     supervisor_ = nullptr;
 
 	QTableView*  view_        = nullptr;
 	QPushButton* new_btn_     = nullptr;
