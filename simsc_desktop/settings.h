@@ -63,6 +63,15 @@ public:
 	QString server_binary_override() const;
 	void    set_server_binary_override(const QString&);
 
+	// Directory the lobby scans for launchable agents. Every
+	// executable file in this dir (recursively) shows up in the
+	// "Attach agent" picker. Empty = feature disabled and the
+	// Attach button is hidden. See AgentCatalog for scan rules and
+	// python_agent/agent_cli.py for the launch contract every
+	// agent in this dir must honor.
+	QString agents_dir() const;
+	void    set_agents_dir(const QString&);
+
 	// True after the first successful save of any setting.
 	// Distinguishes "we've never launched before" from "user
 	// deliberately cleared their SC1 path".

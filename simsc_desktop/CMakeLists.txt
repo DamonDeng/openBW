@@ -49,6 +49,8 @@ add_executable(simsc_desktop
     local_server_manager.cpp
     simsc_api_client.cpp
     remote_games_model.cpp
+    agent_catalog.cpp
+    agent_supervisor.cpp
 
     ui/main_window.cpp
     ui/settings_tab.cpp

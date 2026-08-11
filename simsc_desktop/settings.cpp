@@ -24,6 +24,7 @@ const auto kSimscBaseUrl       = QStringLiteral("simsc_base_url");
 const auto kDefaultLocalPort   = QStringLiteral("default_local_port");
 const auto kDefaultGameSpeedMs = QStringLiteral("default_game_speed_ms");
 const auto kServerBinOverride  = QStringLiteral("server_binary_override");
+const auto kAgentsDir          = QStringLiteral("agents_dir");
 const auto kFirstRunSeen       = QStringLiteral("first_run_seen");
 
 }   // namespace
@@ -99,6 +100,17 @@ QString Settings::server_binary_override() const {
 void Settings::set_server_binary_override(const QString& v) {
 	QSettings s;
 	s.setValue(kServerBinOverride, v);
+	emit changed();
+}
+
+QString Settings::agents_dir() const {
+	QSettings s;
+	return s.value(kAgentsDir).toString();
+}
+
+void Settings::set_agents_dir(const QString& v) {
+	QSettings s;
+	s.setValue(kAgentsDir, v);
 	emit changed();
 }
 
