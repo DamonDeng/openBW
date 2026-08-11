@@ -43,6 +43,7 @@ import random
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from python_agent.agent_cli import add_standard_args, resolve_connection
 from python_agent.client import Client
 from python_agent.enums import (
     unit_type_name, order_name,
@@ -1621,10 +1622,10 @@ async def run(c: Client, interval_sec: float,
         await asyncio.sleep(interval_sec)
 
 
-async def main(api_key, host, port, interval_sec, worker_target,
+async def main(client_kwargs, interval_sec, worker_target,
                supply_slack, overlord_target,
                scout_radial, scout_zscan, base_target):
-    async with Client(api_key=api_key, host=host, port=port) as c:
+    async with Client(**client_kwargs) as c:
         await run(c, interval_sec, worker_target, supply_slack,
                   overlord_target,
                   scout_radial, scout_zscan, base_target)
@@ -1635,9 +1636,9 @@ def entrypoint() -> None:
         prog="python3 -m python_agent.agents.z_agent_v5",
         description=("Zerg counterpart of p_agent_v4 / t_agent_v4. "
                      "v3-derived infrastructure + Larva keepup flagship."))
-    p.add_argument("api_key")
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=6113)
+    # Standard --url / --api-key / --race + legacy positional / --host / --port.
+    # See python_agent/agent_cli.py for the launch-contract rationale.
+    add_standard_args(p)
     p.add_argument("--interval-sec", type=float, default=1.5)
     p.add_argument("--worker-target", type=int, default=32)
     p.add_argument("--supply-slack", type=int, default=6,
@@ -1648,8 +1649,12 @@ def entrypoint() -> None:
     p.add_argument("--scout-zscan", type=int, default=1)
     p.add_argument("--base-target", type=int, default=4)
     args = p.parse_args()
+    _, client_kwargs = resolve_connection(args)
+    # --race is accepted for the standard launch contract but z_v5 only
+    # plays Zerg; it's a no-op here. The launcher (Qt lobby) still passes
+    # it so every agent it invokes has the same CLI shape.
     try:
-        asyncio.run(main(args.api_key, args.host, args.port,
+        asyncio.run(main(client_kwargs,
                          args.interval_sec, args.worker_target,
                          args.supply_slack, args.overlord_target,
                          args.scout_radial, args.scout_zscan,

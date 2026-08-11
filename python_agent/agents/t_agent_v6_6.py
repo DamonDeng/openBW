@@ -261,6 +261,7 @@ import random
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from python_agent.agent_cli import add_standard_args, resolve_connection
 from python_agent.client import Client
 from python_agent.enums import (
     unit_type_name, order_name,
@@ -3512,15 +3513,11 @@ async def run(c: Client, interval_sec: float,
         await asyncio.sleep(interval_sec)
 
 
-async def main(api_key, host, port, url, interval_sec, worker_target,
+async def main(client_kwargs, interval_sec, worker_target,
                supply_slack, worker_train_min, pylon_target,
                scout_radial, scout_zscan, base_target,
                bunker_target, turret_target, defense_only,
                push_after_frames, opening_marine_target):
-    if url:
-        client_kwargs = {"api_key": api_key, "url": url}
-    else:
-        client_kwargs = {"api_key": api_key, "host": host, "port": port}
     async with Client(**client_kwargs) as c:
         await run(c, interval_sec, worker_target, supply_slack,
                   worker_train_min, pylon_target,
@@ -3537,12 +3534,9 @@ def entrypoint() -> None:
                     "unsieges so the arc can advance) + quorum-based "
                     "line-ready gate (60 %% of tanks near the "
                     "anchor is enough, not 100 %%).")
-    p.add_argument("api_key")
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=6113)
-    p.add_argument("--url", default=None,
-                   help="full wss://.../agent URL (overrides --host/--port); "
-                        "use this to connect through the simsc ALB")
+    # Standard --url / --api-key / --race + legacy positional / --host / --port.
+    # See python_agent/agent_cli.py for the launch-contract rationale.
+    add_standard_args(p)
     p.add_argument("--interval-sec", type=float, default=1.5)
     p.add_argument("--worker-target", type=int, default=40)
     p.add_argument("--supply-slack", type=int, default=8)
@@ -3581,8 +3575,12 @@ def entrypoint() -> None:
                         "expansion are all paused so minerals go "
                         "to Barracks + Marines. Default 6.")
     args = p.parse_args()
+    _, client_kwargs = resolve_connection(args)
+    # --race is accepted for the standard launch contract but t_v6_6 only
+    # plays Terran; it's a no-op here. The launcher (Qt lobby) still passes
+    # it so every agent it invokes has the same CLI shape.
     try:
-        asyncio.run(main(args.api_key, args.host, args.port, args.url,
+        asyncio.run(main(client_kwargs,
                          args.interval_sec, args.worker_target,
                          args.supply_slack, args.worker_train_min,
                          args.pylon_target,
