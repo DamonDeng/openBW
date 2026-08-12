@@ -42,8 +42,8 @@ AttachAgentDialog::AttachAgentDialog(AgentCatalog* catalog,
 	if (catalog_->rowCount() == 0) {
 		empty_hint_ = new QLabel(
 			tr("No agents found. Set the Agents directory in Settings "
-			   "and drop executable files there. See "
-			   "python_agent/agent_cli.py for the launch contract."),
+			   "and drop executable wrapper files there. See "
+			   "simsc_agents/README.md for the wrapper convention."),
 			this);
 		empty_hint_->setWordWrap(true);
 		empty_hint_->setEnabled(false);

@@ -5,8 +5,9 @@
 // no manifest, no per-agent metadata, no cache — filename is the label
 // the user sees.
 //
-// The launch contract every listed agent MUST honor is documented in
-// python_agent/agent_cli.py; the runtime side that actually spawns
+// The launch contract every listed wrapper MUST honor is documented in
+// simsc_agents/README.md (and its Python-side shared helper is in
+// python_agent/agent_cli.py). The runtime side that actually spawns
 // them is AgentSupervisor. AgentCatalog only enumerates.
 //
 // Rescan semantics: rescan() re-reads the directory synchronously.

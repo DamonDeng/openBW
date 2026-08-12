@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# simsc_agents wrapper for python_agent.agents.z_agent_v5 (Zerg).
+# See simsc_agents/README.md for the launch contract this honours.
+set -e
+cd "$(dirname "$0")/.."
+exec python3 -m python_agent.agents.z_agent_v5 "$@"

@@ -5,7 +5,7 @@ prelude: positional api_key + --host + --port (and sometimes --url).
 This module centralizes that so:
 
   * The Qt lobby (simsc_desktop) can rely on a uniform launch contract
-    across every agent it invokes -- the three flags --url / --api-key /
+    across every wrapper it invokes -- the three flags --url / --api-key /
     --race, nothing else.
   * Adding agent-specific flags stays local to the agent file; the
     boilerplate is a one-line call.
@@ -15,7 +15,7 @@ This module centralizes that so:
 
 The launch-contract standard the lobby speaks is:
 
-    <agent-executable> --url <base-ws-url> --api-key <key> --race <r>
+    <wrapper-file> --url <base-ws-url> --api-key <key> --race <r>
 
 where <base-ws-url> is the ws:// or wss:// URL WITHOUT the ?key= query
 string; the agent appends it from --api-key. --race is always concrete
@@ -23,6 +23,13 @@ string; the agent appends it from --api-key. --race is always concrete
 and the lobby resolves random slot races before the attach button is
 even clickable. Single-race agents are free to ignore --race entirely;
 the flag exists so every agent presents the same shape.
+
+The <wrapper-file> is a tiny executable file in simsc_agents/ that knows
+how to invoke its agent's real implementation with the same argv --
+usually a bash one-liner that runs `python3 -m python_agent.agents.<name>
+"$@"` from the repo root, but it can equally well be a `docker run`, a
+compiled binary, or anything else. See simsc_agents/README.md for the
+convention.
 
 Typical usage inside an agent's argparse setup:
 
